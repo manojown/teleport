@@ -287,8 +287,15 @@ func (t *proxySubsys) proxyToHost(
 	// Resolve the IP address to dial to because the hostname may not be
 	// DNS resolvable.
 	var serverAddr string
+	var useTunnel bool
 	if server != nil {
 		serverAddr = server.GetAddr()
+
+		// Check if server requested to be connected to over a reverse tunnel.
+		if server.GetUseTunnel() {
+			useTunnel = true
+			serverAddr = fmt.Sprintf("%v.%v", server.GetName(), t.clusterName)
+		}
 	} else {
 		if !specifiedPort {
 			t.port = strconv.Itoa(defaults.SSHServerListenPort)
@@ -310,6 +317,7 @@ func (t *proxySubsys) proxyToHost(
 		To:        toAddr,
 		UserAgent: t.agent,
 		Address:   t.host,
+		UseTunnel: useTunnel,
 	})
 	if err != nil {
 		return trace.Wrap(err)

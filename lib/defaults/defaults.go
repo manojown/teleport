@@ -232,6 +232,12 @@ const (
 )
 
 var (
+	// UpsertTunnelHeartbeatExpiry is how long until the resource is expired.
+	UpsertTunnelHeartbeatExpiry = 100 * time.Second
+
+	// UpsertTunnelHeartbeatTick is how often upsert ticks.
+	UpsertTunnelHeartbeatTick = 90 * time.Second
+
 	// ReverseTunnelAgentHeartbeatPeriod is the period between agent heartbeat messages
 	ReverseTunnelAgentHeartbeatPeriod = 5 * time.Second
 
