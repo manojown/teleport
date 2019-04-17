@@ -1408,7 +1408,6 @@ func (tc *TeleportClient) connectToProxy(ctx context.Context) (*ProxyClient, err
 	var err error
 
 	proxyPrincipal := tc.getProxySSHPrincipal()
-	proxyAddr := tc.Config.SSHProxyAddr
 	sshConfig := &ssh.ClientConfig{
 		User:            proxyPrincipal,
 		HostKeyCallback: tc.HostKeyCallback,
@@ -1419,7 +1418,7 @@ func (tc *TeleportClient) connectToProxy(ctx context.Context) (*ProxyClient, err
 		return &ProxyClient{
 			teleportClient:  tc,
 			Client:          sshClient,
-			proxyAddress:    proxyAddr,
+			proxyAddress:    tc.Config.SSHProxyAddr,
 			proxyPrincipal:  proxyPrincipal,
 			hostKeyCallback: sshConfig.HostKeyCallback,
 			authMethod:      m,
@@ -1428,14 +1427,14 @@ func (tc *TeleportClient) connectToProxy(ctx context.Context) (*ProxyClient, err
 			clientAddr:      tc.ClientAddr,
 		}
 	}
-	successMsg := fmt.Sprintf("Successful auth with proxy %v", proxyAddr)
+	successMsg := fmt.Sprintf("Successful auth with proxy %v", tc.Config.SSHProxyAddr)
 	// try to authenticate using every non interactive auth method we have:
 	for i, m := range tc.authMethods() {
-		log.Infof("Connecting proxy=%v login='%v' method=%d", proxyAddr, sshConfig.User, i)
+		log.Infof("Connecting proxy=%v login='%v' method=%d", tc.Config.SSHProxyAddr, sshConfig.User, i)
 		var sshClient *ssh.Client
 
 		sshConfig.Auth = []ssh.AuthMethod{m}
-		sshClient, err = ssh.Dial("tcp", proxyAddr, sshConfig)
+		sshClient, err = ssh.Dial("tcp", tc.Config.SSHProxyAddr, sshConfig)
 		if err != nil {
 			if utils.IsHandshakeFailedError(err) {
 				log.Warn(err)
@@ -1450,35 +1449,38 @@ func (tc *TeleportClient) connectToProxy(ctx context.Context) (*ProxyClient, err
 	// is disabled in configuration, or the user refused connecting to untrusted hosts
 	if tc.Config.SkipLocalAuth || tc.localAgent.UserRefusedHosts() {
 		if err == nil {
-			err = trace.BadParameter("failed to authenticate with proxy %v", proxyAddr)
+			err = trace.BadParameter("failed to authenticate with proxy %v", tc.Config.SSHProxyAddr)
 		}
 		return nil, trace.Wrap(err)
 	}
 	// if we get here, it means we failed to authenticate using stored keys
 	// and we need to ask for the login information
+	// Login reaches out to ping endpoint of the proxy
+	// and has a side effect of updating tc.Config.SSHProxyAddr
+	// and other parameters, that's why they are referenced directly below
 	key, err := tc.Login(ctx, true)
 	if err != nil {
 		// we need to communicate directly to user here,
 		// otherwise user will see endless loop with no explanation
 		if trace.IsTrustError(err) {
-			fmt.Printf("Refusing to connect to untrusted proxy %v without --insecure flag\n", proxyAddr)
+			fmt.Printf("Refusing to connect to untrusted proxy %v without --insecure flag\n", tc.Config.SSHProxyAddr)
 		}
 		return nil, trace.Wrap(err)
 	}
 	// Save profile to record proxy credentials
-	if err := tc.SaveProfile("", ProfileCreateNew); err != nil {
+	if err := tc.SaveProfile("", ProfileCreateNew|ProfileMakeCurrent); err != nil {
 		log.Warningf("Failed to save profile: %v", err)
 	}
 	authMethod, err := key.AsAuthMethod()
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-
 	// After successful login we have local agent updated with latest
 	// and greatest auth information, try it now
 	sshConfig.Auth = []ssh.AuthMethod{authMethod}
-	sshConfig.User = proxyPrincipal
-	sshClient, err := ssh.Dial("tcp", proxyAddr, sshConfig)
+	sshConfig.User = tc.getProxySSHPrincipal()
+	log.Infof("Connecting proxy=%v login='%v' using local agent.", tc.Config.SSHProxyAddr, sshConfig.User)
+	sshClient, err := ssh.Dial("tcp", tc.Config.SSHProxyAddr, sshConfig)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
