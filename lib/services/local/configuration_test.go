@@ -1,5 +1,5 @@
 /*
-Copyright 2017 Gravitational, Inc.
+Copyright 2017-2018 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,13 +20,17 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"time"
 
 	"github.com/gravitational/teleport/lib/backend"
-	"github.com/gravitational/teleport/lib/backend/boltbk"
+	"github.com/gravitational/teleport/lib/backend/dir"
+	"github.com/gravitational/teleport/lib/fixtures"
 	"github.com/gravitational/teleport/lib/services"
+	"github.com/gravitational/teleport/lib/services/suite"
 	"github.com/gravitational/teleport/lib/utils"
 
 	"gopkg.in/check.v1"
+	"gopkg.in/yaml.v2"
 )
 
 type ClusterConfigurationSuite struct {
@@ -50,7 +54,7 @@ func (s *ClusterConfigurationSuite) SetUpTest(c *check.C) {
 	s.tempDir, err = ioutil.TempDir("", "preference-test-")
 	c.Assert(err, check.IsNil)
 
-	s.bk, err = boltbk.New(backend.Params{"path": s.tempDir})
+	s.bk, err = dir.New(backend.Params{"path": s.tempDir})
 	c.Assert(err, check.IsNil)
 }
 
@@ -63,23 +67,18 @@ func (s *ClusterConfigurationSuite) TearDownTest(c *check.C) {
 	c.Assert(err, check.IsNil)
 }
 
-func (s *ClusterConfigurationSuite) TestCycle(c *check.C) {
-	caps := NewClusterConfigurationService(s.bk)
+func (s *ClusterConfigurationSuite) TestAuthPreference(c *check.C) {
+	suite := &suite.ServicesTestSuite{
+		ConfigS: NewClusterConfigurationService(s.bk),
+	}
+	suite.AuthPreference(c)
+}
 
-	ap, err := services.NewAuthPreference(services.AuthPreferenceSpecV2{
-		Type:         "local",
-		SecondFactor: "otp",
-	})
-	c.Assert(err, check.IsNil)
-
-	err = caps.SetAuthPreference(ap)
-	c.Assert(err, check.IsNil)
-
-	gotAP, err := caps.GetAuthPreference()
-	c.Assert(err, check.IsNil)
-
-	c.Assert(gotAP.GetType(), check.Equals, "local")
-	c.Assert(gotAP.GetSecondFactor(), check.Equals, "otp")
+func (s *ClusterConfigurationSuite) TestClusterConfig(c *check.C) {
+	suite := &suite.ServicesTestSuite{
+		ConfigS: NewClusterConfigurationService(s.bk),
+	}
+	suite.ClusterConfig(c)
 }
 
 func (s *ClusterConfigurationSuite) TestSessionRecording(c *check.C) {
@@ -99,4 +98,110 @@ func (s *ClusterConfigurationSuite) TestSessionRecording(c *check.C) {
 	clusterConfig.SetSessionRecording(services.RecordAtProxy)
 	recordingType = clusterConfig.GetSessionRecording()
 	c.Assert(recordingType, check.Equals, services.RecordAtProxy)
+}
+
+func (s *ClusterConfigurationSuite) TestAuditConfig(c *check.C) {
+	clusterConfig, err := services.NewClusterConfig(services.ClusterConfigSpecV3{})
+	c.Assert(err, check.IsNil)
+
+	// default is to record at the node
+	clusterConfig, err = services.NewClusterConfig(services.ClusterConfigSpecV3{})
+	c.Assert(err, check.IsNil)
+
+	cfg := clusterConfig.GetAuditConfig()
+	c.Assert(cfg, check.DeepEquals, services.AuditConfig{})
+
+	// update sessions to be recorded at the proxy and check again
+	in := services.AuditConfig{
+		Region:           "us-west-1",
+		Type:             "dynamodb",
+		AuditSessionsURI: "file:///home/log",
+		AuditTableName:   "audit_table_name",
+		AuditEventsURI:   []string{"dynamodb://audit_table_name", "file:///home/log"},
+	}
+	clusterConfig.SetAuditConfig(in)
+	out := clusterConfig.GetAuditConfig()
+	fixtures.DeepCompare(c, out, in)
+
+	config := `
+region: 'us-west-1'
+type: 'dynamodb'
+audit_sessions_uri: file:///home/log
+audit_table_name: audit_table_name
+audit_events_uri: ['dynamodb://audit_table_name', 'file:///home/log']
+`
+	var data map[string]interface{}
+	err = yaml.Unmarshal([]byte(config), &data)
+	c.Assert(err, check.IsNil)
+
+	out2, err := services.AuditConfigFromObject(data)
+	c.Assert(err, check.IsNil)
+	fixtures.DeepCompare(c, *out2, in)
+
+	config = `
+region: 'us-west-1'
+type: 'dir'
+audit_sessions_uri: file:///home/log
+audit_events_uri: 'dynamodb://audit_table_name'
+`
+	data = nil
+	err = yaml.Unmarshal([]byte(config), &data)
+	c.Assert(err, check.IsNil)
+
+	out2, err = services.AuditConfigFromObject(data)
+	c.Assert(err, check.IsNil)
+	fixtures.DeepCompare(c, *out2, services.AuditConfig{
+		Region:           "us-west-1",
+		Type:             "dir",
+		AuditSessionsURI: "file:///home/log",
+		AuditEventsURI:   []string{"dynamodb://audit_table_name"},
+	})
+}
+
+func (s *ClusterConfigurationSuite) TestClusterConfigMarshal(c *check.C) {
+	// signle audit_events uri value
+	clusterConfig, err := services.NewClusterConfig(services.ClusterConfigSpecV3{
+		ClientIdleTimeout:     services.NewDuration(17 * time.Second),
+		DisconnectExpiredCert: services.NewBool(true),
+		ClusterID:             "27",
+		SessionRecording:      services.RecordAtProxy,
+		Audit: services.AuditConfig{
+			Region:           "us-west-1",
+			Type:             "dynamodb",
+			AuditSessionsURI: "file:///home/log",
+			AuditTableName:   "audit_table_name",
+			AuditEventsURI:   []string{"dynamodb://audit_table_name"},
+		},
+	})
+	c.Assert(err, check.IsNil)
+
+	data, err := services.GetClusterConfigMarshaler().Marshal(clusterConfig)
+	c.Assert(err, check.IsNil)
+
+	out, err := services.GetClusterConfigMarshaler().Unmarshal(data)
+	c.Assert(err, check.IsNil)
+	fixtures.DeepCompare(c, clusterConfig, out)
+
+	// multiple events uri values
+	clusterConfig, err = services.NewClusterConfig(services.ClusterConfigSpecV3{
+		ClientIdleTimeout:     services.NewDuration(17 * time.Second),
+		DisconnectExpiredCert: services.NewBool(true),
+		ClusterID:             "27",
+		SessionRecording:      services.RecordAtProxy,
+		Audit: services.AuditConfig{
+			Region:           "us-west-1",
+			Type:             "dynamodb",
+			AuditSessionsURI: "file:///home/log",
+			AuditTableName:   "audit_table_name",
+			AuditEventsURI:   []string{"dynamodb://audit_table_name", "file:///home/test/log"},
+		},
+	})
+	c.Assert(err, check.IsNil)
+
+	data, err = services.GetClusterConfigMarshaler().Marshal(clusterConfig)
+	c.Assert(err, check.IsNil)
+
+	out, err = services.GetClusterConfigMarshaler().Unmarshal(data)
+	c.Assert(err, check.IsNil)
+	fixtures.DeepCompare(c, clusterConfig, out)
 }

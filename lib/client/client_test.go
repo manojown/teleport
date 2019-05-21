@@ -39,10 +39,12 @@ func (s *ClientTestSuite) TestHelperFunctions(c *check.C) {
 
 func (s *ClientTestSuite) SetUpSuite(c *check.C) {
 	// create the client:
-	client, err := NewClient(&Config{
-		ProxyHostPort: "localhost:3023",
-		KeysDir:       c.MkDir(),
-	})
+	config := &Config{
+		KeysDir: c.MkDir(),
+	}
+	err := config.ParseProxyHost("localhost")
+	c.Assert(err, check.IsNil)
+	client, err := NewClient(config)
 	c.Assert(err, check.IsNil)
 	c.Assert(client, check.NotNil)
 	s.client = client
@@ -85,7 +87,7 @@ func (s *ClientTestSuite) TestIdentityFileMaking(c *check.C) {
 	key.Pub = []byte("pub")
 
 	// test OpenSSH-compatible identity file creation:
-	err := MakeIdentityFile(keyFilePath, &key, IdentityFormatOpenSSH)
+	err := MakeIdentityFile(keyFilePath, &key, IdentityFormatOpenSSH, nil)
 	c.Assert(err, check.IsNil)
 
 	// key is OK:
@@ -100,7 +102,7 @@ func (s *ClientTestSuite) TestIdentityFileMaking(c *check.C) {
 
 	// test standard Teleport identity file creation:
 	keyFilePath = c.MkDir() + "file"
-	err = MakeIdentityFile(keyFilePath, &key, IdentityFormatFile)
+	err = MakeIdentityFile(keyFilePath, &key, IdentityFormatFile, nil)
 	c.Assert(err, check.IsNil)
 
 	// key+cert are OK:

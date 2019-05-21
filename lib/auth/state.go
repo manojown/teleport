@@ -1,16 +1,13 @@
 package auth
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/backend"
-	"github.com/gravitational/teleport/lib/backend/legacy"
-	"github.com/gravitational/teleport/lib/backend/legacy/dir"
-	"github.com/gravitational/teleport/lib/backend/lite"
+	"github.com/gravitational/teleport/lib/backend/dir"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/utils"
 
@@ -21,32 +18,24 @@ import (
 // it helps to manage rotation for certificate authorities
 // and keeps local process credentials - x509 and SSH certs and keys.
 type ProcessStorage struct {
-	backend.Backend
+	b backend.Backend
 }
 
 // NewProcessStorage returns a new instance of the process storage.
-func NewProcessStorage(ctx context.Context, path string) (*ProcessStorage, error) {
+func NewProcessStorage(path string) (*ProcessStorage, error) {
 	if path == "" {
 		return nil, trace.BadParameter("missing parameter path")
 	}
-	litebk, err := lite.NewWithConfig(ctx, lite.Config{Path: path, EventsOff: true})
+	backend, err := dir.New(backend.Params{"path": path})
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	// Import storage data
-	err = legacy.Import(ctx, litebk, func() (legacy.Exporter, error) {
-		return dir.New(legacy.Params{"path": path})
-	})
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	return &ProcessStorage{Backend: litebk}, nil
+	return &ProcessStorage{b: backend}, nil
 }
 
 // Close closes all resources used by process storage backend.
 func (p *ProcessStorage) Close() error {
-	return p.Backend.Close()
+	return p.b.Close()
 }
 
 const (
@@ -56,22 +45,19 @@ const (
 	// IdentityReplacement is a name for the identity crdentials that are
 	// replacing current identity credentials during CA rotation.
 	IdentityReplacement = "replacement"
-	// stateName is an internal resource object name
-	stateName = "state"
-	// statesPrefix is a key prefix for object states
-	statesPrefix = "states"
-	// idsPrefix is a key prefix for identities
-	idsPrefix = "ids"
 )
+
+// stateName is an internal resource object name
+const stateName = "state"
 
 // GetState reads rotation state from disk.
 func (p *ProcessStorage) GetState(role teleport.Role) (*StateV2, error) {
-	item, err := p.Get(context.TODO(), backend.Key(statesPrefix, strings.ToLower(role.String()), stateName))
+	data, err := p.b.GetVal([]string{"states", strings.ToLower(role.String())}, stateName)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 	var res StateV2
-	if err := utils.UnmarshalWithSchema(GetStateSchema(), &res, item.Value); err != nil {
+	if err := utils.UnmarshalWithSchema(GetStateSchema(), &res, data); err != nil {
 		return nil, trace.BadParameter(err.Error())
 	}
 	return &res, nil
@@ -82,15 +68,11 @@ func (p *ProcessStorage) CreateState(role teleport.Role, state StateV2) error {
 	if err := state.CheckAndSetDefaults(); err != nil {
 		return trace.Wrap(err)
 	}
-	value, err := json.Marshal(state)
+	data, err := json.Marshal(state)
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	item := backend.Item{
-		Key:   backend.Key(statesPrefix, strings.ToLower(role.String()), stateName),
-		Value: value,
-	}
-	_, err = p.Create(context.TODO(), item)
+	err = p.b.CreateVal([]string{"states", strings.ToLower(role.String())}, stateName, data, backend.Forever)
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -102,15 +84,11 @@ func (p *ProcessStorage) WriteState(role teleport.Role, state StateV2) error {
 	if err := state.CheckAndSetDefaults(); err != nil {
 		return trace.Wrap(err)
 	}
-	value, err := json.Marshal(state)
+	data, err := json.Marshal(state)
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	item := backend.Item{
-		Key:   backend.Key(statesPrefix, strings.ToLower(role.String()), stateName),
-		Value: value,
-	}
-	_, err = p.Put(context.TODO(), item)
+	err = p.b.UpsertVal([]string{"states", strings.ToLower(role.String())}, stateName, data, backend.Forever)
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -122,12 +100,12 @@ func (p *ProcessStorage) ReadIdentity(name string, role teleport.Role) (*Identit
 	if name == "" {
 		return nil, trace.BadParameter("missing parameter name")
 	}
-	item, err := p.Get(context.TODO(), backend.Key(idsPrefix, strings.ToLower(role.String()), name))
+	data, err := p.b.GetVal([]string{"ids", strings.ToLower(role.String())}, name)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 	var res IdentityV2
-	if err := utils.UnmarshalWithSchema(GetIdentitySchema(), &res, item.Value); err != nil {
+	if err := utils.UnmarshalWithSchema(GetIdentitySchema(), &res, data); err != nil {
 		return nil, trace.BadParameter(err.Error())
 	}
 	return ReadIdentityFromKeyPair(res.Spec.Key, res.Spec.SSHCert, res.Spec.TLSCert, res.Spec.TLSCACerts)
@@ -153,16 +131,11 @@ func (p *ProcessStorage) WriteIdentity(name string, id Identity) error {
 	if err := res.CheckAndSetDefaults(); err != nil {
 		return trace.Wrap(err)
 	}
-	value, err := json.Marshal(res)
+	data, err := json.Marshal(res)
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	item := backend.Item{
-		Key:   backend.Key(idsPrefix, strings.ToLower(id.ID.Role.String()), name),
-		Value: value,
-	}
-	_, err = p.Put(context.TODO(), item)
-	return trace.Wrap(err)
+	return p.b.UpsertVal([]string{"ids", strings.ToLower(id.ID.Role.String())}, name, data, backend.Forever)
 }
 
 // StateV2 is a local process state.

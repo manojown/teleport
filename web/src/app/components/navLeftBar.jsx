@@ -17,14 +17,13 @@ import React from 'react';
 import cfg from 'app/config';
 import * as UserFlux from 'app/flux/user';
 import * as AppStore from 'app/flux/app/appStore';
-import userActions from 'app/flux/user/actions';
+import { logout } from 'app/flux/user/actions';
 import { IndexLink } from 'react-router';
 import { UserIcon } from './icons.jsx';
 
-export default function NavLeftBar(props) {
-  const items = AppStore.getStore().getNavItems()
+export default function NavLeftBar(props) {    
+  const items = AppStore.getStore().getNavItems()  
   const name = UserFlux.getUser().getName();
-  console.log("called router",items);
   const $items = items.map((i, index)=>{
     var className = props.router.isActive(i.to) ? 'active' : '';
     return (
@@ -35,13 +34,7 @@ export default function NavLeftBar(props) {
       </li>
     );
   });
-  console.log("cfg.editCluster",cfg.routes.editCluster);
-  $items.push((
-    <li key={$items.length} title="edit cluster">
-      <IndexLink to={cfg.routes.editCluster}>
-        <i className="fas fa-edit" />
-      </IndexLink>
-    </li>));
+
   $items.push((
     <li key={$items.length} title="help">
       <a href={cfg.helpUrl} target="_blank">
@@ -49,10 +42,9 @@ export default function NavLeftBar(props) {
       </a>
     </li>));
 
-  
   $items.push((
     <li key={$items.length} title="logout">
-      <a href="#" onClick={userActions.logout} >
+      <a href="#" onClick={logout} >
         <i className="fa fa-sign-out" style={{marginRight: 0}}></i>
       </a>
     </li>

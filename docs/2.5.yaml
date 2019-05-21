@@ -22,12 +22,20 @@ extra:
     version: 2.5
 pages:
     - Documentation:
-        - QuickStart Guide: quickstart.md
+        - Introduction: intro.md
+        - Quick Start Guide: quickstart.md
         - Architecture: architecture.md
         - User Manual: user-manual.md
         - Admin Manual: admin-guide.md
         - FAQ: faq.md
     - Teleport Enterprise:
         - Introduction: enterprise.md
-        - SAML Authentication: saml.md
-        - OIDC Authentication: oidc.md
+        - Quick Start Guide: quickstart-enterprise.md
+        - RBAC: ssh_rbac.md
+        - Single sign-on (SSO): ssh_sso.md
+    - Guides:
+        - Okta: ssh_okta.md
+        - Active Directory (ADFS): ssh_adfs.md
+        - One Login: ssh_one_login.md
+        - OIDC: oidc.md
+        - Trusted Clusters: trustedclusters.md

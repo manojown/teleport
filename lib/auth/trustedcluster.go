@@ -12,13 +12,12 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
 */
 
 package auth
 
 import (
-	"crypto/tls"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -29,6 +28,7 @@ import (
 	"github.com/gravitational/teleport/lib/httplib"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/tlsca"
+	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/roundtrip"
 	"github.com/gravitational/trace"
@@ -149,6 +149,11 @@ func (a *AuthServer) UpsertTrustedCluster(trustedCluster services.TrustedCluster
 func (a *AuthServer) checkLocalRoles(roleMap services.RoleMap) error {
 	for _, mapping := range roleMap {
 		for _, localRole := range mapping.Local {
+			// expansion means dynamic mapping is in place,
+			// so local role is undefined
+			if utils.ContainsExpansion(localRole) {
+				continue
+			}
 			_, err := a.GetRole(localRole)
 			if err != nil {
 				if trace.IsNotFound(err) {
@@ -349,10 +354,10 @@ func (a *AuthServer) updateRemoteClusterStatus(remoteCluster services.RemoteClus
 }
 
 // GetRemoteClusters returns remote clusters with udpated statuses
-func (a *AuthServer) GetRemoteClusters() ([]services.RemoteCluster, error) {
+func (a *AuthServer) GetRemoteClusters(opts ...services.MarshalOption) ([]services.RemoteCluster, error) {
 	// To make sure remote cluster exists - to protect against random
 	// clusterName requests (e.g. when clusterName is set to local cluster name)
-	remoteClusters, err := a.Presence.GetRemoteClusters()
+	remoteClusters, err := a.Presence.GetRemoteClusters(opts...)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -408,21 +413,18 @@ func (a *AuthServer) validateTrustedCluster(validateRequest *ValidateTrustedClus
 		}
 	}
 
-	// export our certificate authority and return it to the cluster
+	// export local cluster certificate authority and return it to the cluster
 	validateResponse := ValidateTrustedClusterResponse{
 		CAs: []services.CertAuthority{},
 	}
 	for _, caType := range []services.CertAuthType{services.HostCA, services.UserCA} {
-		certAuthorities, err := a.GetCertAuthorities(caType, false)
+		certAuthority, err := a.GetCertAuthority(
+			services.CertAuthID{Type: caType, DomainName: domainName},
+			false, services.SkipValidation())
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
-
-		for _, certAuthority := range certAuthorities {
-			if certAuthority.GetClusterName() == domainName {
-				validateResponse.CAs = append(validateResponse.CAs, certAuthority)
-			}
-		}
+		validateResponse.CAs = append(validateResponse.CAs, certAuthority)
 	}
 
 	// log the local certificate authorities we are sending
@@ -441,10 +443,6 @@ func (a *AuthServer) validateTrustedClusterToken(token string) error {
 		return trace.AccessDenied("role does not match")
 	}
 
-	if !a.checkTokenTTL(token) {
-		return trace.AccessDenied("expired token")
-	}
-
 	return nil
 }
 
@@ -454,18 +452,24 @@ func (s *AuthServer) sendValidateRequestToProxy(host string, validateRequest *Va
 		Host:   host,
 	}
 
-	var opts []roundtrip.ClientParam
+	opts := []roundtrip.ClientParam{
+		roundtrip.SanitizerEnabled(true),
+	}
 
 	if lib.IsInsecureDevMode() {
 		log.Warn("The setting insecureSkipVerify is used to communicate with proxy. Make sure you intend to run Teleport in insecure mode!")
 
-		// get the default transport (so we can get the proxy from environment)
-		// but disable tls certificate checking.
+		// Get the default transport, this allows picking up proxy from the
+		// environment.
 		tr, ok := http.DefaultTransport.(*http.Transport)
 		if !ok {
 			return nil, trace.BadParameter("unable to get default transport")
 		}
-		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
+		// Disable certificate checking while in debug mode.
+		tlsConfig := utils.TLSConfig(s.cipherSuites)
+		tlsConfig.InsecureSkipVerify = true
+		tr.TLSClientConfig = tlsConfig
 
 		insecureWebClient := &http.Client{
 			Transport: tr,
@@ -483,7 +487,7 @@ func (s *AuthServer) sendValidateRequestToProxy(host string, validateRequest *Va
 		return nil, trace.Wrap(err)
 	}
 
-	out, err := httplib.ConvertResponse(clt.PostJSON(clt.Endpoint("webapi", "trustedclusters", "validate"), validateRequestRaw))
+	out, err := httplib.ConvertResponse(clt.PostJSON(context.TODO(), clt.Endpoint("webapi", "trustedclusters", "validate"), validateRequestRaw))
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}

@@ -3,7 +3,10 @@ kind: ConfigMap
 metadata:
   name: {{ template "teleport.fullname" . }}
   labels:
-{{ include "teleport.labels" . | indent 4 }}
+    heritage: {{ .Release.Service }}
+    release: {{ .Release.Name }}
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    app: {{ .Chart.Name }}
 data:
   teleport.yaml: |
 {{ toYaml .Values.config | indent 4 }}

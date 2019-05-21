@@ -6,8 +6,8 @@ of Linux administration.
 
 ## Installing
 
-To install Teleport using the official binaries from [Github releases](https://github.com/gravitational/teleport/releases)
-simply download the tarball and run:
+To install Teleport using the official binaries from [Teleport Downloads](https://github.com/gravitational/teleport/releases)
+section on our web site and run:
 
 ```
 $ tar -xzf teleport-binary-release.tar.gz
@@ -771,11 +771,6 @@ exec            | Remote command has been executed via SSH, like `tsh ssh root@n
 scp             | Remote file copy has been executed. The following fields will be logged: `{"path": "/path/to/file.txt", "len": 32344, "action": "read" }`
 resize          | Terminal has been resized.
 user.login      | A user logged into web UI or via tsh. The following fields will be logged: `{"user": "alice@example.com", "method": "local"}`.
-
-!!! tip "Note":
-    The commercial Teleport edition called "Teleport Enterprise" supports native
-    audit log exporting into external systems like Splunk, AlertLogic and others.
-    Take a look at [Teleport Enterprise](enterprise.md) section to learn more.
 
 ### Recorded Sessions
 

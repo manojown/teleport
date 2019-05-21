@@ -36,6 +36,7 @@ import (
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/limiter"
+	"github.com/gravitational/teleport/lib/pam"
 	"github.com/gravitational/teleport/lib/reversetunnel"
 	"github.com/gravitational/teleport/lib/services"
 	sess "github.com/gravitational/teleport/lib/session"
@@ -67,10 +68,16 @@ type SrvSuite struct {
 	proxyClient *auth.Client
 	nodeClient  *auth.Client
 	adminClient *auth.Client
+	testServer  *auth.TestAuthServer
 }
 
 // teleportTestUser is additional user used for tests
 const teleportTestUser = "teleport-test"
+
+// wildcardAllow is used in tests to allow access to all labels.
+var wildcardAllow = services.Labels{
+	services.Wildcard: []string{services.Wildcard},
+}
 
 var _ = Suite(&SrvSuite{})
 
@@ -96,7 +103,7 @@ func (s *SrvSuite) SetUpTest(c *C) {
 	})
 	c.Assert(err, IsNil)
 	s.server, err = authServer.NewTestTLSServer()
-	c.Assert(err, IsNil)
+	s.testServer = authServer
 
 	// create proxy client used in some tests
 	s.proxyClient, err = s.server.NewClient(auth.TestBuiltin(teleport.RoleProxy))
@@ -107,7 +114,7 @@ func (s *SrvSuite) SetUpTest(c *C) {
 	c.Assert(err, IsNil)
 
 	// set up SSH client using the user private key for signing
-	up, err := newUpack(s.user, []string{s.user}, s.adminClient)
+	up, err := s.newUpack(s.user, []string{s.user}, wildcardAllow)
 	c.Assert(err, IsNil)
 
 	// set up host private key and certificate
@@ -129,22 +136,33 @@ func (s *SrvSuite) SetUpTest(c *C) {
 	c.Assert(err, IsNil)
 
 	s.srvHostPort = fmt.Sprintf("%v:%v", s.server.ClusterName(), s.srvPort)
+	nodeDir := c.MkDir()
 	srv, err := New(
 		utils.NetAddr{AddrNetwork: "tcp", Addr: s.srvAddress},
 		s.server.ClusterName(),
 		[]ssh.Signer{s.signer},
 		s.nodeClient,
-		c.MkDir(),
-		nil,
+		nodeDir,
+		"",
 		utils.NetAddr{},
 		SetNamespace(defaults.Namespace),
 		SetAuditLog(s.nodeClient),
 		SetShell("/bin/sh"),
 		SetSessionServer(s.nodeClient),
+		SetPAMConfig(&pam.Config{Enabled: false}),
+		SetLabels(
+			map[string]string{"foo": "bar"},
+			services.CommandLabels{
+				"baz": &services.CommandLabelV2{
+					Period:  services.NewDuration(time.Millisecond),
+					Command: []string{"expr", "1", "+", "3"}},
+			},
+		),
 	)
 	c.Assert(err, IsNil)
 	s.srv = srv
 	s.srv.isTestStub = true
+	c.Assert(auth.CreateUploaderDir(nodeDir), IsNil)
 
 	c.Assert(s.srv.Start(), IsNil)
 	c.Assert(s.srv.registerServer(), IsNil)
@@ -158,8 +176,9 @@ func (s *SrvSuite) SetUpTest(c *C) {
 	c.Assert(keyring.Add(addedKey), IsNil)
 	s.up = up
 	sshConfig := &ssh.ClientConfig{
-		User: s.user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		User:            s.user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 
 	client, err := ssh.Dial("tcp", s.srv.Addr(), sshConfig)
@@ -183,9 +202,9 @@ func (s *SrvSuite) TearDownTest(c *C) {
 
 func (s *SrvSuite) TestAdvertiseAddr(c *C) {
 	c.Assert(strings.Index(s.srv.AdvertiseAddr(), "127.0.0.1:"), Equals, 0)
-	s.srv.setAdvertiseIP(net.ParseIP("10.10.10.1"))
+	s.srv.setAdvertiseIP("10.10.10.1")
 	c.Assert(strings.Index(s.srv.AdvertiseAddr(), "10.10.10.1:"), Equals, 0)
-	s.srv.setAdvertiseIP(nil)
+	s.srv.setAdvertiseIP("")
 }
 
 // TestAgentForwardPermission makes sure if RBAC rules don't allow agent
@@ -196,7 +215,7 @@ func (s *SrvSuite) TestAgentForwardPermission(c *C) {
 	role, err := s.server.Auth().GetRole(roleName)
 	c.Assert(err, IsNil)
 	roleOptions := role.GetOptions()
-	roleOptions.Set(services.ForwardAgent, false)
+	roleOptions.ForwardAgent = services.NewBool(false)
 	role.SetOptions(roleOptions)
 	err = s.server.Auth().UpsertRole(role, backend.Forever)
 	c.Assert(err, IsNil)
@@ -222,7 +241,7 @@ func (s *SrvSuite) TestAgentForward(c *C) {
 	role, err := s.server.Auth().GetRole(roleName)
 	c.Assert(err, IsNil)
 	roleOptions := role.GetOptions()
-	roleOptions.Set(services.ForwardAgent, true)
+	roleOptions.ForwardAgent = services.NewBool(true)
 	role.SetOptions(roleOptions)
 	err = s.server.Auth().UpsertRole(role, backend.Forever)
 	c.Assert(err, IsNil)
@@ -269,8 +288,9 @@ func (s *SrvSuite) TestAgentForward(c *C) {
 	c.Assert(err, IsNil)
 
 	sshConfig := &ssh.ClientConfig{
-		User: s.user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(signers...)},
+		User:            s.user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signers...)},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 
 	client, err := ssh.Dial("tcp", s.srv.Addr(), sshConfig)
@@ -291,12 +311,13 @@ func (s *SrvSuite) TestAgentForward(c *C) {
 }
 
 func (s *SrvSuite) TestAllowedUsers(c *C) {
-	up, err := newUpack(s.user, []string{s.user}, s.adminClient)
+	up, err := s.newUpack(s.user, []string{s.user}, wildcardAllow)
 	c.Assert(err, IsNil)
 
 	sshConfig := &ssh.ClientConfig{
-		User: s.user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		User:            s.user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 
 	client, err := ssh.Dial("tcp", s.srv.Addr(), sshConfig)
@@ -307,16 +328,63 @@ func (s *SrvSuite) TestAllowedUsers(c *C) {
 	c.Assert(client.Close(), IsNil)
 
 	// now remove OS user from valid principals
-	up, err = newUpack(s.user, []string{"otheruser"}, s.adminClient)
+	up, err = s.newUpack(s.user, []string{"otheruser"}, wildcardAllow)
 	c.Assert(err, IsNil)
 
 	sshConfig = &ssh.ClientConfig{
-		User: s.user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		User:            s.user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 
 	client, err = ssh.Dial("tcp", s.srv.Addr(), sshConfig)
 	c.Assert(err, NotNil)
+}
+
+func (s *SrvSuite) TestAllowedLabels(c *C) {
+	var tests = []struct {
+		inLabelMap services.Labels
+		outError   bool
+	}{
+		// Valid static label.
+		{
+			inLabelMap: services.Labels{"foo": []string{"bar"}},
+			outError:   false,
+		},
+		// Invalid static label.
+		{
+			inLabelMap: services.Labels{"foo": []string{"baz"}},
+			outError:   true,
+		},
+		// Valid dynamic label.
+		{
+			inLabelMap: services.Labels{"baz": []string{"4"}},
+			outError:   false,
+		},
+		// Invalid dynamic label.
+		{
+			inLabelMap: services.Labels{"baz": []string{"5"}},
+			outError:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		up, err := s.newUpack(s.user, []string{s.user}, tt.inLabelMap)
+		c.Assert(err, IsNil)
+
+		sshConfig := &ssh.ClientConfig{
+			User:            s.user,
+			Auth:            []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+			HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
+		}
+
+		_, err = ssh.Dial("tcp", s.srv.Addr(), sshConfig)
+		if tt.outError {
+			c.Assert(err, NotNil)
+		} else {
+			c.Assert(err, IsNil)
+		}
+	}
 }
 
 func (s *SrvSuite) TestInvalidSessionID(c *C) {
@@ -337,13 +405,14 @@ func (s *SrvSuite) TestSessionHijack(c *C) {
 	}
 
 	// user 1 has access to the server
-	up, err := newUpack(s.user, []string{s.user}, s.adminClient)
+	up, err := s.newUpack(s.user, []string{s.user}, wildcardAllow)
 	c.Assert(err, IsNil)
 
 	// login with first user
 	sshConfig := &ssh.ClientConfig{
-		User: s.user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		User:            s.user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 
 	client, err := ssh.Dial("tcp", s.srv.Addr(), sshConfig)
@@ -365,12 +434,13 @@ func (s *SrvSuite) TestSessionHijack(c *C) {
 	c.Assert(err, IsNil)
 
 	// user 2 does not have s.user as a listed principal
-	up2, err := newUpack(teleportTestUser, []string{teleportTestUser}, s.adminClient)
+	up2, err := s.newUpack(teleportTestUser, []string{teleportTestUser}, wildcardAllow)
 	c.Assert(err, IsNil)
 
 	sshConfig2 := &ssh.ClientConfig{
-		User: teleportTestUser,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(up2.certSigner)},
+		User:            teleportTestUser,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(up2.certSigner)},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 
 	client2, err := ssh.Dial("tcp", s.srv.Addr(), sshConfig2)
@@ -471,6 +541,7 @@ func (s *SrvSuite) TestProxyReverseTunnel(c *C) {
 		LocalAccessPoint:      s.proxyClient,
 		NewCachingAccessPoint: state.NoCache,
 		DirectClusters:        []reversetunnel.DirectCluster{{Name: s.server.ClusterName(), Client: s.proxyClient}},
+		DataDir:               c.MkDir(),
 	})
 	c.Assert(err, IsNil)
 	c.Assert(reverseTunnelServer.Start(), IsNil)
@@ -481,18 +552,19 @@ func (s *SrvSuite) TestProxyReverseTunnel(c *C) {
 		[]ssh.Signer{s.signer},
 		s.proxyClient,
 		c.MkDir(),
-		nil,
+		"",
 		utils.NetAddr{},
 		SetProxyMode(reverseTunnelServer),
 		SetSessionServer(s.proxyClient),
 		SetAuditLog(s.nodeClient),
 		SetNamespace(defaults.Namespace),
+		SetPAMConfig(&pam.Config{Enabled: false}),
 	)
 	c.Assert(err, IsNil)
 	c.Assert(proxy.Start(), IsNil)
 
 	// set up SSH client using the user private key for signing
-	up, err := newUpack(s.user, []string{s.user}, s.adminClient)
+	up, err := s.newUpack(s.user, []string{s.user}, wildcardAllow)
 	c.Assert(err, IsNil)
 
 	agentPool, err := reversetunnel.NewAgentPool(reversetunnel.AgentPoolConfig{
@@ -533,11 +605,12 @@ func (s *SrvSuite) TestProxyReverseTunnel(c *C) {
 	}
 
 	sshConfig := &ssh.ClientConfig{
-		User: s.user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		User:            s.user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 
-	_, err = newUpack("user1", []string{s.user}, s.adminClient)
+	_, err = s.newUpack("user1", []string{s.user}, wildcardAllow)
 	c.Assert(err, IsNil)
 
 	s.testClient(c, proxy.Addr(), s.srvAddress, s.srv.Addr(), sshConfig)
@@ -551,7 +624,7 @@ func (s *SrvSuite) TestProxyReverseTunnel(c *C) {
 		[]ssh.Signer{s.signer},
 		s.nodeClient,
 		c.MkDir(),
-		nil,
+		"",
 		utils.NetAddr{},
 		SetShell("/bin/sh"),
 		SetLabels(
@@ -568,6 +641,7 @@ func (s *SrvSuite) TestProxyReverseTunnel(c *C) {
 		SetSessionServer(s.nodeClient),
 		SetAuditLog(s.nodeClient),
 		SetNamespace(defaults.Namespace),
+		SetPAMConfig(&pam.Config{Enabled: false}),
 	)
 	c.Assert(err, IsNil)
 	srv2.uuid = bobAddr
@@ -640,6 +714,7 @@ func (s *SrvSuite) TestProxyRoundRobin(c *C) {
 		LocalAccessPoint:      s.proxyClient,
 		NewCachingAccessPoint: state.NoCache,
 		DirectClusters:        []reversetunnel.DirectCluster{{Name: s.server.ClusterName(), Client: s.proxyClient}},
+		DataDir:               c.MkDir(),
 	})
 	c.Assert(err, IsNil)
 
@@ -651,18 +726,19 @@ func (s *SrvSuite) TestProxyRoundRobin(c *C) {
 		[]ssh.Signer{s.signer},
 		s.proxyClient,
 		c.MkDir(),
-		nil,
+		"",
 		utils.NetAddr{},
 		SetProxyMode(reverseTunnelServer),
 		SetSessionServer(s.proxyClient),
 		SetAuditLog(s.nodeClient),
 		SetNamespace(defaults.Namespace),
+		SetPAMConfig(&pam.Config{Enabled: false}),
 	)
 	c.Assert(err, IsNil)
 	c.Assert(proxy.Start(), IsNil)
 
 	// set up SSH client using the user private key for signing
-	up, err := newUpack(s.user, []string{s.user}, s.adminClient)
+	up, err := s.newUpack(s.user, []string{s.user}, wildcardAllow)
 	c.Assert(err, IsNil)
 
 	// start agent and load balance requests
@@ -705,11 +781,12 @@ func (s *SrvSuite) TestProxyRoundRobin(c *C) {
 	}
 
 	sshConfig := &ssh.ClientConfig{
-		User: s.user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		User:            s.user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 
-	_, err = newUpack("user1", []string{s.user}, s.adminClient)
+	_, err = s.newUpack("user1", []string{s.user}, wildcardAllow)
 	c.Assert(err, IsNil)
 
 	for i := 0; i < 3; i++ {
@@ -740,6 +817,7 @@ func (s *SrvSuite) TestProxyDirectAccess(c *C) {
 		LocalAccessPoint:      s.proxyClient,
 		NewCachingAccessPoint: state.NoCache,
 		DirectClusters:        []reversetunnel.DirectCluster{{Name: s.server.ClusterName(), Client: s.proxyClient}},
+		DataDir:               c.MkDir(),
 	})
 	c.Assert(err, IsNil)
 
@@ -749,26 +827,28 @@ func (s *SrvSuite) TestProxyDirectAccess(c *C) {
 		[]ssh.Signer{s.signer},
 		s.proxyClient,
 		c.MkDir(),
-		nil,
+		"",
 		utils.NetAddr{},
 		SetProxyMode(reverseTunnelServer),
 		SetSessionServer(s.proxyClient),
 		SetAuditLog(s.nodeClient),
 		SetNamespace(defaults.Namespace),
+		SetPAMConfig(&pam.Config{Enabled: false}),
 	)
 	c.Assert(err, IsNil)
 	c.Assert(proxy.Start(), IsNil)
 
 	// set up SSH client using the user private key for signing
-	up, err := newUpack(s.user, []string{s.user}, s.adminClient)
+	up, err := s.newUpack(s.user, []string{s.user}, wildcardAllow)
 	c.Assert(err, IsNil)
 
 	sshConfig := &ssh.ClientConfig{
-		User: s.user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		User:            s.user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(up.certSigner)},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 
-	_, err = newUpack("user1", []string{s.user}, s.adminClient)
+	_, err = s.newUpack("user1", []string{s.user}, wildcardAllow)
 	c.Assert(err, IsNil)
 
 	s.testClient(c, proxy.Addr(), s.srvAddress, s.srv.Addr(), sshConfig)
@@ -804,15 +884,19 @@ func (s *SrvSuite) TestNoAuth(c *C) {
 
 // TestPasswordAuth tries to log in with empty pass and should be rejected
 func (s *SrvSuite) TestPasswordAuth(c *C) {
-	config := &ssh.ClientConfig{Auth: []ssh.AuthMethod{ssh.Password("")}}
+	config := &ssh.ClientConfig{
+		Auth:            []ssh.AuthMethod{ssh.Password("")},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
+	}
 	_, err := ssh.Dial("tcp", s.srv.Addr(), config)
 	c.Assert(err, NotNil)
 }
 
 func (s *SrvSuite) TestClientDisconnect(c *C) {
 	config := &ssh.ClientConfig{
-		User: s.user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(s.up.certSigner)},
+		User:            s.user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(s.up.certSigner)},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 	clt, err := ssh.Dial("tcp", s.srv.Addr(), config)
 	c.Assert(clt, NotNil)
@@ -845,29 +929,34 @@ func (s *SrvSuite) TestLimiter(c *C) {
 	c.Assert(err, IsNil)
 
 	srvAddress := "127.0.0.1:" + s.freePorts.Pop()
+	nodeStateDir := c.MkDir()
 	srv, err := New(
 		utils.NetAddr{AddrNetwork: "tcp", Addr: srvAddress},
 		s.server.ClusterName(),
 		[]ssh.Signer{s.signer},
 		s.nodeClient,
-		c.MkDir(),
-		nil,
+		nodeStateDir,
+		"",
 		utils.NetAddr{},
 		SetLimiter(limiter),
 		SetShell("/bin/sh"),
 		SetSessionServer(s.nodeClient),
 		SetAuditLog(s.nodeClient),
 		SetNamespace(defaults.Namespace),
+		SetPAMConfig(&pam.Config{Enabled: false}),
 	)
 	c.Assert(err, IsNil)
 	c.Assert(srv.Start(), IsNil)
+
+	c.Assert(auth.CreateUploaderDir(nodeStateDir), IsNil)
 	defer srv.Close()
 
 	// maxConnection = 3
 	// current connections = 1 (one connection is opened from SetUpTest)
 	config := &ssh.ClientConfig{
-		User: s.user,
-		Auth: []ssh.AuthMethod{ssh.PublicKeys(s.up.certSigner)},
+		User:            s.user,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(s.up.certSigner)},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 
 	clt0, err := ssh.Dial("tcp", srv.Addr(), config)
@@ -992,8 +1081,9 @@ type upack struct {
 	certSigner ssh.Signer
 }
 
-func newUpack(username string, allowedLogins []string, a auth.ClientI) (*upack, error) {
-	upriv, upub, err := a.GenerateKeyPair("")
+func (s *SrvSuite) newUpack(username string, allowedLogins []string, allowedLabels services.Labels) (*upack, error) {
+	auth := s.server.Auth()
+	upriv, upub, err := auth.GenerateKeyPair("")
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -1006,17 +1096,17 @@ func newUpack(username string, allowedLogins []string, a auth.ClientI) (*upack, 
 	rules = append(rules, services.NewRule(services.Wildcard, services.RW()))
 	role.SetRules(services.Allow, rules)
 	role.SetLogins(services.Allow, allowedLogins)
-	err = a.UpsertRole(role, backend.Forever)
+	role.SetNodeLabels(services.Allow, allowedLabels)
+	err = auth.UpsertRole(role, backend.Forever)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 	user.AddRole(role.GetName())
-	err = a.UpsertUser(user)
+	err = auth.UpsertUser(user)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-
-	ucert, err := a.GenerateUserCert(upub, user.GetName(), 5*time.Minute, teleport.CertificateFormatStandard)
+	ucert, err := s.testServer.GenerateUserCert(upub, user.GetName(), 5*time.Minute, teleport.CertificateFormatStandard)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}

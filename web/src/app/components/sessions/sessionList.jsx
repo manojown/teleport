@@ -20,7 +20,7 @@ import moment from 'moment';
 import InputSearch from './../inputSearch.jsx';
 import { isMatch } from 'app/lib/objectUtils';
 import { actions } from 'app/flux/storedSessionsFilter';
-import { Table, Column, Cell, SortHeaderCell, SortTypes, EmptyIndicator } from 'app/components/table/table.jsx';
+import { Table, Column, Cell, SortHeaderCell, SortTypes, EmptyIndicator } from 'app/components/table.jsx';
 import { SessionIdCell, NodeCell, UsersCell, DateCreatedCell, DurationCell } from './listItems';
 import DateRangePicker from './../datePicker';
 import ClusterSelector from './../clusterSelector.jsx';
@@ -33,18 +33,18 @@ class SessionList extends React.Component {
   _mounted = false;
 
   constructor(props) {
-    super(props);
-
+    super(props);    
+        
     if (props.storage) {
       this.state = props.storage.findByKey('SessionList')
     }
 
     if (!this.state) {
-      this.state = { searchValue: '', colSortDirs: {created: 'ASC'}};
-    }
+      this.state = { searchValue: '', colSortDirs: {created: 'ASC'}};  
+    }    
   }
 
-  componentDidMount() {
+  componentDidMount() { 
     this._mounted = true;
   }
 
@@ -75,7 +75,7 @@ class SessionList extends React.Component {
     }
   }
 
-  searchAndFilterCb(targetValue, searchValue, propName){
+  searchAndFilterCb(targetValue, searchValue, propName){    
     if (propName === 'parties') {
       targetValue = targetValue || [];
       return targetValue.join('').toLocaleUpperCase().indexOf(searchValue) !== -1;
@@ -102,7 +102,7 @@ class SessionList extends React.Component {
   render() {
     const { filter, storedSessions, activeSessions } = this.props;
     const { start, end } = filter;
-    const canJoin = cfg.canJoinSessions;
+    const canJoin = cfg.canJoinSessions;    
     const searchValue = this.state.searchValue;
 
     let stored = storedSessions.filter(
@@ -110,50 +110,48 @@ class SessionList extends React.Component {
 
     let active = activeSessions
       .filter( item => item.parties.length > 0)
-      .filter( item => moment(item.created).isBetween(start, end));
+      .filter( item => moment(item.created).isBetween(start, end));    
 
     stored = this.sortAndFilter(stored);
     active = this.sortAndFilter(active);
-
-    // always display active sessions first
-    const data = [...active, ...stored];
+    
+    // always display active sessions first    
+    const data = [...active, ...stored];  
     return (
       <div className="grv-sessions-stored m-t">
         <div className="grv-header">
           <div className="grv-flex m-b-md" style={{ justifyContent: "space-between" }}>
-            <div className="grv-flex">
-              <h2 className="text-center"> Sessions </h2>
-            </div>
-            <div className="grv-flex">
+            <div className="grv-flex">  
+              <h2 className="text-center"> Sessions </h2>            
+            </div>            
+            <div className="grv-flex">              
               <ClusterSelector/>
               <InputSearch autoFocus={true} value={searchValue} onChange={this.onSearchChange} />
               <div className="m-l-sm">
                 <DateRangePicker startDate={start} endDate={end} onChange={this.onRangePickerChange} />
               </div>
             </div>
-          </div>
+          </div>                  
         </div>
         <div className="grv-content">
-          {data.length === 0 ? <EmptyIndicator text="No matching sessions found"/> :
-            <Table
-              data={data}
-              rowCount={data.length}>
+          {data.length === 0 ? <EmptyIndicator text="No matching sessions found"/> :            
+            <Table rowCount={data.length}>
               <Column
                 header={<Cell className="grv-sessions-col-sid"> Session ID </Cell> }
                 cell={
-                  <SessionIdCell canJoin={canJoin}  container={this} />
+                  <SessionIdCell canJoin={canJoin} data={data} container={this} />
                 }
-              />
+              />                                
               <Column
                 header={<Cell> User </Cell> }
-                cell={<UsersCell /> }
+                cell={<UsersCell data={data}/> }
               />
               <Column
                 columnKey="nodeIp"
                 header={
                   <Cell className="grv-sessions-stored-col-ip">Node</Cell>
                 }
-                cell={<NodeCell /> }
+                cell={<NodeCell data={data} /> }
               />
               <Column
                 columnKey="created"
@@ -164,7 +162,7 @@ class SessionList extends React.Component {
                     title="Created (UTC)"
                   />
                 }
-                cell={<DateCreatedCell /> }
+                cell={<DateCreatedCell data={data}/> }
               />
               <Column
                 columnKey="duration"
@@ -175,9 +173,9 @@ class SessionList extends React.Component {
                     title="Duration"
                   />
                 }
-                cell={<DurationCell /> }
-              />
-            </Table>
+                cell={<DurationCell data={data} /> }
+              />                
+            </Table>            
           }
         </div>
       </div>

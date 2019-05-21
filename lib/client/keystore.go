@@ -27,7 +27,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -88,6 +87,9 @@ type LocalKeyStore interface {
 
 	// GetCerts gets trusted TLS certificates of certificate authorities.
 	GetCerts(proxy string) (*x509.CertPool, error)
+
+	// GetCertsPEM gets trusted TLS certificates of certificate authorities.
+	GetCertsPEM(proxy string) ([]byte, error)
 }
 
 // FSLocalKeyStore implements LocalKeyStore interface using the filesystem.
@@ -137,7 +139,7 @@ func NewFSLocalKeyStore(dirPath string) (s *FSLocalKeyStore, err error) {
 // AddKey adds a new key to the session store. If a key for the host is already
 // stored, overwrites it.
 func (fs *FSLocalKeyStore) AddKey(host, username string, key *Key) error {
-	dirPath, err := fs.dirFor(host)
+	dirPath, err := fs.dirFor(host, true)
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -166,7 +168,7 @@ func (fs *FSLocalKeyStore) AddKey(host, username string, key *Key) error {
 
 // DeleteKey deletes a key from the local store
 func (fs *FSLocalKeyStore) DeleteKey(host string, username string) error {
-	dirPath, err := fs.dirFor(host)
+	dirPath, err := fs.dirFor(host, false)
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -199,7 +201,7 @@ func (fs *FSLocalKeyStore) DeleteKeys() error {
 // GetKey returns a key for a given host. If the key is not found,
 // returns trace.NotFound error.
 func (fs *FSLocalKeyStore) GetKey(proxyHost string, username string) (*Key, error) {
-	dirPath, err := fs.dirFor(proxyHost)
+	dirPath, err := fs.dirFor(proxyHost, false)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -233,7 +235,6 @@ func (fs *FSLocalKeyStore) GetKey(proxyHost string, username string) (*Key, erro
 
 	key := &Key{Pub: pub, Priv: priv, Cert: cert, ProxyHost: proxyHost, TLSCert: tlsCert}
 
-	// expired certificate? this key won't be accepted anymore, lets delete it:
 	certExpiration, err := key.CertValidBefore()
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -242,18 +243,19 @@ func (fs *FSLocalKeyStore) GetKey(proxyHost string, username string) (*Key, erro
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	fs.log.Debugf("Returning certificate %q valid until %q,  TLS certificate %q valid until %q", certFile, certExpiration, tlsCertFile, tlsCertExpiration)
-	if certExpiration.Before(time.Now()) || tlsCertExpiration.Before(time.Now()) {
-		fs.log.Infof("TTL expired (%v) or (%v)  for session key %v", certExpiration, tlsCertExpiration, dirPath)
-		os.RemoveAll(dirPath)
-		return nil, trace.NotFound("session keys for %s are not found", proxyHost)
-	}
+
+	// TODO(russjones): Note, we may be returning expired certificates here, that
+	// is okay. If the certificates is expired, it's the responsibility of the
+	// TeleportClient to perform cleanup of the certificates and the profile.
+	fs.log.Debugf("Returning SSH certificate %q valid until %q, TLS certificate %q valid until %q",
+		certFile, certExpiration, tlsCertFile, tlsCertExpiration)
+
 	return key, nil
 }
 
 // SaveCerts saves trusted TLS certificates of certificate authorities
 func (fs *FSLocalKeyStore) SaveCerts(proxy string, cas []auth.TrustedCerts) error {
-	dir, err := fs.dirFor(proxy)
+	dir, err := fs.dirFor(proxy, true)
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -278,9 +280,18 @@ func (fs *FSLocalKeyStore) SaveCerts(proxy string, cas []auth.TrustedCerts) erro
 	return nil
 }
 
+// GetCertsPEM returns trusted TLS certificates of certificate authorities PEM block
+func (fs *FSLocalKeyStore) GetCertsPEM(proxy string) ([]byte, error) {
+	dir, err := fs.dirFor(proxy, false)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	return ioutil.ReadFile(filepath.Join(dir, fileNameTLSCerts))
+}
+
 // GetCerts returns trusted TLS certificates of certificate authorities
 func (fs *FSLocalKeyStore) GetCerts(proxy string) (*x509.CertPool, error) {
-	dir, err := fs.dirFor(proxy)
+	dir, err := fs.dirFor(proxy, false)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -390,16 +401,22 @@ func (fs *FSLocalKeyStore) GetKnownHostKeys(hostname string) ([]ssh.PublicKey, e
 	return retval, nil
 }
 
-// dirFor is a helper function. It returns a directory where session keys
-// for a given host are stored. fs.KeyDir is typically "~/.tsh", sessionKeyDir
-// is typically "keys", and proxyHost is typically something like
-// "proxy.example.com".
-func (fs *FSLocalKeyStore) dirFor(proxyHost string) (string, error) {
+// dirFor returns the path to the session keys for a given host. The value
+// for fs.KeyDir is typically "~/.tsh", sessionKeyDir is typically "keys",
+// and proxyHost typically has values like "proxy.example.com".
+//
+// If the create flag is true, the directory will be created if it does
+// not exist.
+func (fs *FSLocalKeyStore) dirFor(proxyHost string, create bool) (string, error) {
 	dirPath := filepath.Join(fs.KeyDir, sessionKeyDir, proxyHost)
-	if err := os.MkdirAll(dirPath, profileDirPerms); err != nil {
-		fs.log.Error(err)
-		return "", trace.Wrap(err)
+
+	if create {
+		if err := os.MkdirAll(dirPath, profileDirPerms); err != nil {
+			fs.log.Error(err)
+			return "", trace.Wrap(err)
+		}
 	}
+
 	return dirPath, nil
 }
 

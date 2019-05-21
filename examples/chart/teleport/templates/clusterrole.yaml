@@ -4,14 +4,26 @@ kind: ClusterRole
 metadata:
   name: {{ template "teleport.fullname" . }}
   labels:
-{{ include "teleport.labels" . | indent 4 }}
+    app: {{ template "teleport.name" . }}
+    chart: {{ template "teleport.chart" . }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
 rules:
 - apiGroups:
-  - ""
+  - certificates.k8s.io
   resources:
-  - users
-  - groups
-  - serviceaccounts
+  - certificatesigningrequests
   verbs:
-  - impersonate
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - certificates.k8s.io
+  resources:
+  - certificatesigningrequests/approval
+  - certificatesigningrequests/status
+  verbs:
+   - update
 {{- end -}}

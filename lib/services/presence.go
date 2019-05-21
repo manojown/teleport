@@ -23,22 +23,25 @@ import (
 // Presence records and reports the presence of all components
 // of the cluster - Nodes, Proxies and SSH nodes
 type Presence interface {
-
 	// UpsertLocalClusterName upserts local domain
 	UpsertLocalClusterName(name string) error
 
 	// GetLocalClusterName upserts local domain
 	GetLocalClusterName() (string, error)
 
-	// GetNodes returns a list of registered servers
-	GetNodes(namespace string) ([]Server, error)
+	// GetNodes returns a list of registered servers. Schema validation can be
+	// skipped to improve performance.
+	GetNodes(namespace string, opts ...MarshalOption) ([]Server, error)
 
-	// DeleteAllNodes deletes all nodes in a namespace
+	// DeleteAllNodes deletes all nodes in a namespace.
 	DeleteAllNodes(namespace string) error
 
-	// UpsertNode registers node presence, permanently if ttl is 0 or
-	// for the specified duration with second resolution if it's >= 1 second
+	// UpsertNode registers node presence, permanently if TTL is 0 or for the
+	// specified duration with second resolution if it's >= 1 second.
 	UpsertNode(server Server) error
+
+	// UpsertNodes bulk inserts nodes.
+	UpsertNodes(namespace string, servers []Server) error
 
 	// GetAuthServers returns a list of registered servers
 	GetAuthServers() ([]Server, error)
@@ -103,10 +106,10 @@ type Presence interface {
 	UpsertTunnelConnection(TunnelConnection) error
 
 	// GetTunnelConnections returns tunnel connections for a given cluster
-	GetTunnelConnections(clusterName string) ([]TunnelConnection, error)
+	GetTunnelConnections(clusterName string, opts ...MarshalOption) ([]TunnelConnection, error)
 
 	// GetAllTunnelConnections returns all tunnel connections
-	GetAllTunnelConnections() ([]TunnelConnection, error)
+	GetAllTunnelConnections(opts ...MarshalOption) ([]TunnelConnection, error)
 
 	// DeleteTunnelConnection deletes tunnel connection by name
 	DeleteTunnelConnection(clusterName string, connName string) error
@@ -121,7 +124,7 @@ type Presence interface {
 	CreateRemoteCluster(RemoteCluster) error
 
 	// GetRemoteClusters returns a list of remote clusters
-	GetRemoteClusters() ([]RemoteCluster, error)
+	GetRemoteClusters(opts ...MarshalOption) ([]RemoteCluster, error)
 
 	// GetRemoteCluster returns a remote cluster by name
 	GetRemoteCluster(clusterName string) (RemoteCluster, error)

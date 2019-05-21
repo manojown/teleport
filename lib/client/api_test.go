@@ -17,9 +17,11 @@ limitations under the License.
 package client
 
 import (
-	"github.com/gravitational/teleport/lib/utils"
-	"gopkg.in/check.v1"
 	"testing"
+
+	"github.com/gravitational/teleport/lib/utils"
+
+	"gopkg.in/check.v1"
 )
 
 // register test suite
@@ -38,34 +40,45 @@ func (s *APITestSuite) SetUpSuite(c *check.C) {
 func (s *APITestSuite) TestConfig(c *check.C) {
 	var conf Config
 	c.Assert(conf.ProxySpecified(), check.Equals, false)
-	conf.ProxyHostPort = "example.org"
+	err := conf.ParseProxyHost("example.org")
+	c.Assert(err, check.IsNil)
 	c.Assert(conf.ProxySpecified(), check.Equals, true)
-	c.Assert(conf.ProxySSHHostPort(), check.Equals, "example.org:3023")
-	c.Assert(conf.ProxyWebHostPort(), check.Equals, "example.org:3080")
+	c.Assert(conf.SSHProxyAddr, check.Equals, "example.org:3023")
+	c.Assert(conf.WebProxyAddr, check.Equals, "example.org:3080")
 
-	conf.SetProxy("example.org", 100, 200)
-	c.Assert(conf.ProxyWebHostPort(), check.Equals, "example.org:100")
-	c.Assert(conf.ProxySSHHostPort(), check.Equals, "example.org:200")
+	conf.WebProxyAddr = "example.org:100"
+	conf.SSHProxyAddr = "example.org:200"
+	c.Assert(conf.WebProxyAddr, check.Equals, "example.org:100")
+	c.Assert(conf.SSHProxyAddr, check.Equals, "example.org:200")
 
-	conf.ProxyHostPort = "example.org:200"
-	c.Assert(conf.ProxyWebHostPort(), check.Equals, "example.org:200")
-	c.Assert(conf.ProxySSHHostPort(), check.Equals, "example.org:3023")
+	err = conf.ParseProxyHost("example.org:200")
+	c.Assert(err, check.IsNil)
+	c.Assert(conf.WebProxyAddr, check.Equals, "example.org:200")
+	c.Assert(conf.SSHProxyAddr, check.Equals, "example.org:3023")
 
-	conf.ProxyHostPort = "example.org:,200"
-	c.Assert(conf.ProxySSHHostPort(), check.Equals, "example.org:200")
-	c.Assert(conf.ProxyWebHostPort(), check.Equals, "example.org:3080")
+	err = conf.ParseProxyHost("example.org:,200")
+	c.Assert(err, check.IsNil)
+	c.Assert(conf.SSHProxyAddr, check.Equals, "example.org:200")
+	c.Assert(conf.WebProxyAddr, check.Equals, "example.org:3080")
+
+	conf.WebProxyAddr = "example.org:100"
+	conf.SSHProxyAddr = "example.org:200"
+	c.Assert(conf.WebProxyAddr, check.Equals, "example.org:100")
+	c.Assert(conf.SSHProxyAddr, check.Equals, "example.org:200")
 }
 
 func (s *APITestSuite) TestNew(c *check.C) {
 	conf := Config{
-		Host:          "localhost",
-		HostLogin:     "vincent",
-		HostPort:      22,
-		KeysDir:       "/tmp",
-		Username:      "localuser",
-		ProxyHostPort: "proxy",
-		SiteName:      "site",
+		Host:      "localhost",
+		HostLogin: "vincent",
+		HostPort:  22,
+		KeysDir:   "/tmp",
+		Username:  "localuser",
+		SiteName:  "site",
 	}
+	err := conf.ParseProxyHost("proxy")
+	c.Assert(err, check.IsNil)
+
 	tc, err := NewClient(&conf)
 	c.Assert(err, check.IsNil)
 	c.Assert(tc, check.NotNil)
@@ -99,23 +112,6 @@ func (s *APITestSuite) TestParseLabels(c *check.C) {
 	c.Assert(err, check.NotNil)
 }
 
-func (s *APITestSuite) TestSCPParsing(c *check.C) {
-	user, host, dest := parseSCPDestination("root@remote.host:/etc/nginx.conf")
-	c.Assert(user, check.Equals, "root")
-	c.Assert(host, check.Equals, "remote.host")
-	c.Assert(dest, check.Equals, "/etc/nginx.conf")
-
-	user, host, dest = parseSCPDestination("remote.host:/etc/nginx.co:nf")
-	c.Assert(user, check.Equals, "")
-	c.Assert(host, check.Equals, "remote.host")
-	c.Assert(dest, check.Equals, "/etc/nginx.co:nf")
-
-	user, host, dest = parseSCPDestination("remote.host:")
-	c.Assert(user, check.Equals, "")
-	c.Assert(host, check.Equals, "remote.host")
-	c.Assert(dest, check.Equals, ".")
-}
-
 func (s *APITestSuite) TestPortsParsing(c *check.C) {
 	// empty:
 	ports, err := ParsePortForwardSpec(nil)
@@ -147,7 +143,7 @@ func (s *APITestSuite) TestPortsParsing(c *check.C) {
 		},
 	})
 	// back to strings:
-	clone := ports.ToStringSpec()
+	clone := ports.String()
 	c.Assert(spec[0], check.Equals, clone[0])
 	c.Assert(spec[1], check.Equals, clone[1])
 
@@ -156,4 +152,75 @@ func (s *APITestSuite) TestPortsParsing(c *check.C) {
 	ports, err = ParsePortForwardSpec(spec)
 	c.Assert(ports, check.IsNil)
 	c.Assert(err, check.ErrorMatches, "^Invalid port forwarding spec: .foo.*")
+}
+
+func (s *APITestSuite) TestDynamicPortsParsing(c *check.C) {
+
+	tests := []struct {
+		spec    []string
+		isError bool
+		output  DynamicForwardedPorts
+	}{
+		{
+			spec:    nil,
+			isError: false,
+			output:  DynamicForwardedPorts{},
+		},
+		{
+			spec:    []string{},
+			isError: false,
+			output:  DynamicForwardedPorts{},
+		},
+		{
+			spec:    []string{"8080"},
+			isError: true,
+			output:  DynamicForwardedPorts{},
+		},
+		{
+			spec:    []string{":8080"},
+			isError: false,
+			output: DynamicForwardedPorts{
+				DynamicForwardedPort{
+					SrcIP:   "127.0.0.1",
+					SrcPort: 8080,
+				},
+			},
+		},
+		{
+			spec:    []string{"10.0.0.1:8080"},
+			isError: false,
+			output: DynamicForwardedPorts{
+				DynamicForwardedPort{
+					SrcIP:   "10.0.0.1",
+					SrcPort: 8080,
+				},
+			},
+		},
+		{
+			spec:    []string{":8080", "10.0.0.1:8080"},
+			isError: false,
+			output: DynamicForwardedPorts{
+				DynamicForwardedPort{
+					SrcIP:   "127.0.0.1",
+					SrcPort: 8080,
+				},
+				DynamicForwardedPort{
+					SrcIP:   "10.0.0.1",
+					SrcPort: 8080,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		specs, err := ParseDynamicPortForwardSpec(tt.spec)
+		if tt.isError {
+			c.Assert(err, check.NotNil)
+			continue
+		} else {
+			c.Assert(err, check.IsNil)
+		}
+
+		c.Assert(specs, check.DeepEquals, tt.output)
+	}
 }

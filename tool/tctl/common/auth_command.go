@@ -3,7 +3,6 @@ package common
 import (
 	"fmt"
 	"io/ioutil"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -17,9 +16,9 @@ import (
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/utils"
-	"github.com/gravitational/trace"
 
 	"github.com/gravitational/kingpin"
+	"github.com/gravitational/trace"
 )
 
 // AuthCommand implements `tctl auth` group of commands
@@ -38,9 +37,15 @@ type AuthCommand struct {
 	compatVersion              string
 	compatibility              string
 
+	rotateGracePeriod time.Duration
+	rotateType        string
+	rotateManualMode  bool
+	rotateTargetPhase string
+
 	authGenerate *kingpin.CmdClause
 	authExport   *kingpin.CmdClause
 	authSign     *kingpin.CmdClause
+	authRotate   *kingpin.CmdClause
 }
 
 // Initialize allows TokenCommand to plug itself into the CLI parser
@@ -63,9 +68,15 @@ func (a *AuthCommand) Initialize(app *kingpin.Application, config *service.Confi
 	a.authSign.Flag("user", "Teleport user name").StringVar(&a.genUser)
 	a.authSign.Flag("host", "Teleport host name").StringVar(&a.genHost)
 	a.authSign.Flag("out", "identity output").Short('o').StringVar(&a.output)
-	a.authSign.Flag("format", "identity format: 'file' (default) or 'dir'").Default(string(client.DefaultIdentityFormat)).StringVar((*string)(&a.outputFormat))
+	a.authSign.Flag("format", fmt.Sprintf("identity format: %q (default) or %q", client.IdentityFormatFile, client.IdentityFormatOpenSSH)).Default(string(client.DefaultIdentityFormat)).StringVar((*string)(&a.outputFormat))
 	a.authSign.Flag("ttl", "TTL (time to live) for the generated certificate").Default(fmt.Sprintf("%v", defaults.CertDuration)).DurationVar(&a.genTTL)
 	a.authSign.Flag("compat", "OpenSSH compatibility flag").StringVar(&a.compatibility)
+
+	a.authRotate = auth.Command("rotate", "Rotate certificate authorities in the cluster")
+	a.authRotate.Flag("grace-period", "Grace period keeps previous certificate authorities signatures valid, if set to 0 will force users to relogin and nodes to re-register.").Default(fmt.Sprintf("%v", defaults.RotationGracePeriod)).DurationVar(&a.rotateGracePeriod)
+	a.authRotate.Flag("manual", "Activate manual rotation , set rotation phases manually").BoolVar(&a.rotateManualMode)
+	a.authRotate.Flag("type", "Certificate authority to rotate, rotates both host and user CA by default").StringVar(&a.rotateType)
+	a.authRotate.Flag("phase", fmt.Sprintf("Target rotation phase to set, used in manual rotation, one of: %v", strings.Join(services.RotatePhases, ", "))).StringVar(&a.rotateTargetPhase)
 }
 
 // TryRun takes the CLI command as an argument (like "auth gen") and executes it
@@ -78,7 +89,8 @@ func (a *AuthCommand) TryRun(cmd string, client auth.ClientI) (match bool, err e
 		err = a.ExportAuthorities(client)
 	case a.authSign.FullCommand():
 		err = a.GenerateAndSignKeys(client)
-
+	case a.authRotate.FullCommand():
+		err = a.RotateCertAuthority(client)
 	default:
 		return false, nil
 	}
@@ -204,7 +216,10 @@ func (a *AuthCommand) ExportAuthorities(client auth.ClientI) error {
 
 // GenerateKeys generates a new keypair
 func (a *AuthCommand) GenerateKeys() error {
-	keygen := native.New()
+	keygen, err := native.New(native.PrecomputeKeys(0))
+	if err != nil {
+		return trace.Wrap(err)
+	}
 	defer keygen.Close()
 	privBytes, pubBytes, err := keygen.GenerateKeyPair("")
 	if err != nil {
@@ -234,6 +249,30 @@ func (a *AuthCommand) GenerateAndSignKeys(clusterApi auth.ClientI) error {
 	default:
 		return trace.BadParameter("--user or --host must be specified")
 	}
+}
+
+// RotateCertAuthority starts or restarts certificate authority rotation process
+func (a *AuthCommand) RotateCertAuthority(client auth.ClientI) error {
+	req := auth.RotateRequest{
+		Type:        services.CertAuthType(a.rotateType),
+		GracePeriod: &a.rotateGracePeriod,
+		TargetPhase: a.rotateTargetPhase,
+	}
+	if a.rotateManualMode {
+		req.Mode = services.RotationModeManual
+	} else {
+		req.Mode = services.RotationModeAuto
+	}
+	if err := client.RotateCertAuthority(req); err != nil {
+		return err
+	}
+	if a.rotateTargetPhase != "" {
+		fmt.Printf("Updated rotation phase to %q. To check status use 'tctl status'\n", a.rotateTargetPhase)
+	} else {
+		fmt.Printf("Initiated certificate authority rotation. To check status use 'tctl status'\n")
+	}
+
+	return nil
 }
 
 func (a *AuthCommand) generateHostKeys(clusterApi auth.ClientI) error {
@@ -270,7 +309,7 @@ func (a *AuthCommand) generateHostKeys(clusterApi auth.ClientI) error {
 		filePath = principals[0]
 	}
 
-	err = client.MakeIdentityFile(filePath, key, a.outputFormat)
+	err = client.MakeIdentityFile(filePath, key, a.outputFormat, nil)
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -299,8 +338,16 @@ func (a *AuthCommand) generateUserKeys(clusterApi auth.ClientI) error {
 		return trace.Wrap(err)
 	}
 
+	var certAuthorities []services.CertAuthority
+	if a.outputFormat == client.IdentityFormatFile {
+		certAuthorities, err = clusterApi.GetCertAuthorities(services.HostCA, false)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+	}
+
 	// write the cert+private key to the output:
-	err = client.MakeIdentityFile(a.output, key, a.outputFormat)
+	err = client.MakeIdentityFile(a.output, key, a.outputFormat, certAuthorities)
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -320,12 +367,7 @@ func (a *AuthCommand) generateUserKeys(clusterApi auth.ClientI) error {
 //
 // URL encoding is used to pass the CA type and cluster name into the comment field.
 func userCAFormat(ca services.CertAuthority, keyBytes []byte) (string, error) {
-	comment := url.Values{
-		"type":        []string{string(services.UserCA)},
-		"clustername": []string{ca.GetClusterName()},
-	}
-
-	return fmt.Sprintf("cert-authority %s %s", strings.TrimSpace(string(keyBytes)), comment.Encode()), nil
+	return sshutils.MarshalAuthorizedKeysFormat(ca.GetClusterName(), keyBytes)
 }
 
 // hostCAFormat returns the certificate authority public key exported as a single line
@@ -337,19 +379,10 @@ func userCAFormat(ca services.CertAuthority, keyBytes []byte) (string, error) {
 //
 // URL encoding is used to pass the CA type and allowed logins into the comment field.
 func hostCAFormat(ca services.CertAuthority, keyBytes []byte, client auth.ClientI) (string, error) {
-	comment := url.Values{
-		"type": []string{string(ca.GetType())},
-	}
-
 	roles, err := services.FetchRoles(ca.GetRoles(), client, nil)
 	if err != nil {
 		return "", trace.Wrap(err)
 	}
 	allowedLogins, _ := roles.CheckLoginDuration(defaults.MinCertDuration + time.Second)
-	if len(allowedLogins) > 0 {
-		comment["logins"] = allowedLogins
-	}
-
-	return fmt.Sprintf("@cert-authority *.%s %s %s",
-		ca.GetClusterName(), strings.TrimSpace(string(keyBytes)), comment.Encode()), nil
+	return sshutils.MarshalAuthorizedHostsFormat(ca.GetClusterName(), keyBytes, allowedLogins)
 }

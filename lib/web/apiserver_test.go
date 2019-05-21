@@ -19,6 +19,7 @@ package web
 import (
 	"bytes"
 	"compress/flate"
+	"context"
 	"crypto/tls"
 	"encoding/base32"
 	"encoding/base64"
@@ -37,34 +38,40 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gravitational/roundtrip"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/net/websocket"
+	"golang.org/x/text/encoding/unicode"
+
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/auth/mocku2f"
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/client"
 	"github.com/gravitational/teleport/lib/defaults"
+	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/fixtures"
 	"github.com/gravitational/teleport/lib/httplib"
 	"github.com/gravitational/teleport/lib/httplib/csrf"
+	"github.com/gravitational/teleport/lib/pam"
 	"github.com/gravitational/teleport/lib/reversetunnel"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/session"
-	sess "github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/srv/regular"
 	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/state"
 	"github.com/gravitational/teleport/lib/utils"
 	"github.com/gravitational/teleport/lib/web/ui"
+	"github.com/sirupsen/logrus"
+
+	"github.com/gravitational/roundtrip"
+	"github.com/gravitational/trace"
 
 	"github.com/beevik/etree"
 	"github.com/gokyle/hotp"
-	"github.com/gravitational/trace"
+	"github.com/golang/protobuf/proto"
 	"github.com/jonboulle/clockwork"
 	"github.com/pquerna/otp/totp"
 	"github.com/tstranex/u2f"
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/net/websocket"
 	. "gopkg.in/check.v1"
 	kyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
@@ -100,32 +107,10 @@ func (s *WebSuite) SetUpSuite(c *C) {
 	debugAssetsPath = "../../web/dist"
 	os.Setenv(teleport.DebugEnvVar, "true")
 
-	sessionStreamPollPeriod = time.Millisecond
+	//sessionStreamPollPeriod = time.Millisecond
 	s.mockU2F, err = mocku2f.Create()
 	c.Assert(err, IsNil)
 	c.Assert(s.mockU2F, NotNil)
-}
-
-func (s *WebSuite) clientNoRedirects(opts ...roundtrip.ClientParam) *client.WebClient {
-	hclient := client.NewInsecureWebClient()
-	hclient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	opts = append(opts, roundtrip.HTTPClient(hclient))
-	wc, err := client.NewWebClient(s.url().String(), opts...)
-	if err != nil {
-		panic(err)
-	}
-	return wc
-}
-
-func (s *WebSuite) client(opts ...roundtrip.ClientParam) *client.WebClient {
-	opts = append(opts, roundtrip.HTTPClient(client.NewInsecureWebClient()))
-	wc, err := client.NewWebClient(s.url().String(), opts...)
-	if err != nil {
-		panic(err)
-	}
-	return wc
 }
 
 func (s *WebSuite) TearDownSuite(c *C) {
@@ -166,23 +151,27 @@ func (s *WebSuite) SetUpTest(c *C) {
 	c.Assert(err, IsNil)
 
 	// create SSH service:
+	nodeDataDir := c.MkDir()
 	node, err := regular.New(
 		utils.NetAddr{AddrNetwork: "tcp", Addr: fmt.Sprintf("127.0.0.1:%v", nodePort)},
 		s.server.ClusterName(),
 		[]ssh.Signer{signer},
 		nodeClient,
-		c.MkDir(),
-		nil,
+		nodeDataDir,
+		"",
 		utils.NetAddr{},
 		regular.SetNamespace(defaults.Namespace),
 		regular.SetShell("/bin/sh"),
 		regular.SetSessionServer(nodeClient),
 		regular.SetAuditLog(nodeClient),
+		regular.SetPAMConfig(&pam.Config{Enabled: false}),
 	)
 	c.Assert(err, IsNil)
 	s.node = node
 	s.srvID = node.ID()
 	c.Assert(s.node.Start(), IsNil)
+
+	c.Assert(auth.CreateUploaderDir(nodeDataDir), IsNil)
 
 	// create reverse tunnel service:
 	s.proxyClient, err = s.server.NewClient(auth.TestBuiltin(teleport.RoleProxy))
@@ -201,6 +190,7 @@ func (s *WebSuite) SetUpTest(c *C) {
 		LocalAccessPoint:      s.proxyClient,
 		NewCachingAccessPoint: state.NoCache,
 		DirectClusters:        []reversetunnel.DirectCluster{{Name: s.server.ClusterName(), Client: s.proxyClient}},
+		DataDir:               c.MkDir(),
 	})
 	c.Assert(err, IsNil)
 
@@ -215,7 +205,7 @@ func (s *WebSuite) SetUpTest(c *C) {
 		[]ssh.Signer{signer},
 		s.proxyClient,
 		c.MkDir(),
-		nil,
+		"",
 		utils.NetAddr{},
 		regular.SetProxyMode(revTunServer),
 		regular.SetSessionServer(s.proxyClient),
@@ -225,10 +215,11 @@ func (s *WebSuite) SetUpTest(c *C) {
 	c.Assert(err, IsNil)
 
 	handler, err := NewHandler(Config{
-		Proxy:       revTunServer,
-		AuthServers: utils.FromAddr(s.server.Addr()),
-		DomainName:  s.server.ClusterName(),
-		ProxyClient: s.proxyClient,
+		Proxy:        revTunServer,
+		AuthServers:  utils.FromAddr(s.server.Addr()),
+		DomainName:   s.server.ClusterName(),
+		ProxyClient:  s.proxyClient,
+		CipherSuites: utils.DefaultCipherSuites(),
 	}, SetSessionStreamPollPeriod(200*time.Millisecond))
 	c.Assert(err, IsNil)
 
@@ -242,14 +233,6 @@ func (s *WebSuite) SetUpTest(c *C) {
 	handler.handler.cfg.ProxySSHAddr = proxyAddr
 }
 
-func (s *WebSuite) url() *url.URL {
-	u, err := url.Parse("https://" + s.webServer.Listener.Addr().String())
-	if err != nil {
-		panic(err)
-	}
-	return u
-}
-
 func (s *WebSuite) TearDownTest(c *C) {
 	c.Assert(s.node.Close(), IsNil)
 	c.Assert(s.server.Close(), IsNil)
@@ -257,8 +240,124 @@ func (s *WebSuite) TearDownTest(c *C) {
 	s.proxy.Close()
 }
 
+type authPack struct {
+	otpSecret string
+	user      string
+	login     string
+	otp       *hotp.HOTP
+	session   *CreateSessionResponse
+	clt       *client.WebClient
+	cookies   []*http.Cookie
+}
+
+func (s *WebSuite) authPackFromResponse(c *C, re *roundtrip.Response) *authPack {
+	var sess *createSessionResponseRaw
+	c.Assert(json.Unmarshal(re.Bytes(), &sess), IsNil)
+
+	jar, err := cookiejar.New(nil)
+	c.Assert(err, IsNil)
+
+	clt := s.client(roundtrip.BearerAuth(sess.Token), roundtrip.CookieJar(jar))
+	jar.SetCookies(s.url(), re.Cookies())
+
+	session, err := sess.response()
+	if err != nil {
+		panic(err)
+	}
+	if session.ExpiresIn < 0 {
+		c.Errorf("expected expiry time to be in the future but got %v", session.ExpiresIn)
+	}
+	return &authPack{
+		session: session,
+		clt:     clt,
+		cookies: re.Cookies(),
+	}
+}
+
+// authPack returns new authenticated package consisting of created valid
+// user, otp token, created web session and authenticated client.
+func (s *WebSuite) authPack(c *C, user string) *authPack {
+	login := s.user
+	pass := "abc123"
+	rawSecret := "def456"
+	otpSecret := base32.StdEncoding.EncodeToString([]byte(rawSecret))
+
+	ap, err := services.NewAuthPreference(services.AuthPreferenceSpecV2{
+		Type:         teleport.Local,
+		SecondFactor: teleport.OTP,
+	})
+	c.Assert(err, IsNil)
+	err = s.server.Auth().SetAuthPreference(ap)
+	c.Assert(err, IsNil)
+
+	s.createUser(c, user, login, pass, otpSecret)
+
+	// create a valid otp token
+	validToken, err := totp.GenerateCode(otpSecret, time.Now())
+	c.Assert(err, IsNil)
+
+	clt := s.client()
+	req := createSessionReq{
+		User:              user,
+		Pass:              pass,
+		SecondFactorToken: validToken,
+	}
+
+	csrfToken := "2ebcb768d0090ea4368e42880c970b61865c326172a4a2343b645cf5d7f20992"
+	re, err := s.login(clt, csrfToken, csrfToken, req)
+	c.Assert(err, IsNil)
+
+	var rawSess *createSessionResponseRaw
+	c.Assert(json.Unmarshal(re.Bytes(), &rawSess), IsNil)
+
+	sess, err := rawSess.response()
+	c.Assert(err, IsNil)
+
+	jar, err := cookiejar.New(nil)
+	c.Assert(err, IsNil)
+
+	clt = s.client(roundtrip.BearerAuth(sess.Token), roundtrip.CookieJar(jar))
+	jar.SetCookies(s.url(), re.Cookies())
+
+	return &authPack{
+		otpSecret: otpSecret,
+		user:      user,
+		login:     login,
+		session:   sess,
+		clt:       clt,
+		cookies:   re.Cookies(),
+	}
+}
+
+func (s *WebSuite) createUser(c *C, user string, login string, pass string, otpSecret string) {
+	teleUser, err := services.NewUser(user)
+	c.Assert(err, IsNil)
+	role := services.RoleForUser(teleUser)
+	role.SetLogins(services.Allow, []string{login})
+	options := role.GetOptions()
+	options.ForwardAgent = services.NewBool(true)
+	role.SetOptions(options)
+	err = s.server.Auth().UpsertRole(role, backend.Forever)
+	c.Assert(err, IsNil)
+	teleUser.AddRole(role.GetName())
+
+	err = s.server.Auth().UpsertUser(teleUser)
+	c.Assert(err, IsNil)
+
+	err = s.server.Auth().UpsertPassword(user, []byte(pass))
+	c.Assert(err, IsNil)
+
+	err = s.server.Auth().UpsertTOTP(user, otpSecret)
+	c.Assert(err, IsNil)
+}
+
 func (s *WebSuite) TestNewUser(c *C) {
 	token, err := s.server.Auth().CreateSignupToken(services.UserV1{Name: "bob", AllowedLogins: []string{s.user}}, 0)
+	c.Assert(err, IsNil)
+
+	// Save the original signup token, after GET /v2/webapi/users/invites/<token>
+	// this should change.
+	ost, err := s.server.Auth().GetSignupToken(token)
 	c.Assert(err, IsNil)
 
 	tokens, err := s.server.Auth().GetTokens()
@@ -267,7 +366,7 @@ func (s *WebSuite) TestNewUser(c *C) {
 	c.Assert(tokens[0].Token, Equals, token)
 
 	clt := s.client()
-	re, err := clt.Get(clt.Endpoint("webapi", "users", "invites", token), url.Values{})
+	re, err := clt.Get(context.Background(), clt.Endpoint("webapi", "users", "invites", token), url.Values{})
 	c.Assert(err, IsNil)
 
 	var out *renderUserInviteResponse
@@ -275,15 +374,19 @@ func (s *WebSuite) TestNewUser(c *C) {
 	c.Assert(out.User, Equals, "bob")
 	c.Assert(out.InviteToken, Equals, token)
 
-	// TODO(rjones) replaced GetSignupTokenData with GetSignupToken
-	tokenData, err := s.server.Auth().GetSignupToken(token)
+	st, err := s.server.Auth().GetSignupToken(token)
 	c.Assert(err, IsNil)
-	validToken, err := totp.GenerateCode(tokenData.OTPKey, time.Now())
+
+	// Make sure that the signup token changed after rending the endpoint
+	// GET /v2/webapi/users/invites/<token> above.
+	c.Assert(st, Not(Equals), ost)
+
+	validToken, err := totp.GenerateCode(st.OTPKey, time.Now())
 	c.Assert(err, IsNil)
 
 	tempPass := "abc123"
 
-	re, err = clt.PostJSON(clt.Endpoint("webapi", "users"), createNewUserReq{
+	re, err = clt.PostJSON(context.Background(), clt.Endpoint("webapi", "users"), createNewUserReq{
 		InviteToken:       token,
 		Pass:              tempPass,
 		SecondFactorToken: validToken,
@@ -304,7 +407,7 @@ func (s *WebSuite) TestNewUser(c *C) {
 	clt = s.client(roundtrip.BearerAuth(rawSess.Token), roundtrip.CookieJar(jar))
 	jar.SetCookies(s.url(), re.Cookies())
 
-	re, err = clt.Get(clt.Endpoint("webapi", "sites"), url.Values{})
+	re, err = clt.Get(context.Background(), clt.Endpoint("webapi", "sites"), url.Values{})
 	c.Assert(err, IsNil)
 
 	var sites *getSitesResponse
@@ -314,13 +417,13 @@ func (s *WebSuite) TestNewUser(c *C) {
 
 	// no session cookie:
 	clt = s.client(roundtrip.BearerAuth(rawSess.Token))
-	re, err = clt.Get(clt.Endpoint("webapi", "sites"), url.Values{})
+	re, err = clt.Get(context.Background(), clt.Endpoint("webapi", "sites"), url.Values{})
 	c.Assert(err, NotNil)
 	c.Assert(trace.IsAccessDenied(err), Equals, true)
 
 	// no bearer token:
 	clt = s.client(roundtrip.CookieJar(jar))
-	re, err = clt.Get(clt.Endpoint("webapi", "sites"), url.Values{})
+	re, err = clt.Get(context.Background(), clt.Endpoint("webapi", "sites"), url.Values{})
 	c.Assert(err, NotNil)
 	c.Assert(trace.IsAccessDenied(err), Equals, true)
 }
@@ -339,10 +442,10 @@ func (s *WebSuite) TestSAMLSuccess(c *C) {
 
 	role, err := services.NewRole(connector.GetAttributesToRoles()[0].Roles[0], services.RoleSpecV3{
 		Options: services.RoleOptions{
-			services.MaxSessionTTL: services.NewDuration(defaults.MaxCertDuration),
+			MaxSessionTTL: services.NewDuration(defaults.MaxCertDuration),
 		},
 		Allow: services.RoleConditions{
-			NodeLabels: map[string]string{services.Wildcard: services.Wildcard},
+			NodeLabels: services.Labels{services.Wildcard: []string{services.Wildcard}},
 			Namespaces: []string{defaults.Namespace},
 			Rules: []services.Rule{
 				services.NewRule(services.Wildcard, services.RW()),
@@ -424,121 +527,11 @@ func (s *WebSuite) TestSAMLSuccess(c *C) {
 	c.Assert(authRe.Headers().Get("Location"), Equals, "/after")
 }
 
-type authPack struct {
-	otpSecret string
-	user      string
-	otp       *hotp.HOTP
-	session   *CreateSessionResponse
-	clt       *client.WebClient
-	cookies   []*http.Cookie
-}
-
-func (s *WebSuite) authPackFromResponse(c *C, re *roundtrip.Response) *authPack {
-	var sess *createSessionResponseRaw
-	c.Assert(json.Unmarshal(re.Bytes(), &sess), IsNil)
-
-	jar, err := cookiejar.New(nil)
-	c.Assert(err, IsNil)
-
-	clt := s.client(roundtrip.BearerAuth(sess.Token), roundtrip.CookieJar(jar))
-	jar.SetCookies(s.url(), re.Cookies())
-
-	session, err := sess.response()
-	if err != nil {
-		panic(err)
-	}
-	if session.ExpiresIn < 0 {
-		c.Errorf("expected expiry time to be in the future but got %v", session.ExpiresIn)
-	}
-	return &authPack{
-		session: session,
-		clt:     clt,
-		cookies: re.Cookies(),
-	}
-}
-
-func (s *WebSuite) createUser(c *C, user string, pass string, otpSecret string) {
-	teleUser, err := services.NewUser(user)
-	c.Assert(err, IsNil)
-	role := services.RoleForUser(teleUser)
-	role.SetLogins(services.Allow, []string{user})
-	options := role.GetOptions()
-	options[services.ForwardAgent] = true
-	role.SetOptions(options)
-	err = s.server.Auth().UpsertRole(role, backend.Forever)
-	c.Assert(err, IsNil)
-	teleUser.AddRole(role.GetName())
-
-	err = s.server.Auth().UpsertUser(teleUser)
-	c.Assert(err, IsNil)
-
-	err = s.server.Auth().UpsertPassword(user, []byte(pass))
-	c.Assert(err, IsNil)
-
-	err = s.server.Auth().UpsertTOTP(user, otpSecret)
-	c.Assert(err, IsNil)
-}
-
-// authPack returns new authenticated package consisting
-// of created valid user, hotp token, created web session and
-// authenticated client
-func (s *WebSuite) authPack(c *C) *authPack {
-	user := s.user
-	pass := "abc123"
-	rawSecret := "def456"
-	otpSecret := base32.StdEncoding.EncodeToString([]byte(rawSecret))
-
-	ap, err := services.NewAuthPreference(services.AuthPreferenceSpecV2{
-		Type:         teleport.Local,
-		SecondFactor: teleport.OTP,
-	})
-	c.Assert(err, IsNil)
-	err = s.server.Auth().SetAuthPreference(ap)
-	c.Assert(err, IsNil)
-
-	s.createUser(c, user, pass, otpSecret)
-
-	// create a valid otp token
-	validToken, err := totp.GenerateCode(otpSecret, time.Now())
-	c.Assert(err, IsNil)
-
-	clt := s.client()
-	req := createSessionReq{
-		User:              user,
-		Pass:              pass,
-		SecondFactorToken: validToken,
-	}
-
-	csrfToken := "2ebcb768d0090ea4368e42880c970b61865c326172a4a2343b645cf5d7f20992"
-	re, err := s.login(clt, csrfToken, csrfToken, req)
-	c.Assert(err, IsNil)
-
-	var rawSess *createSessionResponseRaw
-	c.Assert(json.Unmarshal(re.Bytes(), &rawSess), IsNil)
-
-	sess, err := rawSess.response()
-	c.Assert(err, IsNil)
-
-	jar, err := cookiejar.New(nil)
-	c.Assert(err, IsNil)
-
-	clt = s.client(roundtrip.BearerAuth(sess.Token), roundtrip.CookieJar(jar))
-	jar.SetCookies(s.url(), re.Cookies())
-
-	return &authPack{
-		otpSecret: otpSecret,
-		user:      user,
-		session:   sess,
-		clt:       clt,
-		cookies:   re.Cookies(),
-	}
-}
-
 func (s *WebSuite) TestWebSessionsCRUD(c *C) {
-	pack := s.authPack(c)
+	pack := s.authPack(c, "foo")
 
 	// make sure we can use client to make authenticated requests
-	re, err := pack.clt.Get(pack.clt.Endpoint("webapi", "sites"), url.Values{})
+	re, err := pack.clt.Get(context.Background(), pack.clt.Endpoint("webapi", "sites"), url.Values{})
 	c.Assert(err, IsNil)
 
 	var sites *getSitesResponse
@@ -546,22 +539,23 @@ func (s *WebSuite) TestWebSessionsCRUD(c *C) {
 
 	// now delete session
 	_, err = pack.clt.Delete(
+		context.Background(),
 		pack.clt.Endpoint("webapi", "sessions"))
 	c.Assert(err, IsNil)
 
 	// subsequent requests trying to use this session will fail
-	re, err = pack.clt.Get(pack.clt.Endpoint("webapi", "sites"), url.Values{})
+	re, err = pack.clt.Get(context.Background(), pack.clt.Endpoint("webapi", "sites"), url.Values{})
 	c.Assert(err, NotNil)
 	c.Assert(trace.IsAccessDenied(err), Equals, true)
 }
 
 func (s *WebSuite) TestNamespace(c *C) {
-	pack := s.authPack(c)
+	pack := s.authPack(c, "foo")
 
-	_, err := pack.clt.Get(pack.clt.Endpoint("webapi", "sites", s.server.ClusterName(), "namespaces", "..%252fevents%3f", "nodes"), url.Values{})
+	_, err := pack.clt.Get(context.Background(), pack.clt.Endpoint("webapi", "sites", s.server.ClusterName(), "namespaces", "..%252fevents%3f", "nodes"), url.Values{})
 	c.Assert(err, NotNil)
 
-	_, err = pack.clt.Get(pack.clt.Endpoint("webapi", "sites", s.server.ClusterName(), "namespaces", "default", "nodes"), url.Values{})
+	_, err = pack.clt.Get(context.Background(), pack.clt.Endpoint("webapi", "sites", s.server.ClusterName(), "namespaces", "default", "nodes"), url.Values{})
 	c.Assert(err, IsNil)
 }
 
@@ -575,7 +569,7 @@ func (s *WebSuite) TestCSRF(c *C) {
 	user := "csrfuser"
 	pass := "abc123"
 	otpSecret := base32.StdEncoding.EncodeToString([]byte("def456"))
-	s.createUser(c, user, pass, otpSecret)
+	s.createUser(c, user, user, pass, otpSecret)
 
 	// create a valid login form request
 	validToken, err := totp.GenerateCode(otpSecret, time.Now())
@@ -610,7 +604,7 @@ func (s *WebSuite) TestCSRF(c *C) {
 }
 
 func (s *WebSuite) TestPasswordChange(c *C) {
-	pack := s.authPack(c)
+	pack := s.authPack(c, "foo")
 	fakeClock := clockwork.NewFakeClock()
 	s.server.AuthServer.AuthServer.SetClock(fakeClock)
 
@@ -623,25 +617,25 @@ func (s *WebSuite) TestPasswordChange(c *C) {
 		SecondFactorToken: validToken,
 	}
 
-	_, err = pack.clt.PutJSON(pack.clt.Endpoint("webapi", "users", "password"), req)
+	_, err = pack.clt.PutJSON(context.Background(), pack.clt.Endpoint("webapi", "users", "password"), req)
 	c.Assert(err, IsNil)
 }
 
 func (s *WebSuite) TestWebSessionsRenew(c *C) {
-	pack := s.authPack(c)
+	pack := s.authPack(c, "foo")
 
 	// make sure we can use client to make authenticated requests
 	// before we issue this request, we will recover session id and bearer token
 	//
 	prevSessionCookie := *pack.cookies[0]
 	prevBearerToken := pack.session.Token
-	re, err := pack.clt.PostJSON(pack.clt.Endpoint("webapi", "sessions", "renew"), nil)
+	re, err := pack.clt.PostJSON(context.Background(), pack.clt.Endpoint("webapi", "sessions", "renew"), nil)
 	c.Assert(err, IsNil)
 
 	newPack := s.authPackFromResponse(c, re)
 
 	// new session is functioning
-	re, err = newPack.clt.Get(pack.clt.Endpoint("webapi", "sites"), url.Values{})
+	re, err = newPack.clt.Get(context.Background(), pack.clt.Endpoint("webapi", "sites"), url.Values{})
 	c.Assert(err, IsNil)
 
 	// old session is stil valid too (until it expires)
@@ -649,16 +643,17 @@ func (s *WebSuite) TestWebSessionsRenew(c *C) {
 	c.Assert(err, IsNil)
 	oldClt := s.client(roundtrip.BearerAuth(prevBearerToken), roundtrip.CookieJar(jar))
 	jar.SetCookies(s.url(), []*http.Cookie{&prevSessionCookie})
-	re, err = oldClt.Get(pack.clt.Endpoint("webapi", "sites"), url.Values{})
+	re, err = oldClt.Get(context.Background(), pack.clt.Endpoint("webapi", "sites"), url.Values{})
 	c.Assert(err, IsNil)
 
 	// now delete session
 	_, err = newPack.clt.Delete(
+		context.Background(),
 		pack.clt.Endpoint("webapi", "sessions"))
 	c.Assert(err, IsNil)
 
 	// subsequent requests trying to use this session will fail
-	re, err = newPack.clt.Get(pack.clt.Endpoint("webapi", "sites"), url.Values{})
+	re, err = newPack.clt.Get(context.Background(), pack.clt.Endpoint("webapi", "sites"), url.Values{})
 	c.Assert(err, NotNil)
 	c.Assert(trace.IsAccessDenied(err), Equals, true)
 }
@@ -713,7 +708,7 @@ func (s *WebSuite) TestWebSessionsBadInput(c *C) {
 		},
 	}
 	for i, req := range reqs {
-		_, err = clt.PostJSON(clt.Endpoint("webapi", "sessions"), req)
+		_, err = clt.PostJSON(context.Background(), clt.Endpoint("webapi", "sessions"), req)
 		c.Assert(err, NotNil, Commentf("tc %v", i))
 		c.Assert(trace.IsAccessDenied(err), Equals, true, Commentf("tc %v %T is not access denied", i, err))
 	}
@@ -724,10 +719,10 @@ type getSiteNodeResponse struct {
 }
 
 func (s *WebSuite) TestGetSiteNodes(c *C) {
-	pack := s.authPack(c)
+	pack := s.authPack(c, "foo")
 
 	// get site nodes
-	re, err := pack.clt.Get(pack.clt.Endpoint("webapi", "sites", s.server.ClusterName(), "nodes"), url.Values{})
+	re, err := pack.clt.Get(context.Background(), pack.clt.Endpoint("webapi", "sites", s.server.ClusterName(), "nodes"), url.Values{})
 	c.Assert(err, IsNil)
 
 	nodes := getSiteNodeResponse{}
@@ -735,7 +730,7 @@ func (s *WebSuite) TestGetSiteNodes(c *C) {
 	c.Assert(len(nodes.Items), Equals, 1)
 
 	// get site nodes using shortcut
-	re, err = pack.clt.Get(pack.clt.Endpoint("webapi", "sites", currentSiteShortcut, "nodes"), url.Values{})
+	re, err = pack.clt.Get(context.Background(), pack.clt.Endpoint("webapi", "sites", currentSiteShortcut, "nodes"), url.Values{})
 	c.Assert(err, IsNil)
 
 	nodes2 := getSiteNodeResponse{}
@@ -745,256 +740,352 @@ func (s *WebSuite) TestGetSiteNodes(c *C) {
 }
 
 func (s *WebSuite) TestSiteNodeConnectInvalidSessionID(c *C) {
-	_, err := s.makeTerminal(s.authPack(c), session.ID("/../../../foo"))
+	_, err := s.makeTerminal(s.authPack(c, "foo"), session.ID("/../../../foo"))
 	c.Assert(err, NotNil)
+}
+
+func (s *WebSuite) TestResolveServerHostPort(c *C) {
+	sampleNode := services.ServerV2{}
+	sampleNode.SetName("eca53e45-86a9-11e7-a893-0242ac0a0101")
+	sampleNode.Spec.Hostname = "nodehostname"
+
+	// valid cases
+	validCases := []struct {
+		server       string
+		nodes        []services.Server
+		expectedHost string
+		expectedPort int
+	}{
+		{
+			server:       "localhost",
+			expectedHost: "localhost",
+			expectedPort: 0,
+		},
+		{
+			server:       "localhost:8080",
+			expectedHost: "localhost",
+			expectedPort: 8080,
+		},
+		{
+			server:       "eca53e45-86a9-11e7-a893-0242ac0a0101",
+			nodes:        []services.Server{&sampleNode},
+			expectedHost: "nodehostname",
+			expectedPort: 0,
+		},
+	}
+
+	// invalid cases
+	invalidCases := []struct {
+		server      string
+		expectedErr string
+	}{
+		{
+			server:      ":22",
+			expectedErr: "empty hostname",
+		},
+		{
+			server:      ":",
+			expectedErr: "empty hostname",
+		},
+		{
+			server:      "",
+			expectedErr: "empty server name",
+		},
+		{
+			server:      "host:",
+			expectedErr: "invalid port",
+		},
+		{
+			server:      "host:port",
+			expectedErr: "invalid port",
+		},
+	}
+
+	for _, testCase := range validCases {
+		host, port, err := resolveServerHostPort(testCase.server, testCase.nodes)
+		c.Assert(err, IsNil, Commentf(testCase.server))
+		c.Assert(host, Equals, testCase.expectedHost)
+		c.Assert(port, Equals, testCase.expectedPort)
+	}
+
+	for _, testCase := range invalidCases {
+		_, _, err := resolveServerHostPort(testCase.server, nil)
+		c.Assert(err, NotNil, Commentf(testCase.expectedErr))
+		c.Assert(err, ErrorMatches, ".*"+testCase.expectedErr+".*")
+	}
+
 }
 
 func (s *WebSuite) TestNewTerminalHandler(c *C) {
-	var emptyNodes = []services.ServerV2{}
+	validNode := services.ServerV2{}
+	validNode.SetName("eca53e45-86a9-11e7-a893-0242ac0a0101")
+	validNode.Spec.Hostname = "nodehostname"
 
-	v2node := services.ServerV2{}
-	v2node.SetName("nodename")
-	v2node.Spec.Hostname = "nodehostname"
+	validServer := "localhost"
+	validLogin := "root"
+	validSID := session.ID("eca53e45-86a9-11e7-a893-0242ac0a0101")
+	validParams := session.TerminalParams{
+		H: 1,
+		W: 1,
+	}
 
-	// valid inputs
-	handler, err := s.makeTerminalHandler("root", "localhost", emptyNodes)
-	c.Assert(err, IsNil)
-	c.Assert(handler.params.Login, Equals, "root")
-	c.Assert(handler.hostName, Equals, "localhost")
-	c.Assert(handler.hostPort, Equals, 22)
+	makeProvider := func(server services.ServerV2) AuthProvider {
+		return authProviderMock{
+			server: server,
+		}
+	}
 
-	handler, err = s.makeTerminalHandler("root", "localhost:8080", emptyNodes)
-	c.Assert(err, IsNil)
-	c.Assert(handler.hostName, Equals, "localhost")
-	c.Assert(handler.hostPort, Equals, 8080)
+	// valid cases
+	validCases := []struct {
+		req          TerminalRequest
+		authProvider AuthProvider
+		expectedHost string
+		expectedPort int
+	}{
+		{
+			req: TerminalRequest{
+				Login:     validLogin,
+				Server:    validServer,
+				SessionID: validSID,
+				Term:      validParams,
+			},
+			authProvider: makeProvider(validNode),
+			expectedHost: validServer,
+			expectedPort: 0,
+		},
+		{
+			req: TerminalRequest{
+				Login:     validLogin,
+				Server:    "eca53e45-86a9-11e7-a893-0242ac0a0101",
+				SessionID: validSID,
+				Term:      validParams,
+			},
+			authProvider: makeProvider(validNode),
+			expectedHost: "nodehostname",
+			expectedPort: 0,
+		},
+	}
 
-	handler, err = s.makeTerminalHandler("root", "nodename", []services.ServerV2{v2node})
-	c.Assert(err, IsNil)
-	c.Assert(handler.hostName, Equals, "nodehostname")
-	c.Assert(handler.hostPort, Equals, 0)
+	// invalid cases
+	invalidCases := []struct {
+		req          TerminalRequest
+		authProvider AuthProvider
+		expectedErr  string
+	}{
+		{
+			expectedErr:  "invalid session",
+			authProvider: makeProvider(validNode),
+			req: TerminalRequest{
+				SessionID: "",
+				Login:     validLogin,
+				Server:    validServer,
+				Term:      validParams,
+			},
+		},
+		{
+			expectedErr:  "bad term dimensions",
+			authProvider: makeProvider(validNode),
+			req: TerminalRequest{
+				SessionID: validSID,
+				Login:     validLogin,
+				Server:    validServer,
+				Term: session.TerminalParams{
+					H: -1,
+					W: 0,
+				},
+			},
+		},
+		{
+			expectedErr:  "invalid server name",
+			authProvider: makeProvider(validNode),
+			req: TerminalRequest{
+				Server:    "localhost:port",
+				SessionID: validSID,
+				Login:     validLogin,
+				Term:      validParams,
+			},
+		},
+	}
 
-	handler, err = s.makeTerminalHandler("root", "nodehostname", []services.ServerV2{v2node})
-	c.Assert(err, IsNil)
-	c.Assert(handler.hostName, Equals, "nodehostname")
-	c.Assert(handler.hostPort, Equals, 0)
+	for _, testCase := range validCases {
+		term, err := NewTerminal(testCase.req, testCase.authProvider, nil)
+		c.Assert(err, IsNil)
+		c.Assert(term.params, DeepEquals, testCase.req)
+		c.Assert(term.hostName, Equals, testCase.expectedHost)
+		c.Assert(term.hostPort, Equals, testCase.expectedPort)
+	}
 
-	handler, err = s.makeTerminalHandler("root", "NODEhostname", []services.ServerV2{v2node})
-	c.Assert(err, IsNil)
-	c.Assert(handler.hostName, Equals, "nodehostname")
-	c.Assert(handler.hostPort, Equals, 0)
-
-	// invalid inputs
-	handler, err = s.makeTerminalHandler("", "localhost", emptyNodes)
-	c.Assert(err, NotNil)
-	handler, err = s.makeTerminalHandler("root", "", emptyNodes)
-	c.Assert(err, NotNil)
-	handler, err = s.makeTerminalHandler("root", "locahost:invalid_port", emptyNodes)
-	c.Assert(err, NotNil)
+	for _, testCase := range invalidCases {
+		_, err := NewTerminal(testCase.req, testCase.authProvider, nil)
+		c.Assert(err, ErrorMatches, ".*"+testCase.expectedErr+".*")
+	}
 }
 
-func (s *WebSuite) makeTerminal(pack *authPack, opts ...session.ID) (*websocket.Conn, error) {
-	var sessionID session.ID
-	if len(opts) == 0 {
-		sessionID = session.NewID()
-	} else {
-		sessionID = opts[0]
-	}
-	u := url.URL{Host: s.url().Host, Scheme: client.WSS, Path: fmt.Sprintf("/v1/webapi/sites/%v/connect", currentSiteShortcut)}
-	data, err := json.Marshal(TerminalRequest{
-		Server:    s.srvID,
-		Login:     s.user,
-		Term:      session.TerminalParams{W: 100, H: 100},
-		SessionID: sessionID,
+func (s *WebSuite) TestResizeTerminal(c *C) {
+	sid := session.NewID()
+
+	// Create a new user "foo", open a terminal to a new session, and wait for
+	// it to be ready.
+	pack1 := s.authPack(c, "foo")
+	ws1, err := s.makeTerminal(pack1, sid)
+	c.Assert(err, IsNil)
+	defer ws1.Close()
+	err = s.waitForRawEvent(ws1, 5*time.Second)
+	c.Assert(err, IsNil)
+
+	// Create a new user "bar", open a terminal to the session created above,
+	// and wait for it to be ready.
+	pack2 := s.authPack(c, "bar")
+	ws2, err := s.makeTerminal(pack2, sid)
+	c.Assert(err, IsNil)
+	defer ws2.Close()
+	err = s.waitForRawEvent(ws2, 5*time.Second)
+	c.Assert(err, IsNil)
+
+	// Look at the audit events for the first terminal. It should have two
+	// resize events from the second terminal (80x25 default then 100x100). Only
+	// the second terminal will get these because resize events are not sent
+	// back to the originator.
+	err = s.waitForResizeEvent(ws1, 5*time.Second)
+	c.Assert(err, IsNil)
+	err = s.waitForResizeEvent(ws1, 5*time.Second)
+	c.Assert(err, IsNil)
+
+	// Look at the stream events for the second terminal. We don't expect to see
+	// any resize events yet. It will timeout.
+	err = s.waitForResizeEvent(ws2, 1*time.Second)
+	c.Assert(err, NotNil)
+
+	// Resize the second terminal. This should be reflected on the first terminal
+	// because resize events are not sent back to the originator.
+	params, err := session.NewTerminalParamsFromInt(300, 120)
+	c.Assert(err, IsNil)
+	data, err := json.Marshal(events.EventFields{
+		events.EventType:      events.ResizeEvent,
+		events.EventNamespace: defaults.Namespace,
+		events.SessionEventID: sid.String(),
+		events.TerminalSize:   params.Serialize(),
 	})
-	if err != nil {
-		return nil, err
+	envelope := &Envelope{
+		Version: defaults.WebsocketVersion,
+		Type:    defaults.WebsocketResize,
+		Payload: string(data),
 	}
-
-	q := u.Query()
-	q.Set("params", string(data))
-	q.Set(roundtrip.AccessTokenQueryParam, pack.session.Token)
-	u.RawQuery = q.Encode()
-
-	wscfg, err := websocket.NewConfig(u.String(), "http://localhost")
-	wscfg.TlsConfig = &tls.Config{
-		InsecureSkipVerify: true,
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	for _, cookie := range pack.cookies {
-		wscfg.Header.Add("Cookie", cookie.String())
-	}
-
-	return websocket.DialConfig(wscfg)
-}
-
-func (s *WebSuite) sessionStream(c *C, pack *authPack, sessionID session.ID, opts ...string) *websocket.Conn {
-	u := url.URL{
-		Host:   s.url().Host,
-		Scheme: client.WSS,
-		Path: fmt.Sprintf(
-			"/v1/webapi/sites/%v/sessions/%v/events/stream",
-			currentSiteShortcut,
-			sessionID),
-	}
-	q := u.Query()
-	q.Set(roundtrip.AccessTokenQueryParam, pack.session.Token)
-	u.RawQuery = q.Encode()
-	wscfg, err := websocket.NewConfig(u.String(), "http://localhost")
-	wscfg.TlsConfig = &tls.Config{
-		InsecureSkipVerify: true,
-	}
+	envelopeBytes, err := proto.Marshal(envelope)
 	c.Assert(err, IsNil)
-	for _, cookie := range pack.cookies {
-		wscfg.Header.Add("Cookie", cookie.String())
-	}
-	clt, err := websocket.DialConfig(wscfg)
+	websocket.Message.Send(ws2, envelopeBytes)
+
+	// This time the first terminal will see the resize event.
+	err = s.waitForResizeEvent(ws1, 5*time.Second)
 	c.Assert(err, IsNil)
 
-	return clt
+	// The second terminal will not see any resize event. It will timeout.
+	err = s.waitForResizeEvent(ws2, 1*time.Second)
+	c.Assert(err, NotNil)
 }
 
 func (s *WebSuite) TestTerminal(c *C) {
-	term, err := s.makeTerminal(s.authPack(c))
+	ws, err := s.makeTerminal(s.authPack(c, "foo"))
 	c.Assert(err, IsNil)
-	defer term.Close()
+	defer ws.Close()
 
-	_, err = io.WriteString(term, "echo vinsong\r\n")
+	termHandler := newTerminalHandler()
+	stream, err := termHandler.asTerminalStream(ws)
 	c.Assert(err, IsNil)
 
-	resultC := make(chan struct{})
+	_, err = io.WriteString(stream, "echo vinsong\r\n")
+	c.Assert(err, IsNil)
 
-	go func() {
-		out := make([]byte, 100)
-		for {
-			n, err := term.Read(out)
-			c.Assert(err, IsNil)
-			c.Assert(n > 0, Equals, true)
-			if strings.Contains(removeSpace(string(out)), "vinsong") {
-				close(resultC)
-				return
-			}
-		}
-	}()
-
-	select {
-	case <-time.After(time.Second):
-		c.Fatalf("timeout waiting for proper response")
-	case <-resultC:
-		// everything is as expected
-	}
+	err = s.waitForOutput(stream, "vinsong")
+	c.Assert(err, IsNil)
 }
 
 func (s *WebSuite) TestWebAgentForward(c *C) {
-	term, err := s.makeTerminal(s.authPack(c))
+	ws, err := s.makeTerminal(s.authPack(c, "foo"))
 	c.Assert(err, IsNil)
-	defer term.Close()
+	defer ws.Close()
 
-	_, err = io.WriteString(term, "echo $SSH_AUTH_SOCK\r\n")
+	termHandler := newTerminalHandler()
+	stream, err := termHandler.asTerminalStream(ws)
 	c.Assert(err, IsNil)
 
-	resultC := make(chan struct{})
+	_, err = io.WriteString(stream, "echo $SSH_AUTH_SOCK\r\n")
+	c.Assert(err, IsNil)
 
-	go func() {
-		out := make([]byte, 10000)
-		for {
-			n, err := term.Read(out)
-			c.Assert(err, IsNil)
-			c.Assert(n > 0, Equals, true)
-			if strings.Contains(removeSpace(string(out)), "/") {
-				close(resultC)
-				return
-			}
-		}
-	}()
-
-	select {
-	case <-time.After(1 * time.Second):
-		c.Fatalf("timeout waiting for proper response")
-	case <-resultC:
-		// everything is as expected
-	}
+	err = s.waitForOutput(stream, "/")
+	c.Assert(err, IsNil)
 }
 
 func (s *WebSuite) TestActiveSessions(c *C) {
 	sid := session.NewID()
-	pack := s.authPack(c)
-	clt, err := s.makeTerminal(pack, sid)
+	pack := s.authPack(c, "foo")
+
+	ws, err := s.makeTerminal(pack, sid)
 	c.Assert(err, IsNil)
-	defer clt.Close()
+	defer ws.Close()
 
-	// to make sure we have a session
-	_, err = io.WriteString(clt, "echo vinsong\r\n")
+	termHandler := newTerminalHandler()
+	stream, err := termHandler.asTerminalStream(ws)
 	c.Assert(err, IsNil)
 
-	// make sure server has replied
-	out := make([]byte, 1024)
-	n := 0
-	for err == nil {
-		clt.SetReadDeadline(time.Now().Add(time.Millisecond * 20))
-		n, err = clt.Read(out)
-		if err == nil && n > 0 {
-			break
-		}
-		ne, ok := err.(net.Error)
-		if ok && ne.Timeout() {
-			err = nil
-			continue
-		}
-		c.Error(err)
-	}
+	// To make sure we have a session.
+	_, err = io.WriteString(stream, "echo vinsong\r\n")
+	c.Assert(err, IsNil)
 
+	// Make sure server has replied.
+	err = s.waitForOutput(stream, "vinsong")
+	c.Assert(err, IsNil)
+
+	// Make sure this session appears in the list of active sessions.
 	var sessResp *siteSessionsGetResponse
 	for i := 0; i < 10; i++ {
-		// get site nodes and make sure the node has our active party
-		re, err := pack.clt.Get(pack.clt.Endpoint("webapi", "sites", s.server.ClusterName(), "sessions"), url.Values{})
+		// Get site nodes and make sure the node has our active party.
+		re, err := pack.clt.Get(context.Background(), pack.clt.Endpoint("webapi", "sites", s.server.ClusterName(), "sessions"), url.Values{})
 		c.Assert(err, IsNil)
 
 		c.Assert(json.Unmarshal(re.Bytes(), &sessResp), IsNil)
 		c.Assert(len(sessResp.Sessions), Equals, 1)
-		// sessions do not appear momentarily as there's async heartbeat
-		// procedure
-		time.Sleep(30 * time.Millisecond)
+
+		// Sessions do not appear momentarily as there's async heartbeat
+		// procedure.
+		time.Sleep(250 * time.Millisecond)
 	}
 
 	c.Assert(len(sessResp.Sessions), Equals, 1)
 	c.Assert(sessResp.Sessions[0].ID, Equals, sid)
-
-	// connect to session stream and receive events
-	stream := s.sessionStream(c, pack, sid)
-	defer stream.Close()
-	var event *sessionStreamEvent
-	c.Assert(websocket.JSON.Receive(stream, &event), IsNil)
-	c.Assert(event, NotNil)
 }
 
 func (s *WebSuite) TestCloseConnectionsOnLogout(c *C) {
 	sid := session.NewID()
-	pack := s.authPack(c)
-	clt, err := s.makeTerminal(pack, sid)
+	pack := s.authPack(c, "foo")
+
+	ws, err := s.makeTerminal(pack, sid)
 	c.Assert(err, IsNil)
-	defer clt.Close()
+	defer ws.Close()
+
+	termHandler := newTerminalHandler()
+	stream, err := termHandler.asTerminalStream(ws)
+	c.Assert(err, IsNil)
 
 	// to make sure we have a session
-	_, err = io.WriteString(clt, "expr 137 + 39\r\n")
+	_, err = io.WriteString(stream, "expr 137 + 39\r\n")
 	c.Assert(err, IsNil)
 
 	// make sure server has replied
 	out := make([]byte, 100)
-	clt.Read(out)
+	stream.Read(out)
 
 	_, err = pack.clt.Delete(
+		context.Background(),
 		pack.clt.Endpoint("webapi", "sessions"))
 	c.Assert(err, IsNil)
 
 	// wait until we timeout or detect that connection has been closed
-	after := time.After(time.Second)
+	after := time.After(5 * time.Second)
 	errC := make(chan error)
 	go func() {
 		for {
-			_, err := clt.Read(out)
+			_, err := stream.Read(out)
 			if err != nil {
 				errC <- err
 			}
@@ -1010,7 +1101,7 @@ func (s *WebSuite) TestCloseConnectionsOnLogout(c *C) {
 }
 
 func (s *WebSuite) TestCreateSession(c *C) {
-	pack := s.authPack(c)
+	pack := s.authPack(c, "foo")
 
 	sess := session.Session{
 		TerminalParams: session.TerminalParams{W: 300, H: 120},
@@ -1018,6 +1109,7 @@ func (s *WebSuite) TestCreateSession(c *C) {
 	}
 
 	re, err := pack.clt.PostJSON(
+		context.Background(),
 		pack.clt.Endpoint("webapi", "sites", s.server.ClusterName(), "sessions"),
 		siteSessionGenerateReq{Session: sess},
 	)
@@ -1028,50 +1120,12 @@ func (s *WebSuite) TestCreateSession(c *C) {
 	c.Assert(created.Session.ID, Not(Equals), "")
 }
 
-func (s *WebSuite) TestResizeTerminal(c *C) {
-	sid := session.NewID()
-	pack := s.authPack(c)
-	term, err := s.makeTerminal(pack, sid)
-	c.Assert(err, IsNil)
-	defer term.Close()
-
-	// to make sure we have a session
-	_, err = io.WriteString(term, "expr 137 + 39\r\n")
-	c.Assert(err, IsNil)
-
-	// make sure server has replied
-	out := make([]byte, 100)
-	term.Read(out)
-
-	params := session.TerminalParams{W: 300, H: 120}
-	_, err = pack.clt.PutJSON(
-		pack.clt.Endpoint("webapi", "sites", s.server.ClusterName(), "sessions", string(sid)),
-		siteSessionUpdateReq{TerminalParams: session.TerminalParams{W: 300, H: 120}},
-	)
-	c.Assert(err, IsNil)
-
-	re, err := pack.clt.Get(
-		pack.clt.Endpoint("webapi", "sites", s.server.ClusterName(), "sessions", string(sid)), url.Values{})
-	c.Assert(err, IsNil)
-
-	var se *sess.Session
-	c.Assert(json.Unmarshal(re.Bytes(), &se), IsNil)
-	c.Assert(se.TerminalParams, DeepEquals, params)
-}
-
 func (s *WebSuite) TestPlayback(c *C) {
-	pack := s.authPack(c)
+	pack := s.authPack(c, "foo")
 	sid := session.NewID()
-	term, err := s.makeTerminal(pack, sid)
+	ws, err := s.makeTerminal(pack, sid)
 	c.Assert(err, IsNil)
-	defer term.Close()
-}
-
-func removeSpace(in string) string {
-	for _, c := range []string{"\n", "\r", "\t"} {
-		in = strings.Replace(in, c, " ", -1)
-	}
-	return strings.TrimSpace(in)
+	defer ws.Close()
 }
 
 func (s *WebSuite) TestNewU2FUser(c *C) {
@@ -1092,7 +1146,7 @@ func (s *WebSuite) TestNewU2FUser(c *C) {
 	c.Assert(err, IsNil)
 
 	clt := s.client()
-	re, err := clt.Get(clt.Endpoint("webapi", "u2f", "signuptokens", token), url.Values{})
+	re, err := clt.Get(context.Background(), clt.Endpoint("webapi", "u2f", "signuptokens", token), url.Values{})
 	c.Assert(err, IsNil)
 
 	var u2fRegReq u2f.RegisterRequest
@@ -1103,7 +1157,7 @@ func (s *WebSuite) TestNewU2FUser(c *C) {
 
 	tempPass := "abc123"
 
-	re, err = clt.PostJSON(clt.Endpoint("webapi", "u2f", "users"), createNewU2FUserReq{
+	re, err = clt.PostJSON(context.Background(), clt.Endpoint("webapi", "u2f", "users"), createNewU2FUserReq{
 		InviteToken:         token,
 		Pass:                tempPass,
 		U2FRegisterResponse: *u2fRegResp,
@@ -1124,7 +1178,7 @@ func (s *WebSuite) TestNewU2FUser(c *C) {
 	clt = s.client(roundtrip.BearerAuth(rawSess.Token), roundtrip.CookieJar(jar))
 	jar.SetCookies(s.url(), re.Cookies())
 
-	re, err = clt.Get(clt.Endpoint("webapi", "sites"), url.Values{})
+	re, err = clt.Get(context.Background(), clt.Endpoint("webapi", "sites"), url.Values{})
 	c.Assert(err, IsNil)
 
 	var sites *getSitesResponse
@@ -1134,13 +1188,13 @@ func (s *WebSuite) TestNewU2FUser(c *C) {
 
 	// no session cookie:
 	clt = s.client(roundtrip.BearerAuth(rawSess.Token))
-	re, err = clt.Get(clt.Endpoint("webapi", "sites"), url.Values{})
+	re, err = clt.Get(context.Background(), clt.Endpoint("webapi", "sites"), url.Values{})
 	c.Assert(err, NotNil)
 	c.Assert(trace.IsAccessDenied(err), Equals, true)
 
 	// no bearer token:
 	clt = s.client(roundtrip.CookieJar(jar))
-	re, err = clt.Get(clt.Endpoint("webapi", "sites"), url.Values{})
+	re, err = clt.Get(context.Background(), clt.Endpoint("webapi", "sites"), url.Values{})
 	c.Assert(err, NotNil)
 	c.Assert(trace.IsAccessDenied(err), Equals, true)
 }
@@ -1175,7 +1229,7 @@ func (s *WebSuite) TestU2FLogin(c *C) {
 
 	// normal login
 	clt := s.client()
-	re, err := clt.PostJSON(clt.Endpoint("webapi", "u2f", "signrequest"), client.U2fSignRequestReq{
+	re, err := clt.PostJSON(context.Background(), clt.Endpoint("webapi", "u2f", "signrequest"), client.U2fSignRequestReq{
 		User: "bob",
 		Pass: tempPass,
 	})
@@ -1186,7 +1240,7 @@ func (s *WebSuite) TestU2FLogin(c *C) {
 	u2fSignResp, err := s.mockU2F.SignResponse(&u2fSignReq)
 	c.Assert(err, IsNil)
 
-	_, err = clt.PostJSON(clt.Endpoint("webapi", "u2f", "sessions"), u2fSignResponseReq{
+	_, err = clt.PostJSON(context.Background(), clt.Endpoint("webapi", "u2f", "sessions"), u2fSignResponseReq{
 		User:            "bob",
 		U2FSignResponse: *u2fSignResp,
 	})
@@ -1194,7 +1248,7 @@ func (s *WebSuite) TestU2FLogin(c *C) {
 
 	// bad login: corrupted sign responses, should fail
 
-	re, err = clt.PostJSON(clt.Endpoint("webapi", "u2f", "signrequest"), client.U2fSignRequestReq{
+	re, err = clt.PostJSON(context.Background(), clt.Endpoint("webapi", "u2f", "signrequest"), client.U2fSignRequestReq{
 		User: "bob",
 		Pass: tempPass,
 	})
@@ -1208,7 +1262,7 @@ func (s *WebSuite) TestU2FLogin(c *C) {
 	u2fSignRespCopy := u2fSignResp
 	u2fSignRespCopy.KeyHandle = u2fSignRespCopy.KeyHandle + u2fSignRespCopy.KeyHandle
 
-	_, err = clt.PostJSON(clt.Endpoint("webapi", "u2f", "sessions"), u2fSignResponseReq{
+	_, err = clt.PostJSON(context.Background(), clt.Endpoint("webapi", "u2f", "sessions"), u2fSignResponseReq{
 		User:            "bob",
 		U2FSignResponse: *u2fSignRespCopy,
 	})
@@ -1218,7 +1272,7 @@ func (s *WebSuite) TestU2FLogin(c *C) {
 	u2fSignRespCopy = u2fSignResp
 	u2fSignRespCopy.SignatureData = u2fSignRespCopy.SignatureData[:10] + u2fSignRespCopy.SignatureData[20:]
 
-	_, err = clt.PostJSON(clt.Endpoint("webapi", "u2f", "sessions"), u2fSignResponseReq{
+	_, err = clt.PostJSON(context.Background(), clt.Endpoint("webapi", "u2f", "sessions"), u2fSignResponseReq{
 		User:            "bob",
 		U2FSignResponse: *u2fSignRespCopy,
 	})
@@ -1228,7 +1282,7 @@ func (s *WebSuite) TestU2FLogin(c *C) {
 	u2fSignRespCopy = u2fSignResp
 	u2fSignRespCopy.ClientData = u2fSignRespCopy.ClientData[:10] + u2fSignRespCopy.ClientData[20:]
 
-	_, err = clt.PostJSON(clt.Endpoint("webapi", "u2f", "sessions"), u2fSignResponseReq{
+	_, err = clt.PostJSON(context.Background(), clt.Endpoint("webapi", "u2f", "sessions"), u2fSignResponseReq{
 		User:            "bob",
 		U2FSignResponse: *u2fSignRespCopy,
 	})
@@ -1238,7 +1292,7 @@ func (s *WebSuite) TestU2FLogin(c *C) {
 
 	s.mockU2F.SetCounter(0)
 
-	re, err = clt.PostJSON(clt.Endpoint("webapi", "u2f", "signrequest"), client.U2fSignRequestReq{
+	re, err = clt.PostJSON(context.Background(), clt.Endpoint("webapi", "u2f", "signrequest"), client.U2fSignRequestReq{
 		User: "bob",
 		Pass: tempPass,
 	})
@@ -1248,7 +1302,7 @@ func (s *WebSuite) TestU2FLogin(c *C) {
 	u2fSignResp, err = s.mockU2F.SignResponse(&u2fSignReq)
 	c.Assert(err, IsNil)
 
-	_, err = clt.PostJSON(clt.Endpoint("webapi", "u2f", "sessions"), u2fSignResponseReq{
+	_, err = clt.PostJSON(context.Background(), clt.Endpoint("webapi", "u2f", "sessions"), u2fSignResponseReq{
 		User:            "bob",
 		U2FSignResponse: *u2fSignResp,
 	})
@@ -1260,7 +1314,7 @@ func (s *WebSuite) TestU2FLogin(c *C) {
 func (s *WebSuite) TestPing(c *C) {
 	wc := s.client()
 
-	re, err := wc.Get(wc.Endpoint("webapi", "ping"), url.Values{})
+	re, err := wc.Get(context.Background(), wc.Endpoint("webapi", "ping"), url.Values{})
 	c.Assert(err, IsNil)
 
 	var out *client.PingResponse
@@ -1306,7 +1360,7 @@ func (s *WebSuite) TestMultipleConnectors(c *C) {
 	c.Assert(err, IsNil)
 
 	// hit the ping endpoint to get the auth type and connector name
-	re, err := wc.Get(wc.Endpoint("webapi", "ping"), url.Values{})
+	re, err := wc.Get(context.Background(), wc.Endpoint("webapi", "ping"), url.Values{})
 	c.Assert(err, IsNil)
 	var out *client.PingResponse
 	c.Assert(json.Unmarshal(re.Bytes(), &out), IsNil)
@@ -1327,7 +1381,7 @@ func (s *WebSuite) TestMultipleConnectors(c *C) {
 	c.Assert(err, IsNil)
 
 	// hit the ping endpoing to get the auth type and connector name
-	re, err = wc.Get(wc.Endpoint("webapi", "ping"), url.Values{})
+	re, err = wc.Get(context.Background(), wc.Endpoint("webapi", "ping"), url.Values{})
 	c.Assert(err, IsNil)
 	c.Assert(json.Unmarshal(re.Bytes(), &out), IsNil)
 
@@ -1335,31 +1389,198 @@ func (s *WebSuite) TestMultipleConnectors(c *C) {
 	c.Assert(out.Auth.OIDC.Name, Equals, "foo")
 }
 
-type nodeProviderMock func() []services.Server
-
-func (mock nodeProviderMock) GetNodes(namespace string) ([]services.Server, error) {
-	return mock(), nil
+type authProviderMock struct {
+	server services.ServerV2
 }
 
-func (s *WebSuite) makeTerminalHandler(login string, server string, v2Servers []services.ServerV2) (*TerminalHandler, error) {
-	var req = TerminalRequest{
-		Login:  login,
-		Server: server,
+func (mock authProviderMock) GetNodes(n string, opts ...services.MarshalOption) ([]services.Server, error) {
+	return []services.Server{&mock.server}, nil
+}
+
+func (mock authProviderMock) GetSessionEvents(n string, s session.ID, c int, p bool) ([]events.EventFields, error) {
+	return []events.EventFields{}, nil
+}
+
+func (s *WebSuite) makeTerminal(pack *authPack, opts ...session.ID) (*websocket.Conn, error) {
+	var sessionID session.ID
+	if len(opts) == 0 {
+		sessionID = session.NewID()
+	} else {
+		sessionID = opts[0]
 	}
 
-	req.SessionID = "eca53e45-86a9-11e7-a893-0242ac0a0101"
-	req.Term.H = 1
-	req.Term.W = 1
+	u := url.URL{
+		Host:   s.url().Host,
+		Scheme: client.WSS,
+		Path:   fmt.Sprintf("/v1/webapi/sites/%v/connect", currentSiteShortcut),
+	}
+	data, err := json.Marshal(TerminalRequest{
+		Server: s.srvID,
+		Login:  pack.login,
+		Term: session.TerminalParams{
+			W: 100,
+			H: 100,
+		},
+		SessionID: sessionID,
+	})
+	if err != nil {
+		return nil, err
+	}
 
-	var servers = []services.Server{}
-	return NewTerminal(req, nodeProviderMock(func() []services.Server {
-		for _, s := range v2Servers {
-			servers = append(servers, &s)
+	q := u.Query()
+	q.Set("params", string(data))
+	q.Set(roundtrip.AccessTokenQueryParam, pack.session.Token)
+	u.RawQuery = q.Encode()
+
+	wscfg, err := websocket.NewConfig(u.String(), "http://localhost")
+	wscfg.TlsConfig = &tls.Config{
+		InsecureSkipVerify: true,
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	for _, cookie := range pack.cookies {
+		wscfg.Header.Add("Cookie", cookie.String())
+	}
+
+	ws, err := websocket.DialConfig(wscfg)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	return ws, nil
+}
+
+func (s *WebSuite) waitForOutput(stream *terminalStream, substr string) error {
+	tickerCh := time.Tick(250 * time.Millisecond)
+	timeoutCh := time.After(10 * time.Second)
+
+	for {
+		select {
+		case <-tickerCh:
+			out := make([]byte, 100)
+			_, err := stream.Read(out)
+			if err != nil {
+				return trace.Wrap(err)
+			}
+			if strings.Contains(removeSpace(string(out)), substr) {
+				return nil
+			}
+		case <-timeoutCh:
+			return trace.BadParameter("timeout waiting on terminal for output: %v", substr)
 		}
+	}
+}
 
-		return servers
-	}), nil)
+func (s *WebSuite) waitForRawEvent(ws *websocket.Conn, timeout time.Duration) error {
+	timeoutContext, timeoutCancel := context.WithTimeout(context.Background(), timeout)
+	defer timeoutCancel()
+	doneContext, doneCancel := context.WithCancel(context.Background())
+	defer doneCancel()
 
+	go func() {
+		for {
+			time.Sleep(250 * time.Millisecond)
+
+			var raw []byte
+			err := websocket.Message.Receive(ws, &raw)
+			if err != nil {
+				continue
+			}
+
+			var envelope Envelope
+			err = proto.Unmarshal(raw, &envelope)
+			if err != nil {
+				continue
+			}
+
+			if envelope.GetType() == defaults.WebsocketRaw {
+				doneCancel()
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-timeoutContext.Done():
+			return trace.BadParameter("timeout waiting for resize event")
+		case <-doneContext.Done():
+			return nil
+		}
+	}
+}
+
+func (s *WebSuite) waitForResizeEvent(ws *websocket.Conn, timeout time.Duration) error {
+	timeoutContext, timeoutCancel := context.WithTimeout(context.Background(), timeout)
+	defer timeoutCancel()
+	doneContext, doneCancel := context.WithCancel(context.Background())
+	defer doneCancel()
+
+	go func() {
+		for {
+			time.Sleep(250 * time.Millisecond)
+
+			var raw []byte
+			err := websocket.Message.Receive(ws, &raw)
+			if err != nil {
+				continue
+			}
+
+			var envelope Envelope
+			err = proto.Unmarshal(raw, &envelope)
+			if err != nil {
+				continue
+			}
+
+			if envelope.GetType() != defaults.WebsocketAudit {
+				continue
+			}
+
+			var e events.EventFields
+			err = json.Unmarshal([]byte(envelope.GetPayload()), &e)
+			if err != nil {
+				continue
+			}
+
+			if e.GetType() == events.ResizeEvent {
+				doneCancel()
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-timeoutContext.Done():
+			return trace.BadParameter("timeout waiting for resize event")
+		case <-doneContext.Done():
+			return nil
+		}
+	}
+}
+
+func (s *WebSuite) clientNoRedirects(opts ...roundtrip.ClientParam) *client.WebClient {
+	hclient := client.NewInsecureWebClient()
+	hclient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	opts = append(opts, roundtrip.HTTPClient(hclient))
+	wc, err := client.NewWebClient(s.url().String(), opts...)
+	if err != nil {
+		panic(err)
+	}
+	return wc
+}
+
+func (s *WebSuite) client(opts ...roundtrip.ClientParam) *client.WebClient {
+	opts = append(opts, roundtrip.HTTPClient(client.NewInsecureWebClient()))
+	wc, err := client.NewWebClient(s.url().String(), opts...)
+	if err != nil {
+		panic(err)
+	}
+	return wc
 }
 
 func (s *WebSuite) login(clt *client.WebClient, cookieToken string, reqToken string, reqData interface{}) (*roundtrip.Response, error) {
@@ -1376,6 +1597,14 @@ func (s *WebSuite) login(clt *client.WebClient, cookieToken string, reqToken str
 	}))
 }
 
+func (s *WebSuite) url() *url.URL {
+	u, err := url.Parse("https://" + s.webServer.Listener.Addr().String())
+	if err != nil {
+		panic(err)
+	}
+	return u
+}
+
 func addCSRFCookieToReq(req *http.Request, token string) {
 	cookie := &http.Cookie{
 		Name:  csrf.CookieName,
@@ -1383,4 +1612,19 @@ func addCSRFCookieToReq(req *http.Request, token string) {
 	}
 
 	req.AddCookie(cookie)
+}
+
+func removeSpace(in string) string {
+	for _, c := range []string{"\n", "\r", "\t"} {
+		in = strings.Replace(in, c, " ", -1)
+	}
+	return strings.TrimSpace(in)
+}
+
+func newTerminalHandler() TerminalHandler {
+	return TerminalHandler{
+		log:     logrus.WithFields(logrus.Fields{}),
+		encoder: unicode.UTF8.NewEncoder(),
+		decoder: unicode.UTF8.NewDecoder(),
+	}
 }

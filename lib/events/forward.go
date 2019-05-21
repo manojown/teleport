@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/gravitational/teleport/lib/session"
-	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
@@ -46,8 +45,6 @@ type ForwarderConfig struct {
 	ForwardTo IAuditLog
 	// Clock is a clock to set for tests
 	Clock clockwork.Clock
-	// UID is UID generator
-	UID utils.UID
 }
 
 // CheckAndSetDefaults checks and sets default values
@@ -60,9 +57,6 @@ func (s *ForwarderConfig) CheckAndSetDefaults() error {
 	}
 	if s.Clock == nil {
 		s.Clock = clockwork.NewRealClock()
-	}
-	if s.UID == nil {
-		s.UID = utils.NewRealUID()
 	}
 	return nil
 }
@@ -112,18 +106,14 @@ func (l *Forwarder) Close() error {
 }
 
 // EmitAuditEvent emits audit event
-func (l *Forwarder) EmitAuditEvent(event Event, fields EventFields) error {
-	err := UpdateEventFields(event, fields, l.Clock, l.UID)
-	if err != nil {
-		return trace.Wrap(err)
-	}
+func (l *Forwarder) EmitAuditEvent(eventType string, fields EventFields) error {
 	data, err := json.Marshal(fields)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 	chunks := []*SessionChunk{
 		{
-			EventType: event.Name,
+			EventType: eventType,
 			Data:      data,
 			Time:      time.Now().UTC().UnixNano(),
 		},
@@ -138,7 +128,7 @@ func (l *Forwarder) EmitAuditEvent(event Event, fields EventFields) error {
 
 // PostSessionSlice sends chunks of recorded session to the event log
 func (l *Forwarder) PostSessionSlice(slice SessionSlice) error {
-	// setup slice sets slice version, properly numerates
+	// setup slice sets slice verison, properly numerates
 	// all chunks and
 	chunksWithoutPrintEvents, err := l.setupSlice(&slice)
 	if err != nil {

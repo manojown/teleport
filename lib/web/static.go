@@ -60,8 +60,6 @@ func NewStaticFileSystem(debugMode bool) (http.FileSystem, error) {
 				return nil, trace.Wrap(err)
 			}
 			debugAssetsPath = path.Join(exePath, "../web/dist")
-			// debugAssetsPath = "/home/ubuntu/go/src/github.com/gravitational/teleport/web/dist"
-
 		}
 
 		for _, af := range assetsToCheck {

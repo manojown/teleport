@@ -33,7 +33,7 @@ import (
 func TestSSHUtils(t *testing.T) { TestingT(t) }
 
 type ServerSuite struct {
-	signers []ssh.Signer
+	signer ssh.Signer
 }
 
 var _ = Suite(&ServerSuite{})
@@ -41,9 +41,10 @@ var _ = Suite(&ServerSuite{})
 func (s *ServerSuite) SetUpSuite(c *C) {
 	utils.InitLoggerForTests()
 
-	pk, err := ssh.ParsePrivateKey(fixtures.PEMBytes["ecdsa"])
+	var err error
+
+	s.signer, err = ssh.ParsePrivateKey(fixtures.PEMBytes["ecdsa"])
 	c.Assert(err, IsNil)
-	s.signers = []ssh.Signer{pk}
 }
 
 func (s *ServerSuite) TestStartStop(c *C) {
@@ -57,13 +58,17 @@ func (s *ServerSuite) TestStartStop(c *C) {
 		"test",
 		utils.NetAddr{AddrNetwork: "tcp", Addr: "localhost:0"},
 		fn,
-		s.signers,
+		[]ssh.Signer{s.signer},
 		AuthMethods{Password: pass("abc123")},
 	)
 	c.Assert(err, IsNil)
 	c.Assert(srv.Start(), IsNil)
 
-	clt, err := ssh.Dial("tcp", srv.Addr(), &ssh.ClientConfig{Auth: []ssh.AuthMethod{ssh.Password("abc123")}})
+	clientConfig := &ssh.ClientConfig{
+		Auth:            []ssh.AuthMethod{ssh.Password("abc123")},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
+	}
+	clt, err := ssh.Dial("tcp", srv.Addr(), clientConfig)
 	c.Assert(err, IsNil)
 	defer clt.Close()
 
@@ -92,14 +97,18 @@ func (s *ServerSuite) TestShutdown(c *C) {
 		"test",
 		utils.NetAddr{AddrNetwork: "tcp", Addr: "localhost:0"},
 		fn,
-		s.signers,
+		[]ssh.Signer{s.signer},
 		AuthMethods{Password: pass("abc123")},
 		SetShutdownPollPeriod(10*time.Millisecond),
 	)
 	c.Assert(err, IsNil)
 	c.Assert(srv.Start(), IsNil)
 
-	clt, err := ssh.Dial("tcp", srv.Addr(), &ssh.ClientConfig{Auth: []ssh.AuthMethod{ssh.Password("abc123")}})
+	clientConfig := &ssh.ClientConfig{
+		Auth:            []ssh.AuthMethod{ssh.Password("abc123")},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
+	}
+	clt, err := ssh.Dial("tcp", srv.Addr(), clientConfig)
 	c.Assert(err, IsNil)
 	defer clt.Close()
 
@@ -124,9 +133,7 @@ func (s *ServerSuite) TestShutdown(c *C) {
 }
 
 func (s *ServerSuite) TestConfigureCiphers(c *C) {
-	called := false
 	fn := NewChanHandlerFunc(func(_ net.Conn, conn *ssh.ServerConn, nch ssh.NewChannel) {
-		called = true
 		nch.Reject(ssh.Prohibited, "nothing to see here")
 	})
 
@@ -135,7 +142,7 @@ func (s *ServerSuite) TestConfigureCiphers(c *C) {
 		"test",
 		utils.NetAddr{AddrNetwork: "tcp", Addr: "localhost:0"},
 		fn,
-		s.signers,
+		[]ssh.Signer{s.signer},
 		AuthMethods{Password: pass("abc123")},
 		SetCiphers([]string{"aes128-ctr"}),
 	)
@@ -147,7 +154,8 @@ func (s *ServerSuite) TestConfigureCiphers(c *C) {
 		Config: ssh.Config{
 			Ciphers: []string{"aes256-ctr"},
 		},
-		Auth: []ssh.AuthMethod{ssh.Password("abc123")},
+		Auth:            []ssh.AuthMethod{ssh.Password("abc123")},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 	clt, err := ssh.Dial("tcp", srv.Addr(), &cc)
 	c.Assert(err, NotNil, Commentf("cipher mismatch, should fail, got nil"))
@@ -157,7 +165,8 @@ func (s *ServerSuite) TestConfigureCiphers(c *C) {
 		Config: ssh.Config{
 			Ciphers: []string{"aes128-ctr"},
 		},
-		Auth: []ssh.AuthMethod{ssh.Password("abc123")},
+		Auth:            []ssh.AuthMethod{ssh.Password("abc123")},
+		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
 	}
 	clt, err = ssh.Dial("tcp", srv.Addr(), &cc)
 	c.Assert(err, IsNil, Commentf("cipher match, should not fail, got error: %v", err))

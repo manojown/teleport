@@ -32,7 +32,6 @@ class AppRec extends Record({
   }
 
   getClusterName() {
-    
     return this.get('siteId');
   }
 

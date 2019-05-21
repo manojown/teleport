@@ -28,7 +28,6 @@ import (
 	"github.com/gravitational/teleport/lib/auth/testauthority"
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/backend/boltbk"
-	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/utils"
 
@@ -199,7 +198,7 @@ func (s *AuthInitSuite) TestAuthPreference(c *C) {
 		StaticTokens:   staticTokens,
 		AuthPreference: ap,
 	}
-	as, _, err := Init(ac)
+	as, err := Init(ac)
 	c.Assert(err, IsNil)
 
 	cap, err := as.GetAuthPreference()
@@ -221,7 +220,7 @@ func (s *AuthInitSuite) TestClusterID(c *C) {
 	})
 	c.Assert(err, IsNil)
 
-	authServer, _, err := Init(InitConfig{
+	authServer, err := Init(InitConfig{
 		DataDir:       c.MkDir(),
 		HostUUID:      "00000000-0000-0000-0000-000000000000",
 		NodeName:      "foo",
@@ -238,7 +237,7 @@ func (s *AuthInitSuite) TestClusterID(c *C) {
 	c.Assert(clusterID, Not(Equals), "")
 
 	// do it again and make sure cluster ID hasn't changed
-	authServer, _, err = Init(InitConfig{
+	authServer, err = Init(InitConfig{
 		DataDir:       c.MkDir(),
 		HostUUID:      "00000000-0000-0000-0000-000000000000",
 		NodeName:      "foo",
@@ -254,10 +253,8 @@ func (s *AuthInitSuite) TestClusterID(c *C) {
 	c.Assert(cc.GetClusterID(), Equals, clusterID)
 }
 
-// DELETE IN: 2.6.0
-// Migration of cert_format will be done in Teleport 2.5.0, so this test can
-// be removed in Teleport 2.6.0.
-func (s *AuthInitSuite) TestOptions(c *C) {
+// TestClusterName ensures that a cluster can not be renamed.
+func (s *AuthInitSuite) TestClusterName(c *C) {
 	bk, err := boltbk.New(backend.Params{"path": c.MkDir()})
 	c.Assert(err, IsNil)
 
@@ -266,7 +263,7 @@ func (s *AuthInitSuite) TestOptions(c *C) {
 	})
 	c.Assert(err, IsNil)
 
-	authServer, _, err := Init(InitConfig{
+	_, err = Init(InitConfig{
 		DataDir:       c.MkDir(),
 		HostUUID:      "00000000-0000-0000-0000-000000000000",
 		NodeName:      "foo",
@@ -277,16 +274,14 @@ func (s *AuthInitSuite) TestOptions(c *C) {
 	})
 	c.Assert(err, IsNil)
 
-	// upsert role with no values for certificate format
-	role := services.NewAdminRole()
-	role.SetOptions(services.RoleOptions{
-		services.MaxSessionTTL: services.NewDuration(defaults.MaxCertDuration),
+	// Start the auth server with a different cluster name. The auth server
+	// should start, but with the original name.
+	clusterName, err = services.NewClusterName(services.ClusterNameSpecV2{
+		ClusterName: "dev.localhost",
 	})
-	err = authServer.UpsertRole(role, backend.Forever)
 	c.Assert(err, IsNil)
 
-	// do it again and make sure the options have been populated
-	authServer, _, err = Init(InitConfig{
+	authServer, err := Init(InitConfig{
 		DataDir:       c.MkDir(),
 		HostUUID:      "00000000-0000-0000-0000-000000000000",
 		NodeName:      "foo",
@@ -297,10 +292,7 @@ func (s *AuthInitSuite) TestOptions(c *C) {
 	})
 	c.Assert(err, IsNil)
 
-	role, err = authServer.GetRole(teleport.AdminRoleName)
+	cn, err := authServer.GetClusterName()
 	c.Assert(err, IsNil)
-
-	certificateFormat, err := role.GetOptions().GetString(services.CertificateFormat)
-	c.Assert(err, IsNil)
-	c.Assert(certificateFormat, Equals, teleport.CertificateFormatStandard)
+	c.Assert(cn.GetClusterName(), Equals, "me.localhost")
 }

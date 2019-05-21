@@ -22,20 +22,13 @@ adduser teleport adm
 mkdir -p /var/run/teleport/
 chown -R teleport:adm /var/run/teleport
 
+# Setup teleport data dir used for transient storage
+mkdir -p /var/lib/teleport/
+chown -R teleport:adm /var/lib/teleport
+
 # Setup teleport auth server config file
 LOCAL_IP=`curl http://169.254.169.254/latest/meta-data/local-ipv4`
 LOCAL_HOSTNAME=`curl http://169.254.169.254/latest/meta-data/local-hostname`
-
-# Mount EFS for audit logs storage.
-# Teleport auth servers store audit logs on EFS shared file system
-apt-get install -y nfs-common
-mkdir -p /var/lib/teleport/log
-echo "${efs_mount_point}:/ /var/lib/teleport/log nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 0 0" >> /etc/fstab
-until mount -a -t nfs4
-do
-    echo "mount failed, try again after 1 second"
-    sleep 1
-done
 
 # Set host UUID so auth server picks it up, as each auth server's
 # logs are stored in individual folder /var/lib/teleport/log/<host_uuid>/
@@ -76,6 +69,8 @@ teleport:
     type: dynamodb
     region: ${region}
     table_name: ${dynamo_table_name}
+    audit_table_name: ${dynamo_events_table_name}
+    audit_sessions_uri: s3://${s3_bucket}/records
 
 auth_service:
   enabled: yes
@@ -167,17 +162,17 @@ set -o pipefail
 
 # Proxy token authenticates proxies joining the cluster
 PROXY_TOKEN=\$$(uuid)
-tctl nodes add --roles=proxy --ttl=4h --token=\$${PROXY_TOKEN}
+/usr/local/bin/tctl nodes add --roles=proxy --ttl=4h --token=\$${PROXY_TOKEN}
 aws ssm put-parameter --name /teleport/${cluster_name}/tokens/proxy --region ${region} --type="SecureString" --value="\$${PROXY_TOKEN}" --overwrite
 
 # Node token authenticates nodes joining the cluster
 NODE_TOKEN=\$$(uuid)
-tctl nodes add --roles=node --ttl=4h --token=\$${NODE_TOKEN}
+/usr/local/bin/tctl nodes add --roles=node --ttl=4h --token=\$${NODE_TOKEN}
 aws ssm put-parameter --name /teleport/${cluster_name}/tokens/node --region ${region} --type="SecureString" --value="\$${NODE_TOKEN}" --overwrite
 
 # Export CA certificate to SSM parameter store
 # so nodes and proxies can check the identity of the auth server they are connecting to
-CERT=\$$(tctl auth export --type=tls)
+CERT=\$$(/usr/local/bin/tctl auth export --type=tls)
 aws ssm put-parameter --name /teleport/${cluster_name}/ca --region ${region} --type="String" --value="\$${CERT}" --overwrite
 
 EOF

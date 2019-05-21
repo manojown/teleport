@@ -20,11 +20,10 @@ import { sortBy } from 'lodash';
 import { isMatch } from 'app/lib/objectUtils';
 import InputSearch from './../inputSearch';
 import InputSshServer from './../inputSshServer';
-import { Column, Cell, TextCell, SortHeaderCell, SortTypes, EmptyIndicator } from 'app/components/table/table.jsx';
+import { Table, Column, Cell, TextCell, SortHeaderCell, SortTypes, EmptyIndicator } from 'app/components/table.jsx';
 import ClusterSelector from './../clusterSelector.jsx';
 import cfg from 'app/config';
 import history from 'app/services/history';
-import { PagedTable } from './../table/pagedTable.jsx';
 
 const EmptyValue = ({ text='Empty' }) => (
   <small className="text-muted">
@@ -32,7 +31,7 @@ const EmptyValue = ({ text='Empty' }) => (
   </small>
 );
 
-const TagCell = ({ rowIndex, data, ...props }) => {
+const TagCell = ({rowIndex, data, ...props}) => {
   const { tags } = data[rowIndex];
   let $content = tags.map((item, index) => (
     <span key={index} title={`${item.name}:${item.value}`} className="label label-default grv-nodes-table-label">
@@ -61,9 +60,7 @@ class LoginCell extends React.Component {
     }
   }
 
-  onShowLoginsClick = e => {
-    e.stopPropagation();
-    e.nativeEvent.stopImmediatePropagation();
+  onShowLoginsClick = () => {
     this.refs.customLogin.focus()
   }
 
@@ -96,7 +93,7 @@ class LoginCell extends React.Component {
 
     return (
       <Cell {...props}>
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <div style={{ display: "flex" }}>
           {logins.length === 0 &&
             <EmptyValue text="No assigned logins"/>
           }
@@ -113,7 +110,7 @@ class LoginCell extends React.Component {
               <ul className="dropdown-menu pull-right">
                 <li>
                   <div className="input-group-sm grv-nodes-custom-login">
-                  <input className="form-control" ref="customLogin"
+                    <input className="form-control" ref="customLogin"
                       placeholder="Enter login name..."
                       onKeyPress={this.onKeyPress}
                       autoFocus
@@ -204,7 +201,6 @@ class NodeList extends React.Component {
   render() {
     const { sshHistory, siteId, nodeRecords, logins, onLoginClick } = this.props;
     const searchValue = this.state.filter;
-    console.log("nodeRecords",nodeRecords);
     const data = this.sortAndFilter(nodeRecords);
     return (
       <div className="grv-nodes m-t">
@@ -212,8 +208,9 @@ class NodeList extends React.Component {
           <h2 className="text-center no-margins"> Nodes </h2>
           <div className="grv-flex">
             <ClusterSelector/>
-            <InputSearch autoFocus value={searchValue} onChange={this.onFilterChange} />
+            <InputSearch value={searchValue} onChange={this.onFilterChange} />
             <InputSshServer
+              autoFocus={true}
               clusterId={siteId}
               sshHistory={sshHistory}
               onEnter={this.onSshInputEnter} />
@@ -222,17 +219,18 @@ class NodeList extends React.Component {
         <div className="m-t">
           {
             data.length === 0 && this.state.filter.length > 0 ? <EmptyIndicator text="No matching nodes found"/> :
-            <PagedTable className="grv-nodes-table" tableClass="table-striped" data={data} pageSize={100}>
+
+            <Table rowCount={data.length} className="table-striped grv-nodes-table">
               <Column
                 columnKey="hostname"
                 header={
                   <SortHeaderCell
                     sortDir={this.state.colSortDirs.hostname}
                     onSortChange={this.onSortChange}
-                    title="Hostname1"
+                    title="Hostname"
                   />
                 }
-                cell={<TextCell /> }
+                cell={<TextCell data={data}/> }
               />
               <Column
                 columnKey="addr"
@@ -243,30 +241,18 @@ class NodeList extends React.Component {
                     title="Address"
                   />
                 }
-                cell={<TextCell /> }
-              />
-              <Column
-                columnKey="alias"
-                header={
-                  <SortHeaderCell
-                    sortDir={this.state.colSortDirs.alias}
-                    onSortChange={this.onSortChange}
-                    title="Alias"
-                  />
-                }
-                cell={<TextCell /> }
+                cell={<TextCell data={data}/> }
               />
               <Column
                 header={<Cell>Labels</Cell> }
-                cell={<TagCell /> }
+                cell={<TagCell data={data}/> }
               />
-                <Column
-                className="grv-nodes-table-login"
+              <Column
                 onLoginClick={onLoginClick}
                 header={<Cell>Login as</Cell> }
-                cell={<LoginCell logins={logins}/> }
+                cell={<LoginCell data={data} logins={logins}/> }
               />
-            </PagedTable>
+            </Table>
           }
         </div>
       </div>

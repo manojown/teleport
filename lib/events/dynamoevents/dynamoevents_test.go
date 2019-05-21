@@ -49,7 +49,6 @@ func (s *DynamoeventsSuite) SetUpSuite(c *check.C) {
 		Region:    "us-west-1",
 		Tablename: fmt.Sprintf("teleport-test-%v", uuid.New()),
 		Clock:     fakeClock,
-		UID:       utils.NewFakeUID(),
 	})
 	c.Assert(err, check.IsNil)
 	s.log = log
