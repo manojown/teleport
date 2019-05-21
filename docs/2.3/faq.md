@@ -30,9 +30,10 @@ and [Using OpenSSH servers](admin-guide.md) in the Admin Manual.
 
 [Ports](admin-guide.md#ports) section of the Admin Manual covers it.
 
-### Does Teleport support authentication via OAuth, SAML or Active Directory?
+### Does Teleport support LDAP or AD?
 
-Gravitational offers this feature for the [commercial versions of Teleport](enterprise.md#rbac).
+Gravitational offers this feature as part of the commercial version for Teleport called
+[Teleport Enterprise](enterprise.md#rbac)
 
 ### Do you offer a commercial version of Teleport?
 

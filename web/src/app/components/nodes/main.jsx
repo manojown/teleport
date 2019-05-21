@@ -25,6 +25,11 @@ import { getters as sshHistoryGetters } from 'app/flux/sshHistory/store';
 import withStorage from './../withStorage.jsx';
 
 const Nodes = props => {
+  console.log("============--------------============");
+  
+  console.log("props",props);
+  console.log("============--------------============");
+  
   const { siteNodes, sshHistory, aclStore, sites, siteId, storage } = props;
   const logins = aclStore.getSshLogins().toJS();
   const nodeRecords = siteNodes.toJS();

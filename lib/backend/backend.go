@@ -1,5 +1,5 @@
 /*
-Copyright 2015-2019 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -12,198 +12,82 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
 */
 
-// Package backend provides storage backend abstraction layer
 package backend
 
 import (
-	"bytes"
-	"context"
-	"fmt"
-	"sort"
-	"strings"
 	"time"
 
+	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
 )
 
 // Forever means that object TTL will not expire unless deleted
 const (
-	Forever time.Duration = 0
+	Forever         time.Duration = 0
+	MaxLockDuration time.Duration = time.Minute
 )
 
 // Backend implements abstraction over local or remote storage backend
+//
+// Storage is modeled after BoltDB:
+//  * bucket is a slice []string{"a", "b"}
+//  * buckets contain key value pairs
+//
 type Backend interface {
-	// Create creates item if it does not exist
-	Create(ctx context.Context, i Item) (*Lease, error)
-
-	// Put puts value into backend (creates if it does not
-	// exists, updates it otherwise)
-	Put(ctx context.Context, i Item) (*Lease, error)
-
-	// CompareAndSwap compares item with existing item
-	// and replaces is with replaceWith item
-	CompareAndSwap(ctx context.Context, expected Item, replaceWith Item) (*Lease, error)
-
-	// Update updates value in the backend
-	Update(ctx context.Context, i Item) (*Lease, error)
-
-	// Get returns a single item or not found error
-	Get(ctx context.Context, key []byte) (*Item, error)
-
-	// GetRange returns query range
-	GetRange(ctx context.Context, startKey []byte, endKey []byte, limit int) (*GetResult, error)
-
-	// Delete deletes item by key, returns NotFound error
-	// if item does not exist
-	Delete(ctx context.Context, key []byte) error
-
-	// DeleteRange deletes range of items with keys between startKey and endKey
-	DeleteRange(ctx context.Context, startKey, endKey []byte) error
-
-	// KeepAlive keeps object from expiring, updates lease on the existing object,
-	// expires contains the new expiry to set on the lease,
-	// some backends may ignore expires based on the implementation
-	// in case if the lease managed server side
-	KeepAlive(ctx context.Context, lease Lease, expires time.Time) error
-
-	// NewWatcher returns a new event watcher
-	NewWatcher(ctx context.Context, watch Watch) (Watcher, error)
-
-	// Close closes backend and all associated resources
+	// GetKeys returns a list of keys for a given path
+	GetKeys(bucket []string) ([]string, error)
+	// CreateVal creates value with a given TTL and key in the bucket
+	// if the value already exists, it must return trace.AlreadyExistsError
+	CreateVal(bucket []string, key string, val []byte, ttl time.Duration) error
+	// UpsertVal updates or inserts value with a given TTL into a bucket
+	// ForeverTTL for no TTL
+	UpsertVal(bucket []string, key string, val []byte, ttl time.Duration) error
+	// GetVal return a value for a given key in the bucket
+	GetVal(path []string, key string) ([]byte, error)
+	// DeleteKey deletes a key in a bucket
+	DeleteKey(bucket []string, key string) error
+	// DeleteBucket deletes the bucket by a given path
+	DeleteBucket(path []string, bkt string) error
+	// AcquireLock grabs a lock that will be released automatically in TTL
+	AcquireLock(token string, ttl time.Duration) error
+	// ReleaseLock forces lock release before TTL
+	ReleaseLock(token string) error
+	// Close releases the resources taken up by this backend
 	Close() error
-
 	// Clock returns clock used by this backend
 	Clock() clockwork.Clock
-
-	// CloseWatchers closes all the watchers
-	// without closing the backend
-	CloseWatchers()
 }
 
-// Batch implements some batch methods
-// that are not mandatory for all interfaces,
-// only the ones used in bulk operations.
-type Batch interface {
-	// PutRange puts range of items in one transaction
-	PutRange(ctx context.Context, items []Item) error
-}
-
-// Lease represents a lease on the item that can be used
-// to extend item's TTL without updating its contents.
-//
-// Here is an example of renewing object TTL:
-//
-// lease, err := backend.Create()
-// lease.Expires = time.Now().Add(time.Second)
-// // Item TTL is extended
-// err = backend.KeepAlive(lease)
-//
-type Lease struct {
-	// Key is an object representing lease
-	Key []byte
-	// ID is a lease ID, could be empty
-	ID int64
-}
-
-// IsEmpty returns true if the lease is empty value
-func (l *Lease) IsEmpty() bool {
-	return l.ID == 0 && len(l.Key) == 0
-}
-
-// Watch specifies watcher parameters
-type Watch struct {
-	// Name is a watch name set for debugging
-	// purposes
-	Name string
-	// Prefixes specifies prefixes to watch,
-	// passed to the backend implementation
-	Prefixes [][]byte
-	// QueueSize is an optional queue size
-	QueueSize int
-}
-
-// String returns a user-friendly description
-// of the watcher
-func (w *Watch) String() string {
-	return fmt.Sprintf("Watcher(name=%v, prefixes=%v)", w.Name, string(bytes.Join(w.Prefixes, []byte(", "))))
-}
-
-// Watcher returns watcher
-type Watcher interface {
-	// Events returns channel with events
-	Events() <-chan Event
-
-	// Done returns the channel signalling the closure
-	Done() <-chan struct{}
-
-	// Close closes the watcher and releases
-	// all associated resources
-	Close() error
-}
-
-// GetResult provides the result of GetRange request
-type GetResult struct {
-	// Items returns a list of items
-	Items []Item
-}
-
-// OpType specifies operation type
-type OpType int
-
-const (
-	// OpInit is returned by the system whenever the system
-	// is initialized, init operation is always sent
-	// as a first event over the channel, so the client
-	// can verify that watch has been established.
-	OpInit OpType = iota
-	// OpPut is returned for Put events
-	OpPut OpType = iota
-	// OpDelete is returned for Delete events
-	OpDelete OpType = iota
-	// OpGet is used for tracking, not present in the event stream
-	OpGet OpType = iota
-)
-
-// String returns user-friendly description of the operation
-func (o OpType) String() string {
-	switch o {
-	case OpInit:
-		return "Init"
-	case OpPut:
-		return "Put"
-	case OpDelete:
-		return "Delete"
-	case OpGet:
-		return "Get"
-	default:
-		return "unknown"
-	}
-}
-
-// Event is a event containing operation with item
-type Event struct {
-	// Type is operation type
-	Type OpType
-	// Item is event Item
-	Item Item
-}
-
-// Item is a key value item
+// Item is a pair of key and value
 type Item struct {
-	// Key is a key of the key value item
-	Key []byte
-	// Value is a value of the key value item
+	// Key is an item key
+	Key string
+	// Value is an item value
 	Value []byte
-	// Expires is an optional record expiry time
-	Expires time.Time
-	// ID is a record ID, newer records have newer ids
-	ID int64
-	// LeaseID is a lease ID, could be set on objects
-	// with TTL
-	LeaseID int64
 }
+
+// ItemsGetter is an interface that allows gettings all
+// items in the bucket at once
+type ItemsGetter interface {
+	// GetItems returns a list of items - key value pairs
+	GetItems(bucket []string) ([]Item, error)
+}
+
+// backend.Params type defines a flexible unified back-end configuration API.
+// It is just a map of key/value pairs which gets populated by `storage` section
+// in Teleport YAML config.
+type Params map[string]interface{}
+
+// NewFunc type defines a function type which every backend must implement to
+// instantiate itself
+type NewFunc func(Params) (Backend, error)
+
+// NameFunc type defines a function type which every backend must implement
+// to return its name
+type NameFunc func() string
 
 // Config is used for 'storage' config section. It's a combination of
 // values for various backends: 'boltdb', 'etcd', 'filesystem' and 'dynamodb'
@@ -216,10 +100,13 @@ type Config struct {
 	Params Params `yaml:",inline"`
 }
 
-// Params type defines a flexible unified back-end configuration API.
-// It is just a map of key/value pairs which gets populated by `storage` section
-// in Teleport YAML config.
-type Params map[string]interface{}
+// ValidateLockTTL helper allows all backends to validate lock TTL parameter
+func ValidateLockTTL(ttl time.Duration) error {
+	if ttl == Forever || ttl > MaxLockDuration {
+		return trace.BadParameter("locks cannot exceed %v", MaxLockDuration)
+	}
+	return nil
+}
 
 // GetString returns a string value stored in Params map, or an empty string
 // if nothing is found
@@ -232,99 +119,26 @@ func (p Params) GetString(key string) string {
 	return s
 }
 
-// NoLimit specifies no limits
-const NoLimit = 0
+// TTL converts time to TTL from current time supplied
+// by provider, if t is zero, returns forever
+func TTL(clock clockwork.Clock, t time.Time) time.Duration {
+	if t.IsZero() {
+		return Forever
+	}
+	diff := t.UTC().Sub(clock.Now().UTC())
+	if diff < 0 {
+		return Forever
+	}
+	return diff
+}
 
-// RangeEnd returns end of the range for given key
-func RangeEnd(key []byte) []byte {
-	end := make([]byte, len(key))
-	copy(end, key)
-	for i := len(end) - 1; i >= 0; i-- {
-		if end[i] < 0xff {
-			end[i] = end[i] + 1
-			end = end[:i+1]
-			return end
+// AnyTTL returns TTL if any of the suplied times pass expiry time
+// otherwise returns forever
+func AnyTTL(clock clockwork.Clock, times ...time.Time) time.Duration {
+	for _, t := range times {
+		if !t.IsZero() {
+			return TTL(clock, t)
 		}
 	}
-	// next key does not exist (e.g., 0xffff);
-	return noEnd
-}
-
-var (
-	noEnd = []byte{0}
-)
-
-// Items is a sortable list of backend items
-type Items []Item
-
-// Len is part of sort.Interface.
-func (it Items) Len() int {
-	return len(it)
-}
-
-// Swap is part of sort.Interface.
-func (it Items) Swap(i, j int) {
-	it[i], it[j] = it[j], it[i]
-}
-
-// Less is part of sort.Interface.
-func (it Items) Less(i, j int) bool {
-	return bytes.Compare(it[i].Key, it[j].Key) < 0
-}
-
-// TTL returns TTL in duration units, rounds up to one second
-func TTL(clock clockwork.Clock, expires time.Time) time.Duration {
-	ttl := expires.Sub(clock.Now())
-	if ttl < time.Second {
-		return time.Second
-	}
-	return ttl
-}
-
-// EarliestExpiry returns first of the
-// otherwise returns empty
-func EarliestExpiry(times ...time.Time) time.Time {
-	if len(times) == 0 {
-		return time.Time{}
-	}
-	sort.Sort(earliest(times))
-	return times[0]
-}
-
-// Expiry converts ttl to expiry time, if ttl is 0
-// returns empty time
-func Expiry(clock clockwork.Clock, ttl time.Duration) time.Time {
-	if ttl == 0 {
-		return time.Time{}
-	}
-	return clock.Now().UTC().Add(ttl)
-}
-
-type earliest []time.Time
-
-func (p earliest) Len() int {
-	return len(p)
-}
-
-func (p earliest) Less(i, j int) bool {
-	if p[i].IsZero() {
-		return false
-	}
-	if p[j].IsZero() {
-		return true
-	}
-	return p[i].Before(p[j])
-}
-
-func (p earliest) Swap(i, j int) {
-	p[i], p[j] = p[j], p[i]
-}
-
-// Separator is used as a separator between key parts
-const Separator = '/'
-
-// Key joins parts into path separated by Separator,
-// makes sure path always starts with Separator ("/")
-func Key(parts ...string) []byte {
-	return []byte(strings.Join(append([]string{""}, parts...), string(Separator)))
+	return Forever
 }

@@ -17,7 +17,6 @@ limitations under the License.
 package client
 
 import (
-	"bytes"
 	"fmt"
 	"io/ioutil"
 	"math/rand"
@@ -31,15 +30,14 @@ import (
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth/testauthority"
-	"github.com/gravitational/teleport/lib/fixtures"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/tlsca"
 	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
-
 	"github.com/jonboulle/clockwork"
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/check.v1"
 )
 
@@ -66,10 +64,7 @@ func (s *KeyAgentTestSuite) SetUpSuite(c *check.C) {
 	s.username = "foo"
 	s.hostname = "bar"
 
-	pemBytes, ok := fixtures.PEMBytes["rsa"]
-	c.Assert(ok, check.Equals, true)
-
-	s.tlsca, err = newSelfSignedCA(pemBytes)
+	s.tlsca, err = newSelfSignedCA(caPrivateKey)
 	c.Assert(err, check.IsNil)
 
 	// temporary key to use during tests
@@ -215,86 +210,7 @@ func (s *KeyAgentTestSuite) TestLoadKey(c *check.C) {
 	c.Assert(err, check.IsNil)
 }
 
-func (s *KeyAgentTestSuite) TestHostCertVerification(c *check.C) {
-	// Make a new local agent.
-	lka, err := NewLocalAgent(s.keyDir, s.hostname, s.username)
-	c.Assert(err, check.IsNil)
-
-	// By default user has not refused any hosts.
-	c.Assert(lka.UserRefusedHosts(), check.Equals, false)
-
-	// Create a CA, generate a keypair for the CA, and add it to the known
-	// hosts cache (done by "tsh login").
-	keygen := testauthority.New()
-	caPriv, caPub, err := keygen.GenerateKeyPair("")
-	c.Assert(err, check.IsNil)
-	caPublicKey, _, _, _, err := ssh.ParseAuthorizedKey(caPub)
-	c.Assert(err, check.IsNil)
-	err = lka.keyStore.AddKnownHostKeys("example.com", []ssh.PublicKey{caPublicKey})
-	c.Assert(err, check.IsNil)
-
-	// Generate a host certificate for node with role "node".
-	_, hostPub, err := keygen.GenerateKeyPair("")
-	roles, err := teleport.ParseRoles("node")
-	c.Assert(err, check.IsNil)
-	hostCertBytes, err := keygen.GenerateHostCert(services.HostCertParams{
-		PrivateCASigningKey: caPriv,
-		PublicHostKey:       hostPub,
-		HostID:              "5ff40d80-9007-4f28-8f49-7d4fda2f574d",
-		NodeName:            "server01",
-		Principals: []string{
-			"127.0.0.1",
-		},
-		ClusterName: "example.com",
-		Roles:       roles,
-		TTL:         1 * time.Hour,
-	})
-	c.Assert(err, check.IsNil)
-	hostPublicKey, _, _, _, err := ssh.ParseAuthorizedKey(hostCertBytes)
-	c.Assert(err, check.IsNil)
-
-	tests := []struct {
-		inAddr   string
-		outError bool
-	}{
-		// Correct DNS is valid.
-		{
-			inAddr:   "server01.example.com:3022",
-			outError: false,
-		},
-		// Hostname only is valid.
-		{
-			inAddr:   "server01:3022",
-			outError: false,
-		},
-		// IP is valid.
-		{
-			inAddr:   "127.0.0.1:3022",
-			outError: false,
-		},
-		// UUID is valid.
-		{
-			inAddr:   "5ff40d80-9007-4f28-8f49-7d4fda2f574d.example.com:3022",
-			outError: false,
-		},
-		// Wrong DNS name is invalid.
-		{
-			inAddr:   "server02.example.com:3022",
-			outError: true,
-		},
-	}
-
-	for _, tt := range tests {
-		err = lka.CheckHostSignature(tt.inAddr, nil, hostPublicKey)
-		if tt.outError {
-			c.Assert(err, check.NotNil)
-		} else {
-			c.Assert(err, check.IsNil)
-		}
-	}
-}
-
-func (s *KeyAgentTestSuite) TestHostKeyVerification(c *check.C) {
+func (s *KeyAgentTestSuite) TestHostVerification(c *check.C) {
 	// make a new local agent
 	lka, err := NewLocalAgent(s.keyDir, s.hostname, s.username)
 	c.Assert(err, check.IsNil)
@@ -347,49 +263,6 @@ func (s *KeyAgentTestSuite) TestHostKeyVerification(c *check.C) {
 	c.Assert(userWasAsked, check.Equals, false)
 }
 
-func (s *KeyAgentTestSuite) TestDefaultHostPromptFunc(c *check.C) {
-	keygen := testauthority.New()
-
-	a, err := NewLocalAgent(s.keyDir, s.hostname, s.username)
-	c.Assert(err, check.IsNil)
-
-	_, keyBytes, err := keygen.GenerateKeyPair("")
-	c.Assert(err, check.IsNil)
-	key, _, _, _, err := ssh.ParseAuthorizedKey(keyBytes)
-	c.Assert(err, check.IsNil)
-
-	tests := []struct {
-		inAnswer []byte
-		outError bool
-	}{
-		{
-			inAnswer: []byte("y\n"),
-			outError: false,
-		},
-		{
-			inAnswer: []byte("n\n"),
-			outError: true,
-		},
-		{
-			inAnswer: []byte("foo\n"),
-			outError: true,
-		},
-	}
-
-	for _, tt := range tests {
-		// Write an answer to the "keyboard".
-		var buf bytes.Buffer
-		buf.Write(tt.inAnswer)
-
-		err = a.defaultHostPromptFunc("example.com", key, ioutil.Discard, &buf)
-		if tt.outError {
-			c.Assert(err, check.NotNil)
-		} else {
-			c.Assert(err, check.IsNil)
-		}
-	}
-}
-
 func (s *KeyAgentTestSuite) makeKey(username string, allowedLogins []string, ttl time.Duration) (*Key, error) {
 	keygen := testauthority.New()
 
@@ -418,17 +291,12 @@ func (s *KeyAgentTestSuite) makeKey(username string, allowedLogins []string, ttl
 		return nil, trace.Wrap(err)
 	}
 
-	pemBytes, ok := fixtures.PEMBytes["rsa"]
-	if !ok {
-		return nil, trace.BadParameter("RSA key not found in fixtures")
-	}
-
 	certificate, err := keygen.GenerateUserCert(services.UserCertParams{
-		PrivateCASigningKey:   pemBytes,
-		PublicUserKey:         publicKey,
-		Username:              username,
-		AllowedLogins:         allowedLogins,
-		TTL:                   ttl,
+		PrivateCASigningKey: caPrivateKey,
+		PublicUserKey:       publicKey,
+		Username:            username,
+		AllowedLogins:       allowedLogins,
+		TTL:                 ttl,
 		PermitAgentForwarding: true,
 		PermitPortForwarding:  true,
 	})

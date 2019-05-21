@@ -1,5 +1,5 @@
 /*
-Copyright 2015-2019 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,13 +17,11 @@ limitations under the License.
 package suite
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
-	"fmt"
 	"sort"
 	"time"
 
@@ -39,11 +37,8 @@ import (
 	"github.com/tstranex/u2f"
 	"golang.org/x/crypto/ssh"
 
-	log "github.com/sirupsen/logrus"
-	"gopkg.in/check.v1"
+	. "gopkg.in/check.v1"
 )
-
-var _ = fmt.Printf
 
 // NewTestCA returns new test authority with a test key as a public and
 // signing key
@@ -73,7 +68,6 @@ func NewTestCA(caType services.CertAuthType, clusterName string, privateKeys ...
 
 	return &services.CertAuthorityV2{
 		Kind:    services.KindCertAuthority,
-		SubKind: string(caType),
 		Version: services.V2,
 		Metadata: services.Metadata{
 			Name:      clusterName,
@@ -95,21 +89,10 @@ type ServicesTestSuite struct {
 	PresenceS     services.Presence
 	ProvisioningS services.Provisioner
 	WebS          services.Identity
-	ConfigS       services.ClusterConfiguration
-	EventsS       services.Events
-	UsersS        services.UsersService
 	ChangesC      chan interface{}
-	Clock         clockwork.FakeClock
 }
 
-func (s *ServicesTestSuite) Users() services.UsersService {
-	if s.WebS != nil {
-		return s.WebS
-	}
-	return s.UsersS
-}
-
-func (s *ServicesTestSuite) collectChanges(c *check.C, expected int) []interface{} {
+func (s *ServicesTestSuite) collectChanges(c *C, expected int) []interface{} {
 	changes := make([]interface{}, expected)
 	for i := range changes {
 		select {
@@ -122,16 +105,16 @@ func (s *ServicesTestSuite) collectChanges(c *check.C, expected int) []interface
 	return changes
 }
 
-func (s *ServicesTestSuite) expectChanges(c *check.C, expected ...interface{}) {
+func (s *ServicesTestSuite) expectChanges(c *C, expected ...interface{}) {
 	changes := s.collectChanges(c, len(expected))
 	for i, ch := range changes {
-		c.Assert(ch, check.DeepEquals, expected[i])
+		c.Assert(ch, DeepEquals, expected[i])
 	}
 }
 
-func userSlicesEqual(c *check.C, a []services.User, b []services.User) {
-	comment := check.Commentf("a: %#v b: %#v", a, b)
-	c.Assert(len(a), check.Equals, len(b), comment)
+func userSlicesEqual(c *C, a []services.User, b []services.User) {
+	comment := Commentf("a: %#v b: %#v", a, b)
+	c.Assert(len(a), Equals, len(b), comment)
 	sort.Sort(services.Users(a))
 	sort.Sort(services.Users(b))
 	for i := range a {
@@ -139,9 +122,9 @@ func userSlicesEqual(c *check.C, a []services.User, b []services.User) {
 	}
 }
 
-func usersEqual(c *check.C, a services.User, b services.User) {
-	comment := check.Commentf("a: %#v b: %#v", a, b)
-	c.Assert(a.Equals(b), check.Equals, true, comment)
+func usersEqual(c *C, a services.User, b services.User) {
+	comment := Commentf("a: %#v b: %#v", a, b)
+	c.Assert(a.Equals(b), Equals, true, comment)
 }
 
 func newUser(name string, roles []string) services.User {
@@ -158,148 +141,94 @@ func newUser(name string, roles []string) services.User {
 	}
 }
 
-func (s *ServicesTestSuite) UsersCRUD(c *check.C) {
+func (s *ServicesTestSuite) UsersCRUD(c *C) {
 	u, err := s.WebS.GetUsers()
-	c.Assert(err, check.IsNil)
-	c.Assert(len(u), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(u), Equals, 0)
 
-	c.Assert(s.WebS.UpsertPasswordHash("user1", []byte("hash")), check.IsNil)
-	c.Assert(s.WebS.UpsertPasswordHash("user2", []byte("hash2")), check.IsNil)
+	c.Assert(s.WebS.UpsertPasswordHash("user1", []byte("hash")), IsNil)
+	c.Assert(s.WebS.UpsertPasswordHash("user2", []byte("hash2")), IsNil)
 
 	u, err = s.WebS.GetUsers()
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	userSlicesEqual(c, u, []services.User{newUser("user1", nil), newUser("user2", nil)})
 
 	out, err := s.WebS.GetUser("user1")
 	usersEqual(c, out, u[0])
 
 	user := newUser("user1", []string{"admin", "user"})
-	c.Assert(s.WebS.UpsertUser(user), check.IsNil)
+	c.Assert(s.WebS.UpsertUser(user), IsNil)
 
 	out, err = s.WebS.GetUser("user1")
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	usersEqual(c, out, user)
 
 	out, err = s.WebS.GetUser("user1")
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	usersEqual(c, out, user)
 
-	c.Assert(s.WebS.DeleteUser("user1"), check.IsNil)
+	c.Assert(s.WebS.DeleteUser("user1"), IsNil)
 
 	u, err = s.WebS.GetUsers()
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	userSlicesEqual(c, u, []services.User{newUser("user2", nil)})
 
 	err = s.WebS.DeleteUser("user1")
-	fixtures.ExpectNotFound(c, err)
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("unexpected %T %#v", err, err))
 
 	// bad username
 	err = s.WebS.UpsertUser(newUser("", nil))
-	fixtures.ExpectBadParameter(c, err)
+	c.Assert(trace.IsBadParameter(err), Equals, true, Commentf("expected bad parameter error, got %T", err))
 }
 
-func (s *ServicesTestSuite) UsersExpiry(c *check.C) {
-	expiresAt := s.Clock.Now().Add(1 * time.Minute)
-
-	err := s.WebS.UpsertUser(&services.UserV2{
-		Kind:    services.KindUser,
-		Version: services.V2,
-		Metadata: services.Metadata{
-			Name:      "foo",
-			Namespace: defaults.Namespace,
-			Expires:   &expiresAt,
-		},
-		Spec: services.UserSpecV2{},
-	})
-	c.Assert(err, check.IsNil)
-
-	// Make sure the user exists.
-	u, err := s.WebS.GetUser("foo")
-	c.Assert(err, check.IsNil)
-	c.Assert(u.GetName(), check.Equals, "foo")
-
-	s.Clock.Advance(2 * time.Minute)
-
-	// Make sure the user is now gone.
-	u, err = s.WebS.GetUser("foo")
-	c.Assert(err, check.NotNil)
-}
-
-func (s *ServicesTestSuite) LoginAttempts(c *check.C) {
+func (s *ServicesTestSuite) LoginAttempts(c *C) {
 	user := newUser("user1", []string{"admin", "user"})
-	c.Assert(s.WebS.UpsertUser(user), check.IsNil)
+	c.Assert(s.WebS.UpsertUser(user), IsNil)
 
 	attempts, err := s.WebS.GetUserLoginAttempts(user.GetName())
-	c.Assert(err, check.IsNil)
-	c.Assert(len(attempts), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(attempts), Equals, 0)
 
 	clock := clockwork.NewFakeClock()
 	attempt1 := services.LoginAttempt{Time: clock.Now().UTC(), Success: false}
 	err = s.WebS.AddUserLoginAttempt(user.GetName(), attempt1, defaults.AttemptTTL)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	attempt2 := services.LoginAttempt{Time: clock.Now().UTC(), Success: false}
 	err = s.WebS.AddUserLoginAttempt(user.GetName(), attempt2, defaults.AttemptTTL)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	attempts, err = s.WebS.GetUserLoginAttempts(user.GetName())
-	c.Assert(err, check.IsNil)
-	c.Assert(attempts, check.DeepEquals, []services.LoginAttempt{attempt1, attempt2})
-	c.Assert(services.LastFailed(3, attempts), check.Equals, false)
-	c.Assert(services.LastFailed(2, attempts), check.Equals, true)
+	c.Assert(err, IsNil)
+	c.Assert(attempts, DeepEquals, []services.LoginAttempt{attempt1, attempt2})
+	c.Assert(services.LastFailed(3, attempts), Equals, false)
+	c.Assert(services.LastFailed(2, attempts), Equals, true)
 }
 
-func (s *ServicesTestSuite) CertAuthCRUD(c *check.C) {
+func (s *ServicesTestSuite) CertAuthCRUD(c *C) {
 	ca := NewTestCA(services.UserCA, "example.com")
-	c.Assert(s.CAS.UpsertCertAuthority(ca), check.IsNil)
+	c.Assert(s.CAS.UpsertCertAuthority(ca), IsNil)
 
 	out, err := s.CAS.GetCertAuthority(ca.GetID(), true)
-	c.Assert(err, check.IsNil)
-	ca.SetResourceID(out.GetResourceID())
-	fixtures.DeepCompare(c, out, ca)
+	c.Assert(err, IsNil)
+	c.Assert(out, DeepEquals, ca)
 
 	cas, err := s.CAS.GetCertAuthorities(services.UserCA, false)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	ca2 := *ca
 	ca2.Spec.SigningKeys = nil
 	ca2.Spec.TLSKeyPairs = []services.TLSKeyPair{{Cert: ca2.Spec.TLSKeyPairs[0].Cert}}
 	fixtures.DeepCompare(c, cas[0], &ca2)
 
 	cas, err = s.CAS.GetCertAuthorities(services.UserCA, true)
-	c.Assert(err, check.IsNil)
-	fixtures.DeepCompare(c, cas[0], ca)
-
-	cas, err = s.CAS.GetCertAuthorities(services.UserCA, true, services.SkipValidation())
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	fixtures.DeepCompare(c, cas[0], ca)
 
 	err = s.CAS.DeleteCertAuthority(*ca.ID())
-	c.Assert(err, check.IsNil)
-
-	// test compare and swap
-	ca = NewTestCA(services.UserCA, "example.com")
-	c.Assert(s.CAS.CreateCertAuthority(ca), check.IsNil)
-
-	clock := clockwork.NewFakeClock()
-	newCA := *ca
-	rotation := services.Rotation{
-		State:       services.RotationStateInProgress,
-		CurrentID:   "id1",
-		GracePeriod: services.NewDuration(time.Hour),
-		Started:     clock.Now(),
-	}
-	newCA.SetRotation(rotation)
-
-	err = s.CAS.CompareAndSwapCertAuthority(&newCA, ca)
-
-	out, err = s.CAS.GetCertAuthority(ca.GetID(), true)
-	c.Assert(err, check.IsNil)
-	newCA.SetResourceID(out.GetResourceID())
-	fixtures.DeepCompare(c, &newCA, out)
+	c.Assert(err, IsNil)
 }
 
-// NewServer creates a new server resource
-func NewServer(kind, name, addr, namespace string) *services.ServerV2 {
+func newServer(kind, name, addr, namespace string) *services.ServerV2 {
 	return &services.ServerV2{
 		Kind:    kind,
 		Version: services.V2,
@@ -314,59 +243,39 @@ func NewServer(kind, name, addr, namespace string) *services.ServerV2 {
 	}
 }
 
-func (s *ServicesTestSuite) ServerCRUD(c *check.C) {
+func (s *ServicesTestSuite) ServerCRUD(c *C) {
 	out, err := s.PresenceS.GetNodes(defaults.Namespace)
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 0)
 
-	srv := NewServer(services.KindNode, "srv1", "127.0.0.1:2022", defaults.Namespace)
-	_, err = s.PresenceS.UpsertNode(srv)
-	c.Assert(err, check.IsNil)
+	srv := newServer(services.KindNode, "srv1", "127.0.0.1:2022", defaults.Namespace)
+	c.Assert(s.PresenceS.UpsertNode(srv), IsNil)
 
 	out, err = s.PresenceS.GetNodes(srv.Metadata.Namespace)
-	c.Assert(err, check.IsNil)
-	c.Assert(out, check.HasLen, 1)
-	srv.SetResourceID(out[0].GetResourceID())
+	c.Assert(err, IsNil)
 	fixtures.DeepCompare(c, out, []services.Server{srv})
 
-	err = s.PresenceS.DeleteNode(srv.Metadata.Namespace, srv.GetName())
-	c.Assert(err, check.IsNil)
+	out, err = s.PresenceS.GetProxies()
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 0)
 
-	out, err = s.PresenceS.GetNodes(srv.Metadata.Namespace)
-	c.Assert(err, check.IsNil)
-	c.Assert(out, check.HasLen, 0)
+	proxy := newServer(services.KindProxy, "proxy1", "127.0.0.1:2023", defaults.Namespace)
+	c.Assert(s.PresenceS.UpsertProxy(proxy), IsNil)
 
 	out, err = s.PresenceS.GetProxies()
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 0)
-
-	proxy := NewServer(services.KindProxy, "proxy1", "127.0.0.1:2023", defaults.Namespace)
-	c.Assert(s.PresenceS.UpsertProxy(proxy), check.IsNil)
-
-	out, err = s.PresenceS.GetProxies()
-	c.Assert(err, check.IsNil)
-	c.Assert(out, check.HasLen, 1)
-	proxy.SetResourceID(out[0].GetResourceID())
-	c.Assert(out, check.DeepEquals, []services.Server{proxy})
-
-	err = s.PresenceS.DeleteProxy(proxy.GetName())
-	c.Assert(err, check.IsNil)
-
-	out, err = s.PresenceS.GetProxies()
-	c.Assert(out, check.HasLen, 0)
+	c.Assert(err, IsNil)
+	c.Assert(out, DeepEquals, []services.Server{proxy})
 
 	out, err = s.PresenceS.GetAuthServers()
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 0)
 
-	auth := NewServer(services.KindAuthServer, "auth1", "127.0.0.1:2025", defaults.Namespace)
-	c.Assert(s.PresenceS.UpsertAuthServer(auth), check.IsNil)
+	auth := newServer(services.KindAuthServer, "auth1", "127.0.0.1:2025", defaults.Namespace)
+	c.Assert(s.PresenceS.UpsertAuthServer(auth), IsNil)
 
 	out, err = s.PresenceS.GetAuthServers()
-	c.Assert(err, check.IsNil)
-	c.Assert(out, check.HasLen, 1)
-	auth.SetResourceID(out[0].GetResourceID())
-	c.Assert(out, check.DeepEquals, []services.Server{auth})
+	c.Assert(err, IsNil)
+	c.Assert(out, DeepEquals, []services.Server{auth})
 }
 
 func newReverseTunnel(clusterName string, dialAddrs []string) *services.ReverseTunnelV2 {
@@ -384,59 +293,57 @@ func newReverseTunnel(clusterName string, dialAddrs []string) *services.ReverseT
 	}
 }
 
-func (s *ServicesTestSuite) ReverseTunnelsCRUD(c *check.C) {
+func (s *ServicesTestSuite) ReverseTunnelsCRUD(c *C) {
 	out, err := s.PresenceS.GetReverseTunnels()
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 0)
 
 	tunnel := newReverseTunnel("example.com", []string{"example.com:2023"})
-	c.Assert(s.PresenceS.UpsertReverseTunnel(tunnel), check.IsNil)
+	c.Assert(s.PresenceS.UpsertReverseTunnel(tunnel), IsNil)
 
 	out, err = s.PresenceS.GetReverseTunnels()
-	c.Assert(err, check.IsNil)
-	c.Assert(out, check.HasLen, 1)
-	tunnel.SetResourceID(out[0].GetResourceID())
+	c.Assert(err, IsNil)
 	fixtures.DeepCompare(c, out, []services.ReverseTunnel{tunnel})
 
 	err = s.PresenceS.DeleteReverseTunnel(tunnel.Spec.ClusterName)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	out, err = s.PresenceS.GetReverseTunnels()
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 0)
 
 	err = s.PresenceS.UpsertReverseTunnel(newReverseTunnel("", []string{"127.0.0.1:1234"}))
-	fixtures.ExpectBadParameter(c, err)
+	c.Assert(trace.IsBadParameter(err), Equals, true, Commentf("%#v", err))
 
-	err = s.PresenceS.UpsertReverseTunnel(newReverseTunnel("example.com", []string{""}))
-	fixtures.ExpectBadParameter(c, err)
+	err = s.PresenceS.UpsertReverseTunnel(newReverseTunnel("example.com", []string{"bad address"}))
+	c.Assert(trace.IsBadParameter(err), Equals, true, Commentf("%#v", err))
 
 	err = s.PresenceS.UpsertReverseTunnel(newReverseTunnel("example.com", []string{}))
-	fixtures.ExpectBadParameter(c, err)
+	c.Assert(trace.IsBadParameter(err), Equals, true, Commentf("%#v", err))
 }
 
-func (s *ServicesTestSuite) PasswordHashCRUD(c *check.C) {
+func (s *ServicesTestSuite) PasswordHashCRUD(c *C) {
 	_, err := s.WebS.GetPasswordHash("user1")
-	c.Assert(trace.IsNotFound(err), check.Equals, true, check.Commentf("%#v", err))
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
 
 	err = s.WebS.UpsertPasswordHash("user1", []byte("hello123"))
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	hash, err := s.WebS.GetPasswordHash("user1")
-	c.Assert(err, check.IsNil)
-	c.Assert(hash, check.DeepEquals, []byte("hello123"))
+	c.Assert(err, IsNil)
+	c.Assert(hash, DeepEquals, []byte("hello123"))
 
 	err = s.WebS.UpsertPasswordHash("user1", []byte("hello321"))
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	hash, err = s.WebS.GetPasswordHash("user1")
-	c.Assert(err, check.IsNil)
-	c.Assert(hash, check.DeepEquals, []byte("hello321"))
+	c.Assert(err, IsNil)
+	c.Assert(hash, DeepEquals, []byte("hello321"))
 }
 
-func (s *ServicesTestSuite) WebSessionCRUD(c *check.C) {
+func (s *ServicesTestSuite) WebSessionCRUD(c *C) {
 	_, err := s.WebS.GetWebSession("user1", "sid1")
-	c.Assert(trace.IsNotFound(err), check.Equals, true, check.Commentf("%#v", err))
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
 
 	dt := time.Date(2015, 6, 5, 4, 3, 2, 1, time.UTC).UTC()
 	ws := services.NewWebSession("sid1", services.WebSessionSpecV2{
@@ -445,99 +352,53 @@ func (s *ServicesTestSuite) WebSessionCRUD(c *check.C) {
 		Expires: dt,
 	})
 	err = s.WebS.UpsertWebSession("user1", "sid1", ws)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	out, err := s.WebS.GetWebSession("user1", "sid1")
-	c.Assert(err, check.IsNil)
-	c.Assert(out, check.DeepEquals, ws)
+	c.Assert(err, IsNil)
+	c.Assert(out, DeepEquals, ws)
 
 	ws1 := services.NewWebSession(
 		"sid1", services.WebSessionSpecV2{Pub: []byte("pub321"), Priv: []byte("priv321"), Expires: dt})
 	err = s.WebS.UpsertWebSession("user1", "sid1", ws1)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	out2, err := s.WebS.GetWebSession("user1", "sid1")
-	c.Assert(err, check.IsNil)
-	c.Assert(out2, check.DeepEquals, ws1)
+	c.Assert(err, IsNil)
+	c.Assert(out2, DeepEquals, ws1)
 
-	c.Assert(s.WebS.DeleteWebSession("user1", "sid1"), check.IsNil)
+	c.Assert(s.WebS.DeleteWebSession("user1", "sid1"), IsNil)
 
 	_, err = s.WebS.GetWebSession("user1", "sid1")
-	fixtures.ExpectNotFound(c, err)
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
 }
 
-func (s *ServicesTestSuite) TokenCRUD(c *check.C) {
+func (s *ServicesTestSuite) TokenCRUD(c *C) {
 	_, err := s.ProvisioningS.GetToken("token")
-	fixtures.ExpectNotFound(c, err)
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
 
-	t, err := services.NewProvisionToken("token", teleport.Roles{teleport.RoleAuth, teleport.RoleNode}, time.Time{})
-	c.Assert(err, check.IsNil)
-
-	c.Assert(s.ProvisioningS.UpsertToken(t), check.IsNil)
+	c.Assert(s.ProvisioningS.UpsertToken("token", teleport.Roles{teleport.RoleAuth, teleport.RoleNode}, 0), IsNil)
 
 	token, err := s.ProvisioningS.GetToken("token")
-	c.Assert(err, check.IsNil)
-	c.Assert(token.GetRoles().Include(teleport.RoleAuth), check.Equals, true)
-	c.Assert(token.GetRoles().Include(teleport.RoleNode), check.Equals, true)
-	c.Assert(token.GetRoles().Include(teleport.RoleProxy), check.Equals, false)
-	diff := time.Now().UTC().Add(defaults.ProvisioningTokenTTL).Second() - token.Expiry().Second()
+	c.Assert(err, IsNil)
+	c.Assert(token.Roles.Include(teleport.RoleAuth), Equals, true)
+	c.Assert(token.Roles.Include(teleport.RoleNode), Equals, true)
+	c.Assert(token.Roles.Include(teleport.RoleProxy), Equals, false)
+	diff := time.Now().UTC().Add(defaults.ProvisioningTokenTTL).Second() - token.Expires.Second()
 	if diff > 1 {
 		c.Fatalf("expected diff to be within one second, got %v instead", diff)
 	}
 
-	c.Assert(s.ProvisioningS.DeleteToken("token"), check.IsNil)
+	c.Assert(s.ProvisioningS.DeleteToken("token"), IsNil)
 
 	_, err = s.ProvisioningS.GetToken("token")
-	fixtures.ExpectNotFound(c, err)
-
-	// check tokens backwards compatibility and marshal/unmarshal
-	expiry := time.Now().UTC().Add(time.Hour)
-	v1 := &services.ProvisionTokenV1{
-		Token:   "old",
-		Roles:   teleport.Roles{teleport.RoleNode, teleport.RoleProxy},
-		Expires: expiry,
-	}
-	v2, err := services.NewProvisionToken(v1.Token, v1.Roles, expiry)
-	c.Assert(err, check.IsNil)
-
-	// Tokens in different version formats are backwards and forwards
-	// compatible
-	fixtures.DeepCompare(c, v1.V2(), v2)
-	fixtures.DeepCompare(c, v2.V1(), v1)
-
-	// Marshal V1, unmarshal V2
-	data, err := services.MarshalProvisionToken(v2, services.WithVersion(services.V1))
-	c.Assert(err, check.IsNil)
-
-	out, err := services.UnmarshalProvisionToken(data)
-	c.Assert(err, check.IsNil)
-	fixtures.DeepCompare(c, out, v2)
-
-	// Test delete all tokens
-	t, err = services.NewProvisionToken("token1", teleport.Roles{teleport.RoleAuth, teleport.RoleNode}, time.Time{})
-	c.Assert(err, check.IsNil)
-	c.Assert(s.ProvisioningS.UpsertToken(t), check.IsNil)
-
-	t, err = services.NewProvisionToken("token2", teleport.Roles{teleport.RoleAuth, teleport.RoleNode}, time.Time{})
-	c.Assert(err, check.IsNil)
-	c.Assert(s.ProvisioningS.UpsertToken(t), check.IsNil)
-
-	tokens, err := s.ProvisioningS.GetTokens()
-	c.Assert(err, check.IsNil)
-	c.Assert(tokens, check.HasLen, 2)
-
-	err = s.ProvisioningS.DeleteAllTokens()
-	c.Assert(err, check.IsNil)
-
-	tokens, err = s.ProvisioningS.GetTokens()
-	c.Assert(err, check.IsNil)
-	c.Assert(tokens, check.HasLen, 0)
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
 }
 
-func (s *ServicesTestSuite) RolesCRUD(c *check.C) {
+func (s *ServicesTestSuite) RolesCRUD(c *C) {
 	out, err := s.Access.GetRoles()
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 0)
 
 	role := services.RoleV3{
 		Kind:    services.KindRole,
@@ -548,13 +409,11 @@ func (s *ServicesTestSuite) RolesCRUD(c *check.C) {
 		},
 		Spec: services.RoleSpecV3{
 			Options: services.RoleOptions{
-				MaxSessionTTL:     services.Duration(time.Hour),
-				PortForwarding:    services.NewBoolOption(true),
-				CertificateFormat: teleport.CertificateFormatStandard,
+				services.MaxSessionTTL: services.Duration{Duration: time.Hour},
 			},
 			Allow: services.RoleConditions{
 				Logins:     []string{"root", "bob"},
-				NodeLabels: services.Labels{services.Wildcard: []string{services.Wildcard}},
+				NodeLabels: map[string]string{services.Wildcard: services.Wildcard},
 				Namespaces: []string{defaults.Namespace},
 				Rules: []services.Rule{
 					services.NewRule(services.KindRole, services.RO()),
@@ -565,32 +424,30 @@ func (s *ServicesTestSuite) RolesCRUD(c *check.C) {
 			},
 		},
 	}
-	err = s.Access.UpsertRole(&role)
-	c.Assert(err, check.IsNil)
+	err = s.Access.UpsertRole(&role, backend.Forever)
+	c.Assert(err, IsNil)
 	rout, err := s.Access.GetRole(role.Metadata.Name)
-	c.Assert(err, check.IsNil)
-	role.SetResourceID(rout.GetResourceID())
-	fixtures.DeepCompare(c, rout, &role)
+	c.Assert(err, IsNil)
+	c.Assert(rout, DeepEquals, &role)
 
 	role.Spec.Allow.Logins = []string{"bob"}
-	err = s.Access.UpsertRole(&role)
-	c.Assert(err, check.IsNil)
+	err = s.Access.UpsertRole(&role, backend.Forever)
+	c.Assert(err, IsNil)
 	rout, err = s.Access.GetRole(role.Metadata.Name)
-	c.Assert(err, check.IsNil)
-	role.SetResourceID(rout.GetResourceID())
-	c.Assert(rout, check.DeepEquals, &role)
+	c.Assert(err, IsNil)
+	c.Assert(rout, DeepEquals, &role)
 
 	err = s.Access.DeleteRole(role.Metadata.Name)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	_, err = s.Access.GetRole(role.Metadata.Name)
-	fixtures.ExpectNotFound(c, err)
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%T", err))
 }
 
-func (s *ServicesTestSuite) NamespacesCRUD(c *check.C) {
+func (s *ServicesTestSuite) NamespacesCRUD(c *C) {
 	out, err := s.PresenceS.GetNamespaces()
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 0)
 
 	ns := services.Namespace{
 		Kind:    services.KindNamespace,
@@ -601,53 +458,53 @@ func (s *ServicesTestSuite) NamespacesCRUD(c *check.C) {
 		},
 	}
 	err = s.PresenceS.UpsertNamespace(ns)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	nsout, err := s.PresenceS.GetNamespace(ns.Metadata.Name)
-	c.Assert(err, check.IsNil)
-	c.Assert(nsout, check.DeepEquals, &ns)
+	c.Assert(err, IsNil)
+	c.Assert(nsout, DeepEquals, &ns)
 
 	err = s.PresenceS.DeleteNamespace(ns.Metadata.Name)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	_, err = s.PresenceS.GetNamespace(ns.Metadata.Name)
-	fixtures.ExpectNotFound(c, err)
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%T", err))
 }
 
-func (s *ServicesTestSuite) U2FCRUD(c *check.C) {
+func (s *ServicesTestSuite) U2FCRUD(c *C) {
 	token := "tok1"
 	appId := "https://localhost"
 	user1 := "user1"
 
 	challenge, err := u2f.NewChallenge(appId, []string{appId})
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	err = s.WebS.UpsertU2FRegisterChallenge(token, challenge)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	challengeOut, err := s.WebS.GetU2FRegisterChallenge(token)
-	c.Assert(err, check.IsNil)
-	c.Assert(challenge.Challenge, check.DeepEquals, challengeOut.Challenge)
-	c.Assert(challenge.Timestamp.Unix(), check.Equals, challengeOut.Timestamp.Unix())
-	c.Assert(challenge.AppID, check.Equals, challengeOut.AppID)
-	c.Assert(challenge.TrustedFacets, check.DeepEquals, challengeOut.TrustedFacets)
+	c.Assert(err, IsNil)
+	c.Assert(challenge.Challenge, DeepEquals, challengeOut.Challenge)
+	c.Assert(challenge.Timestamp.Unix(), Equals, challengeOut.Timestamp.Unix())
+	c.Assert(challenge.AppID, Equals, challengeOut.AppID)
+	c.Assert(challenge.TrustedFacets, DeepEquals, challengeOut.TrustedFacets)
 
 	err = s.WebS.UpsertU2FSignChallenge(user1, challenge)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	challengeOut, err = s.WebS.GetU2FSignChallenge(user1)
-	c.Assert(err, check.IsNil)
-	c.Assert(challenge.Challenge, check.DeepEquals, challengeOut.Challenge)
-	c.Assert(challenge.Timestamp.Unix(), check.Equals, challengeOut.Timestamp.Unix())
-	c.Assert(challenge.AppID, check.Equals, challengeOut.AppID)
-	c.Assert(challenge.TrustedFacets, check.DeepEquals, challengeOut.TrustedFacets)
+	c.Assert(err, IsNil)
+	c.Assert(challenge.Challenge, DeepEquals, challengeOut.Challenge)
+	c.Assert(challenge.Timestamp.Unix(), Equals, challengeOut.Timestamp.Unix())
+	c.Assert(challenge.AppID, Equals, challengeOut.AppID)
+	c.Assert(challenge.TrustedFacets, DeepEquals, challengeOut.TrustedFacets)
 
 	derKey, err := base64.StdEncoding.DecodeString("MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEGOi54Eun0r3Xrj8PjyOGYzJObENYI/t/Lr9g9PsHTHnp1qI2ysIhsdMPd7x/vpsL6cr+2EPVik7921OSsVjEMw==")
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	pubkeyInterface, err := x509.ParsePKIXPublicKey(derKey)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	pubkey, ok := pubkeyInterface.(*ecdsa.PublicKey)
-	c.Assert(ok, check.Equals, true)
+	c.Assert(ok, Equals, true)
 
 	registration := u2f.Registration{
 		Raw:       []byte("BQQY6LngS6fSvdeuPw+PI4ZjMk5sQ1gj+38uv2D0+wdMeenWojbKwiGx0w93vH++mwvpyv7YQ9WKTv3bU5KxWMQzQIJ+PVFsYjEa0Xgnx+siQaxdlku+U+J2W55U5NrN1iGIc0Amh+0HwhbV2W90G79cxIYS2SVIFAdqTTDXvPXJbeAwggE8MIHkoAMCAQICChWIR0AwlYJZQHcwCgYIKoZIzj0EAwIwFzEVMBMGA1UEAxMMRlQgRklETyAwMTAwMB4XDTE0MDgxNDE4MjkzMloXDTI0MDgxNDE4MjkzMlowMTEvMC0GA1UEAxMmUGlsb3RHbnViYnktMC40LjEtMTU4ODQ3NDAzMDk1ODI1OTQwNzcwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQY6LngS6fSvdeuPw+PI4ZjMk5sQ1gj+38uv2D0+wdMeenWojbKwiGx0w93vH++mwvpyv7YQ9WKTv3bU5KxWMQzMAoGCCqGSM49BAMCA0cAMEQCIIbmYKu6I2L4pgZCBms9NIo9yo5EO9f2irp0ahvLlZudAiC8RN/N+WHAFdq8Z+CBBOMsRBFDDJy3l5EDR83B5GAfrjBEAiBl6R6gAmlbudVpW2jSn3gfjmA8EcWq0JsGZX9oFM/RJwIgb9b01avBY5jBeVIqw5KzClLzbRDMY4K+Ds6uprHyA1Y="),
@@ -655,14 +512,14 @@ func (s *ServicesTestSuite) U2FCRUD(c *check.C) {
 		PubKey:    *pubkey,
 	}
 	err = s.WebS.UpsertU2FRegistration(user1, &registration)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	registrationOut, err := s.WebS.GetU2FRegistration(user1)
-	c.Assert(err, check.IsNil)
-	c.Assert(&registration, check.DeepEquals, registrationOut)
+	c.Assert(err, IsNil)
+	c.Assert(&registration, DeepEquals, registrationOut)
 }
 
-func (s *ServicesTestSuite) SAMLCRUD(c *check.C) {
+func (s *ServicesTestSuite) SAMLCRUD(c *C) {
 	connector := &services.SAMLConnectorV2{
 		Kind:    services.KindSAML,
 		Version: services.V2,
@@ -687,42 +544,42 @@ func (s *ServicesTestSuite) SAMLCRUD(c *check.C) {
 		},
 	}
 	err := connector.CheckAndSetDefaults()
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	err = s.WebS.UpsertSAMLConnector(connector)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	out, err := s.WebS.GetSAMLConnector(connector.GetName(), true)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	fixtures.DeepCompare(c, out, connector)
 
 	connectors, err := s.WebS.GetSAMLConnectors(true)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	fixtures.DeepCompare(c, []services.SAMLConnector{connector}, connectors)
 
 	out2, err := s.WebS.GetSAMLConnector(connector.GetName(), false)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	connectorNoSecrets := *connector
 	connectorNoSecrets.Spec.SigningKeyPair.PrivateKey = ""
 	fixtures.DeepCompare(c, out2, &connectorNoSecrets)
 
 	connectorsNoSecrets, err := s.WebS.GetSAMLConnectors(false)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	fixtures.DeepCompare(c, []services.SAMLConnector{&connectorNoSecrets}, connectorsNoSecrets)
 
 	err = s.WebS.DeleteSAMLConnector(connector.GetName())
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	err = s.WebS.DeleteSAMLConnector(connector.GetName())
-	c.Assert(trace.IsNotFound(err), check.Equals, true, check.Commentf("expected not found, got %T", err))
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("expected not found, got %T", err))
 
 	_, err = s.WebS.GetSAMLConnector(connector.GetName(), true)
-	c.Assert(trace.IsNotFound(err), check.Equals, true, check.Commentf("expected not found, got %T", err))
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("expected not found, got %T", err))
 }
 
-func (s *ServicesTestSuite) TunnelConnectionsCRUD(c *check.C) {
+func (s *ServicesTestSuite) TunnelConnectionsCRUD(c *C) {
 	clusterName := "example.com"
 	out, err := s.PresenceS.GetTunnelConnections(clusterName)
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 0)
 
 	dt := time.Date(2015, 6, 5, 4, 3, 2, 1, time.UTC).UTC()
 	conn, err := services.NewTunnelConnection("conn1", services.TunnelConnectionSpecV2{
@@ -730,63 +587,60 @@ func (s *ServicesTestSuite) TunnelConnectionsCRUD(c *check.C) {
 		ProxyName:     "p1",
 		LastHeartbeat: dt,
 	})
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	err = s.PresenceS.UpsertTunnelConnection(conn)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	out, err = s.PresenceS.GetTunnelConnections(clusterName)
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 1)
-	conn.SetResourceID(out[0].GetResourceID())
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 1)
 	fixtures.DeepCompare(c, out[0], conn)
 
 	out, err = s.PresenceS.GetAllTunnelConnections()
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 1)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 1)
 	fixtures.DeepCompare(c, out[0], conn)
 
 	dt = dt.Add(time.Hour)
 	conn.SetLastHeartbeat(dt)
 
 	err = s.PresenceS.UpsertTunnelConnection(conn)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	out, err = s.PresenceS.GetTunnelConnections(clusterName)
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 1)
-	conn.SetResourceID(out[0].GetResourceID())
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 1)
 	fixtures.DeepCompare(c, out[0], conn)
 
 	err = s.PresenceS.DeleteAllTunnelConnections()
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	out, err = s.PresenceS.GetTunnelConnections(clusterName)
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 0)
 
 	err = s.PresenceS.DeleteAllTunnelConnections()
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	// test delete individual connection
 	err = s.PresenceS.UpsertTunnelConnection(conn)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	out, err = s.PresenceS.GetTunnelConnections(clusterName)
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 1)
-	conn.SetResourceID(out[0].GetResourceID())
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 1)
 	fixtures.DeepCompare(c, out[0], conn)
 
 	err = s.PresenceS.DeleteTunnelConnection(clusterName, conn.GetName())
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	out, err = s.PresenceS.GetTunnelConnections(clusterName)
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 0)
 }
 
-func (s *ServicesTestSuite) GithubConnectorCRUD(c *check.C) {
+func (s *ServicesTestSuite) GithubConnectorCRUD(c *C) {
 	connector := &services.GithubConnectorV3{
 		Kind:    services.KindGithubConnector,
 		Version: services.V3,
@@ -804,669 +658,83 @@ func (s *ServicesTestSuite) GithubConnectorCRUD(c *check.C) {
 					Organization: "gravitational",
 					Team:         "admins",
 					Logins:       []string{"admin"},
-					KubeGroups:   []string{"system:masters"},
 				},
 			},
 		},
 	}
 	err := connector.CheckAndSetDefaults()
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	err = s.WebS.UpsertGithubConnector(connector)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	out, err := s.WebS.GetGithubConnector(connector.GetName(), true)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	fixtures.DeepCompare(c, out, connector)
 
 	connectors, err := s.WebS.GetGithubConnectors(true)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	fixtures.DeepCompare(c, []services.GithubConnector{connector}, connectors)
 
 	out2, err := s.WebS.GetGithubConnector(connector.GetName(), false)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	connectorNoSecrets := *connector
 	connectorNoSecrets.Spec.ClientSecret = ""
 	fixtures.DeepCompare(c, out2, &connectorNoSecrets)
 
 	connectorsNoSecrets, err := s.WebS.GetGithubConnectors(false)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 	fixtures.DeepCompare(c, []services.GithubConnector{&connectorNoSecrets}, connectorsNoSecrets)
 
 	err = s.WebS.DeleteGithubConnector(connector.GetName())
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	err = s.WebS.DeleteGithubConnector(connector.GetName())
-	c.Assert(trace.IsNotFound(err), check.Equals, true, check.Commentf("expected not found, got %T", err))
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("expected not found, got %T", err))
 
 	_, err = s.WebS.GetGithubConnector(connector.GetName(), true)
-	c.Assert(trace.IsNotFound(err), check.Equals, true, check.Commentf("expected not found, got %T", err))
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("expected not found, got %T", err))
 }
 
-func (s *ServicesTestSuite) RemoteClustersCRUD(c *check.C) {
+func (s *ServicesTestSuite) RemoteClustersCRUD(c *C) {
 	clusterName := "example.com"
 	out, err := s.PresenceS.GetRemoteClusters()
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 0)
 
 	rc, err := services.NewRemoteCluster(clusterName)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	rc.SetConnectionStatus(teleport.RemoteClusterStatusOffline)
 
 	err = s.PresenceS.CreateRemoteCluster(rc)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	err = s.PresenceS.CreateRemoteCluster(rc)
 	fixtures.ExpectAlreadyExists(c, err)
 
 	out, err = s.PresenceS.GetRemoteClusters()
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 1)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 1)
 	fixtures.DeepCompare(c, out[0], rc)
 
 	err = s.PresenceS.DeleteAllRemoteClusters()
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	out, err = s.PresenceS.GetRemoteClusters()
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 0)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 0)
 
 	// test delete individual connection
 	err = s.PresenceS.CreateRemoteCluster(rc)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	out, err = s.PresenceS.GetRemoteClusters()
-	c.Assert(err, check.IsNil)
-	c.Assert(len(out), check.Equals, 1)
+	c.Assert(err, IsNil)
+	c.Assert(len(out), Equals, 1)
 	fixtures.DeepCompare(c, out[0], rc)
 
 	err = s.PresenceS.DeleteRemoteCluster(clusterName)
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	err = s.PresenceS.DeleteRemoteCluster(clusterName)
 	fixtures.ExpectNotFound(c, err)
-}
-
-// AuthPreference tests authentication preference service
-func (s *ServicesTestSuite) AuthPreference(c *check.C) {
-	ap, err := services.NewAuthPreference(services.AuthPreferenceSpecV2{
-		Type:         "local",
-		SecondFactor: "otp",
-	})
-	c.Assert(err, check.IsNil)
-
-	err = s.ConfigS.SetAuthPreference(ap)
-	c.Assert(err, check.IsNil)
-
-	gotAP, err := s.ConfigS.GetAuthPreference()
-	c.Assert(err, check.IsNil)
-
-	c.Assert(gotAP.GetType(), check.Equals, "local")
-	c.Assert(gotAP.GetSecondFactor(), check.Equals, "otp")
-}
-
-func (s *ServicesTestSuite) StaticTokens(c *check.C) {
-	// set static tokens
-	staticTokens, err := services.NewStaticTokens(services.StaticTokensSpecV2{
-		StaticTokens: []services.ProvisionTokenV1{
-			{
-				Token:   "tok1",
-				Roles:   teleport.Roles{teleport.RoleNode},
-				Expires: time.Now().UTC().Add(time.Hour),
-			},
-		},
-	})
-	c.Assert(err, check.IsNil)
-
-	err = s.ConfigS.SetStaticTokens(staticTokens)
-	c.Assert(err, check.IsNil)
-
-	out, err := s.ConfigS.GetStaticTokens()
-	c.Assert(err, check.IsNil)
-	staticTokens.SetResourceID(out.GetResourceID())
-	fixtures.DeepCompare(c, staticTokens, out)
-
-	err = s.ConfigS.DeleteStaticTokens()
-	c.Assert(err, check.IsNil)
-
-	_, err = s.ConfigS.GetStaticTokens()
-	fixtures.ExpectNotFound(c, err)
-}
-
-// SuiteOptions provides functional arguments
-// to turn certain parts of the test suite off
-type SuiteOptions struct {
-	// SkipDelete turns off deletes in tests
-	SkipDelete bool
-}
-
-// SuiteOption is a functional suite option
-type SuiteOption func(s *SuiteOptions)
-
-// SkipDelete instructs tests to skip testing delete features
-func SkipDelete() SuiteOption {
-	return func(s *SuiteOptions) {
-		s.SkipDelete = true
-	}
-}
-
-// CollectOptions collects suite options
-func CollectOptions(opts ...SuiteOption) SuiteOptions {
-	var suiteOpts SuiteOptions
-	for _, o := range opts {
-		o(&suiteOpts)
-	}
-	return suiteOpts
-}
-
-// ClusterConfig tests cluster configuration
-func (s *ServicesTestSuite) ClusterConfig(c *check.C, opts ...SuiteOption) {
-	config, err := services.NewClusterConfig(services.ClusterConfigSpecV3{
-		ClientIdleTimeout:     services.NewDuration(17 * time.Second),
-		DisconnectExpiredCert: services.NewBool(true),
-		ClusterID:             "27",
-		SessionRecording:      services.RecordAtProxy,
-		Audit: services.AuditConfig{
-			Region:           "us-west-1",
-			Type:             "dynamodb",
-			AuditSessionsURI: "file:///home/log",
-			AuditTableName:   "audit_table_name",
-			AuditEventsURI:   []string{"dynamodb://audit_table_name", "file:///home/log"},
-		},
-	})
-	c.Assert(err, check.IsNil)
-
-	err = s.ConfigS.SetClusterConfig(config)
-	c.Assert(err, check.IsNil)
-
-	gotConfig, err := s.ConfigS.GetClusterConfig()
-	c.Assert(err, check.IsNil)
-	config.SetResourceID(gotConfig.GetResourceID())
-	fixtures.DeepCompare(c, config, gotConfig)
-
-	// Some parts (e.g. auth server) will not function
-	// without cluster name or cluster config
-	if CollectOptions(opts...).SkipDelete {
-		return
-	}
-	err = s.ConfigS.DeleteClusterConfig()
-	c.Assert(err, check.IsNil)
-
-	_, err = s.ConfigS.GetClusterConfig()
-	fixtures.ExpectNotFound(c, err)
-
-	clusterName, err := services.NewClusterName(services.ClusterNameSpecV2{
-		ClusterName: "example.com",
-	})
-	c.Assert(err, check.IsNil)
-
-	err = s.ConfigS.SetClusterName(clusterName)
-	c.Assert(err, check.IsNil)
-
-	gotName, err := s.ConfigS.GetClusterName()
-	c.Assert(err, check.IsNil)
-	clusterName.SetResourceID(gotName.GetResourceID())
-	fixtures.DeepCompare(c, clusterName, gotName)
-
-	err = s.ConfigS.DeleteClusterName()
-	c.Assert(err, check.IsNil)
-
-	_, err = s.ConfigS.GetClusterName()
-	fixtures.ExpectNotFound(c, err)
-
-	err = s.ConfigS.UpsertClusterName(clusterName)
-	c.Assert(err, check.IsNil)
-
-	gotName, err = s.ConfigS.GetClusterName()
-	c.Assert(err, check.IsNil)
-	clusterName.SetResourceID(gotName.GetResourceID())
-	fixtures.DeepCompare(c, clusterName, gotName)
-}
-
-// Events tests various events variations
-func (s *ServicesTestSuite) Events(c *check.C) {
-	testCases := []eventTest{
-		{
-			name: "Cert authority with secrets",
-			kind: services.WatchKind{
-				Kind:        services.KindCertAuthority,
-				LoadSecrets: true,
-			},
-			crud: func() services.Resource {
-				ca := NewTestCA(services.UserCA, "example.com")
-				c.Assert(s.CAS.UpsertCertAuthority(ca), check.IsNil)
-
-				out, err := s.CAS.GetCertAuthority(*ca.ID(), true)
-				c.Assert(err, check.IsNil)
-
-				c.Assert(s.CAS.DeleteCertAuthority(*ca.ID()), check.IsNil)
-				return out
-			},
-		},
-	}
-	s.runEventsTests(c, testCases)
-
-	testCases = []eventTest{
-		{
-			name: "Cert authority without secrets",
-			kind: services.WatchKind{
-				Kind:        services.KindCertAuthority,
-				LoadSecrets: false,
-			},
-			crud: func() services.Resource {
-				ca := NewTestCA(services.UserCA, "example.com")
-				c.Assert(s.CAS.UpsertCertAuthority(ca), check.IsNil)
-
-				out, err := s.CAS.GetCertAuthority(*ca.ID(), false)
-				c.Assert(err, check.IsNil)
-
-				c.Assert(s.CAS.DeleteCertAuthority(*ca.ID()), check.IsNil)
-				return out
-			},
-		},
-	}
-	s.runEventsTests(c, testCases)
-
-	testCases = []eventTest{
-		{
-			name: "Token",
-			kind: services.WatchKind{
-				Kind: services.KindToken,
-			},
-			crud: func() services.Resource {
-				expires := time.Now().UTC().Add(time.Hour)
-				t, err := services.NewProvisionToken("token",
-					teleport.Roles{teleport.RoleAuth, teleport.RoleNode}, expires)
-				c.Assert(err, check.IsNil)
-
-				c.Assert(s.ProvisioningS.UpsertToken(t), check.IsNil)
-
-				token, err := s.ProvisioningS.GetToken("token")
-				c.Assert(err, check.IsNil)
-
-				c.Assert(s.ProvisioningS.DeleteToken("token"), check.IsNil)
-				return token
-			},
-		},
-		{
-			name: "Namespace",
-			kind: services.WatchKind{
-				Kind: services.KindNamespace,
-			},
-			crud: func() services.Resource {
-				ns := services.Namespace{
-					Kind:    services.KindNamespace,
-					Version: services.V2,
-					Metadata: services.Metadata{
-						Name:      "testnamespace",
-						Namespace: defaults.Namespace,
-					},
-				}
-				err := s.PresenceS.UpsertNamespace(ns)
-				c.Assert(err, check.IsNil)
-
-				out, err := s.PresenceS.GetNamespace(ns.Metadata.Name)
-				c.Assert(err, check.IsNil)
-
-				err = s.PresenceS.DeleteNamespace(ns.Metadata.Name)
-				c.Assert(err, check.IsNil)
-
-				return out
-			},
-		},
-		{
-			name: "Static tokens",
-			kind: services.WatchKind{
-				Kind: services.KindStaticTokens,
-			},
-			crud: func() services.Resource {
-				staticTokens, err := services.NewStaticTokens(services.StaticTokensSpecV2{
-					StaticTokens: []services.ProvisionTokenV1{
-						{
-							Token:   "tok1",
-							Roles:   teleport.Roles{teleport.RoleNode},
-							Expires: time.Now().UTC().Add(time.Hour),
-						},
-					},
-				})
-				c.Assert(err, check.IsNil)
-
-				err = s.ConfigS.SetStaticTokens(staticTokens)
-				c.Assert(err, check.IsNil)
-
-				out, err := s.ConfigS.GetStaticTokens()
-				c.Assert(err, check.IsNil)
-
-				err = s.ConfigS.DeleteStaticTokens()
-				c.Assert(err, check.IsNil)
-
-				return out
-			},
-		},
-		{
-			name: "Role",
-			kind: services.WatchKind{
-				Kind: services.KindRole,
-			},
-			crud: func() services.Resource {
-				role, err := services.NewRole("role1", services.RoleSpecV3{
-					Options: services.RoleOptions{
-						MaxSessionTTL: services.Duration(time.Hour),
-					},
-					Allow: services.RoleConditions{
-						Logins:     []string{"root", "bob"},
-						NodeLabels: services.Labels{services.Wildcard: []string{services.Wildcard}},
-					},
-					Deny: services.RoleConditions{},
-				})
-
-				err = s.Access.UpsertRole(role)
-				c.Assert(err, check.IsNil)
-
-				out, err := s.Access.GetRole(role.GetName())
-				c.Assert(err, check.IsNil)
-
-				err = s.Access.DeleteRole(role.GetName())
-				c.Assert(err, check.IsNil)
-
-				return out
-			},
-		},
-		{
-			name: "User",
-			kind: services.WatchKind{
-				Kind: services.KindUser,
-			},
-			crud: func() services.Resource {
-				user := newUser("user1", []string{"admin"})
-				err := s.Users().UpsertUser(user)
-
-				out, err := s.Users().GetUser(user.GetName())
-				c.Assert(err, check.IsNil)
-
-				c.Assert(s.Users().DeleteUser(user.GetName()), check.IsNil)
-				return out
-			},
-		},
-		{
-			name: "Node",
-			kind: services.WatchKind{
-				Kind: services.KindNode,
-			},
-			crud: func() services.Resource {
-				srv := NewServer(services.KindNode, "srv1", "127.0.0.1:2022", defaults.Namespace)
-
-				_, err := s.PresenceS.UpsertNode(srv)
-				c.Assert(err, check.IsNil)
-
-				out, err := s.PresenceS.GetNodes(srv.Metadata.Namespace)
-				c.Assert(err, check.IsNil)
-
-				err = s.PresenceS.DeleteAllNodes(srv.Metadata.Namespace)
-				c.Assert(err, check.IsNil)
-
-				return out[0]
-			},
-		},
-		{
-			name: "Proxy",
-			kind: services.WatchKind{
-				Kind: services.KindProxy,
-			},
-			crud: func() services.Resource {
-				srv := NewServer(services.KindProxy, "srv1", "127.0.0.1:2022", defaults.Namespace)
-
-				err := s.PresenceS.UpsertProxy(srv)
-				c.Assert(err, check.IsNil)
-
-				out, err := s.PresenceS.GetProxies()
-				c.Assert(err, check.IsNil)
-
-				err = s.PresenceS.DeleteAllProxies()
-				c.Assert(err, check.IsNil)
-
-				return out[0]
-			},
-		},
-		{
-			name: "Tunnel connection",
-			kind: services.WatchKind{
-				Kind: services.KindTunnelConnection,
-			},
-			crud: func() services.Resource {
-				conn, err := services.NewTunnelConnection("conn1", services.TunnelConnectionSpecV2{
-					ClusterName:   "example.com",
-					ProxyName:     "p1",
-					LastHeartbeat: time.Now().UTC(),
-				})
-				c.Assert(err, check.IsNil)
-
-				err = s.PresenceS.UpsertTunnelConnection(conn)
-				c.Assert(err, check.IsNil)
-
-				out, err := s.PresenceS.GetTunnelConnections("example.com")
-				c.Assert(err, check.IsNil)
-
-				err = s.PresenceS.DeleteAllTunnelConnections()
-				c.Assert(err, check.IsNil)
-
-				return out[0]
-			},
-		},
-		{
-			name: "Reverse tunnel",
-			kind: services.WatchKind{
-				Kind: services.KindReverseTunnel,
-			},
-			crud: func() services.Resource {
-				tunnel := newReverseTunnel("example.com", []string{"example.com:2023"})
-				c.Assert(s.PresenceS.UpsertReverseTunnel(tunnel), check.IsNil)
-
-				out, err := s.PresenceS.GetReverseTunnels()
-				c.Assert(err, check.IsNil)
-
-				err = s.PresenceS.DeleteReverseTunnel(tunnel.Spec.ClusterName)
-				c.Assert(err, check.IsNil)
-
-				return out[0]
-			},
-		},
-	}
-	s.runEventsTests(c, testCases)
-
-	// Namespace with a name
-	testCases = []eventTest{
-		{
-			name: "Namespace with a name",
-			kind: services.WatchKind{
-				Kind: services.KindNamespace,
-				Name: "shmest",
-			},
-			crud: func() services.Resource {
-				ns := services.Namespace{
-					Kind:    services.KindNamespace,
-					Version: services.V2,
-					Metadata: services.Metadata{
-						Name:      "shmest",
-						Namespace: defaults.Namespace,
-					},
-				}
-				err := s.PresenceS.UpsertNamespace(ns)
-				c.Assert(err, check.IsNil)
-
-				out, err := s.PresenceS.GetNamespace(ns.Metadata.Name)
-				c.Assert(err, check.IsNil)
-
-				err = s.PresenceS.DeleteNamespace(ns.Metadata.Name)
-				c.Assert(err, check.IsNil)
-
-				return out
-			},
-		},
-	}
-	s.runEventsTests(c, testCases)
-}
-
-// EventsClusterConfig tests cluster config resource events
-func (s *ServicesTestSuite) EventsClusterConfig(c *check.C) {
-	testCases := []eventTest{
-		{
-			name: "Cluster config",
-			kind: services.WatchKind{
-				Kind: services.KindClusterConfig,
-			},
-			crud: func() services.Resource {
-				config, err := services.NewClusterConfig(services.ClusterConfigSpecV3{})
-				c.Assert(err, check.IsNil)
-
-				err = s.ConfigS.SetClusterConfig(config)
-				c.Assert(err, check.IsNil)
-
-				out, err := s.ConfigS.GetClusterConfig()
-				c.Assert(err, check.IsNil)
-
-				err = s.ConfigS.DeleteClusterConfig()
-				c.Assert(err, check.IsNil)
-
-				return out
-			},
-		},
-		{
-			name: "Cluster name",
-			kind: services.WatchKind{
-				Kind: services.KindClusterName,
-			},
-			crud: func() services.Resource {
-				clusterName, err := services.NewClusterName(services.ClusterNameSpecV2{
-					ClusterName: "example.com",
-				})
-				c.Assert(err, check.IsNil)
-
-				err = s.ConfigS.SetClusterName(clusterName)
-				c.Assert(err, check.IsNil)
-
-				out, err := s.ConfigS.GetClusterName()
-				c.Assert(err, check.IsNil)
-
-				err = s.ConfigS.DeleteClusterName()
-				c.Assert(err, check.IsNil)
-				return out
-			},
-		},
-	}
-	s.runEventsTests(c, testCases)
-}
-
-func (s *ServicesTestSuite) runEventsTests(c *check.C, testCases []eventTest) {
-	ctx := context.TODO()
-	w, err := s.EventsS.NewWatcher(ctx, services.Watch{
-		Kinds: eventsTestKinds(testCases),
-	})
-	c.Assert(err, check.IsNil)
-	defer w.Close()
-
-	select {
-	case event := <-w.Events():
-		c.Assert(event.Type, check.Equals, backend.OpInit)
-	case <-w.Done():
-		c.Fatalf("Watcher exited with error %v", w.Error())
-	case <-time.After(2 * time.Second):
-		c.Fatalf("Timeout waiting for init event")
-	}
-
-	// filter out all events that could have been inserted
-	// by the initialization routines
-skiploop:
-	for {
-		select {
-		case event := <-w.Events():
-			log.Debugf("Skipping pre-test event: %v", event)
-			continue skiploop
-		default:
-			break skiploop
-		case <-w.Done():
-			c.Fatalf("Watcher exited with error %v", w.Error())
-		}
-	}
-
-	for _, tc := range testCases {
-		resource := tc.crud()
-
-		ExpectResource(c, w, 3*time.Second, resource)
-
-		meta := resource.GetMetadata()
-		header := &services.ResourceHeader{
-			Kind:    resource.GetKind(),
-			SubKind: resource.GetSubKind(),
-			Version: resource.GetVersion(),
-			Metadata: services.Metadata{
-				Name:      meta.Name,
-				Namespace: meta.Namespace,
-			},
-		}
-		// delete events don't have IDs yet
-		header.SetResourceID(0)
-		ExpectDeleteResource(c, w, 3*time.Second, header)
-	}
-}
-
-type eventTest struct {
-	name string
-	kind services.WatchKind
-	crud func() services.Resource
-}
-
-func eventsTestKinds(tests []eventTest) []services.WatchKind {
-	out := make([]services.WatchKind, len(tests))
-	for i, tc := range tests {
-		out[i] = tc.kind
-	}
-	return out
-}
-
-func ExpectResource(c *check.C, w services.Watcher, timeout time.Duration, resource services.Resource) {
-	timeoutC := time.After(timeout)
-waitLoop:
-	for {
-		select {
-		case <-timeoutC:
-			c.Fatalf("Timeout waiting for event")
-		case <-w.Done():
-			c.Fatalf("Watcher exited with error %v", w.Error())
-		case event := <-w.Events():
-			if event.Type != backend.OpPut {
-				log.Debugf("Skipping event %v %v", event.Type, event.Resource.GetName())
-				continue
-			}
-			if resource.GetResourceID() > event.Resource.GetResourceID() {
-				log.Debugf("Skipping stale event %v %v %v %v, latest object version is %v", event.Type, event.Resource.GetKind(), event.Resource.GetName(), event.Resource.GetResourceID(), resource.GetResourceID())
-				continue waitLoop
-			}
-			if resource.GetName() != event.Resource.GetName() || resource.GetKind() != event.Resource.GetKind() || resource.GetSubKind() != event.Resource.GetSubKind() {
-				log.Debugf("Skipping event %v resource %v, expecting %v", event.Type, event.Resource.GetMetadata(), event.Resource.GetMetadata())
-				continue waitLoop
-			}
-			fixtures.DeepCompare(c, resource, event.Resource)
-			break waitLoop
-		}
-	}
-}
-
-func ExpectDeleteResource(c *check.C, w services.Watcher, timeout time.Duration, resource services.Resource) {
-	timeoutC := time.After(timeout)
-waitLoop:
-	for {
-		select {
-		case <-timeoutC:
-			c.Fatalf("Timeout waiting for event")
-		case <-w.Done():
-			c.Fatalf("Watcher exited with error %v", w.Error())
-		case event := <-w.Events():
-			if event.Type != backend.OpDelete {
-				log.Debugf("Skipping stale event %v %v", event.Type, event.Resource.GetName())
-				continue
-			}
-			fixtures.DeepCompare(c, resource, event.Resource)
-			break waitLoop
-		}
-	}
 }

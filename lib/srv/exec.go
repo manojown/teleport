@@ -76,8 +76,8 @@ type Exec interface {
 
 // NewExecRequest creates a new local or remote Exec.
 func NewExecRequest(ctx *ServerContext, command string) (Exec, error) {
-	// It doesn't matter what mode the cluster is in, if this is a Teleport node
-	// return a local *localExec.
+	// doesn't matter what mode the cluster is in, if this is a teleport node
+	// return a local *localExec
 	if ctx.srv.Component() == teleport.ComponentNode {
 		return &localExec{
 			Ctx:     ctx,
@@ -85,9 +85,14 @@ func NewExecRequest(ctx *ServerContext, command string) (Exec, error) {
 		}, nil
 	}
 
-	// When in recording mode, return an *remoteExec which will execute the
-	// command on a remote host. This is used by in-memory forwarding nodes.
-	if ctx.ClusterConfig.GetSessionRecording() == services.RecordAtProxy {
+	clusterConfig, err := ctx.srv.GetAccessPoint().GetClusterConfig()
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	// when in recording mode, return an *remoteExec which will execute the
+	// command on a remote host. used by forwarding nodes.
+	if clusterConfig.GetSessionRecording() == services.RecordAtProxy {
 		return &remoteExec{
 			ctx:     ctx,
 			command: command,
@@ -95,8 +100,8 @@ func NewExecRequest(ctx *ServerContext, command string) (Exec, error) {
 		}, nil
 	}
 
-	// Otherwise return a *localExec which will execute locally on the server.
-	// used by the regular Teleport nodes.
+	// otherwise return a *localExec which will execute locally on the server.
+	// used by the regular teleport nodes.
 	return &localExec{
 		Ctx:     ctx,
 		Command: command,
@@ -132,7 +137,7 @@ func (e *localExec) Start(channel ssh.Channel) (*ExecResult, error) {
 	var err error
 
 	// parse the command to see if the user is trying to run scp
-	err = e.transformSecureCopy()
+	err = e.parseSecureCopy()
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -162,7 +167,7 @@ func (e *localExec) Start(channel ssh.Channel) (*ExecResult, error) {
 		execResult, err := collectLocalStatus(e.Cmd, trace.ConvertSystemError(err))
 
 		// emit the result of execution to the audit log
-		emitExecAuditEvent(e.Ctx, e.GetCommand(), execResult, err)
+		emitExecAuditEvent(e.Ctx, strings.Join(e.Cmd.Args, " "), execResult, err)
 
 		return execResult, trace.Wrap(err)
 	}
@@ -182,7 +187,7 @@ func (e *localExec) Wait() (*ExecResult, error) {
 	execResult, err := collectLocalStatus(e.Cmd, e.Cmd.Wait())
 
 	// emit the result of execution to the audit log
-	emitExecAuditEvent(e.Ctx, e.GetCommand(), execResult, err)
+	emitExecAuditEvent(e.Ctx, strings.Join(e.Cmd.Args, " "), execResult, err)
 
 	return execResult, trace.Wrap(err)
 }
@@ -227,7 +232,7 @@ func prepareInteractiveCommand(ctx *ServerContext) (*exec.Cmd, error) {
 	return c, nil
 }
 
-func (e *localExec) transformSecureCopy() error {
+func (e *localExec) parseSecureCopy() error {
 	// split up command by space to grab the first word. if we don't have anything
 	// it's an interactive shell the user requested and not scp, return
 	args := strings.Split(e.GetCommand(), " ")
@@ -292,7 +297,7 @@ func prepareCommand(ctx *ServerContext) (*exec.Cmd, error) {
 	// https://github.com/openssh/openssh-portable/blob/master/session.c
 	c := exec.Command(shell, "-c", ctx.ExecRequest.GetCommand())
 
-	clusterName, err := ctx.srv.GetAccessPoint().GetClusterName()
+	clusterName, err := ctx.srv.GetAccessPoint().GetDomainName()
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -306,7 +311,7 @@ func prepareCommand(ctx *ServerContext) (*exec.Cmd, error) {
 		teleport.SSHTeleportUser + "=" + ctx.Identity.TeleportUser,
 		teleport.SSHSessionWebproxyAddr + "=" + ctx.ProxyPublicAddress(),
 		teleport.SSHTeleportHostUUID + "=" + ctx.srv.ID(),
-		teleport.SSHTeleportClusterName + "=" + clusterName.GetClusterName(),
+		teleport.SSHTeleportClusterName + "=" + clusterName,
 	}
 	c.Dir = osUser.HomeDir
 	c.SysProcAttr = &syscall.SysProcAttr{}
@@ -472,7 +477,7 @@ func (r *remoteExec) collectRemoteStatus(err error) (*ExecResult, error) {
 		}, err
 	}
 
-	// if we don't know what type of error occurred, return a generic 255 command
+	// if we don't know what type of error occured, return a generic 255 command
 	// failed code
 	return &ExecResult{
 		Code:    teleport.RemoteCommandFailure,
@@ -480,67 +485,28 @@ func (r *remoteExec) collectRemoteStatus(err error) (*ExecResult, error) {
 	}, err
 }
 
-func emitExecAuditEvent(ctx *ServerContext, cmd string, status *ExecResult, execErr error) {
-	// Report the result of this exec event to the audit logger.
+func emitExecAuditEvent(ctx *ServerContext, cmd string, status *ExecResult, err error) {
+	// report the result of this exec event to the audit logger
 	auditLog := ctx.srv.GetAuditLog()
 	if auditLog == nil {
 		log.Warnf("No audit log")
 		return
 	}
-
-	var event events.Event
-
-	// Create common fields for event.
 	fields := events.EventFields{
-		events.EventUser:      ctx.Identity.TeleportUser,
-		events.EventLogin:     ctx.Identity.Login,
-		events.LocalAddr:      ctx.Conn.LocalAddr().String(),
-		events.RemoteAddr:     ctx.Conn.RemoteAddr().String(),
-		events.EventNamespace: ctx.srv.GetNamespace(),
+		events.ExecEventCommand: cmd,
+		events.EventUser:        ctx.Identity.TeleportUser,
+		events.EventLogin:       ctx.Identity.Login,
+		events.LocalAddr:        ctx.Conn.LocalAddr().String(),
+		events.RemoteAddr:       ctx.Conn.RemoteAddr().String(),
+		events.EventNamespace:   ctx.srv.GetNamespace(),
 	}
-	if execErr != nil {
-		fields[events.ExecEventError] = execErr.Error()
+	if err != nil {
+		fields[events.ExecEventError] = err.Error()
 		if status != nil {
 			fields[events.ExecEventCode] = strconv.Itoa(status.Code)
 		}
 	}
-
-	// Parse the exec command to find out if it was SCP or not.
-	path, action, isSCP, err := parseSecureCopy(cmd)
-	if err != nil {
-		log.Warnf("Unable to emit audit event: %v.", err)
-		return
-	}
-
-	// Update appropriate fields based off if the request was SCP or not.
-	if isSCP {
-		fields[events.SCPPath] = path
-		fields[events.SCPAction] = action
-		switch action {
-		case events.SCPActionUpload:
-			if execErr != nil {
-				event = events.SCPUploadFailure
-			} else {
-				event = events.SCPUpload
-			}
-		case events.SCPActionDownload:
-			if execErr != nil {
-				event = events.SCPDownloadFailure
-			} else {
-				event = events.SCPDownload
-			}
-		}
-	} else {
-		fields[events.ExecEventCommand] = cmd
-		if execErr != nil {
-			event = events.ExecFailure
-		} else {
-			event = events.Exec
-		}
-	}
-
-	// Emit the event.
-	auditLog.EmitAuditEvent(event, fields)
+	auditLog.EmitAuditEvent(events.ExecEvent, fields)
 }
 
 // getDefaultEnvPath returns the default value of PATH environment variable for
@@ -596,36 +562,4 @@ func getDefaultEnvPath(uid string, loginDefsPath string) string {
 		return envSuPath
 	}
 	return envPath
-}
-
-// parseSecureCopy will parse a command and return if it's secure copy or not.
-func parseSecureCopy(path string) (string, string, bool, error) {
-	parts := strings.Fields(path)
-	if len(parts) == 0 {
-		return "", "", false, trace.BadParameter("no executable found")
-	}
-
-	// Look for the -t flag, it indicates that an upload occurred. The other
-	// flags do no matter for now.
-	action := events.SCPActionDownload
-	if utils.SliceContainsStr(parts, "-t") {
-		action = events.SCPActionUpload
-	}
-
-	// Exract the name of the Teleport executable on disk.
-	teleportPath, err := os.Executable()
-	if err != nil {
-		return "", "", false, trace.Wrap(err)
-	}
-	_, teleportBinary := filepath.Split(teleportPath)
-
-	// Extract the name of the executable that was run. The command was secure
-	// copy if the executable was "scp" or "teleport".
-	_, executable := filepath.Split(parts[0])
-	switch executable {
-	case teleport.SCP, teleportBinary:
-		return parts[len(parts)-1], action, true, nil
-	default:
-		return "", "", false, nil
-	}
 }

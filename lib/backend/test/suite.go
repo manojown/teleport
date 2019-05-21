@@ -1,5 +1,5 @@
 /*
-Copyright 2015-2018 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,590 +19,206 @@ limitations under the License.
 package test
 
 import (
-	"context"
-	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gravitational/teleport/lib/backend"
-	"github.com/gravitational/teleport/lib/fixtures"
 
 	"github.com/gravitational/trace"
-	"github.com/pborman/uuid"
-	"gopkg.in/check.v1"
+	. "gopkg.in/check.v1"
 )
 
-var _ = fmt.Printf
-
-func TestBackend(t *testing.T) { check.TestingT(t) }
+func TestBackend(t *testing.T) { TestingT(t) }
 
 type BackendSuite struct {
-	B backend.Backend
-	// B2 is a backend opened to the same database,
-	// used for concurrent operations tests
-	B2         backend.Backend
-	NewBackend func() (backend.Backend, error)
+	B        backend.Backend
+	ChangesC chan interface{}
 }
 
-// CRUD tests create read update scenarios
-func (s *BackendSuite) CRUD(c *check.C) {
-	ctx := context.Background()
-
-	prefix := MakePrefix()
-
-	item := backend.Item{Key: prefix("/hello"), Value: []byte("world")}
-
-	// update will fail on non-existent item
-	_, err := s.B.Update(ctx, item)
-	fixtures.ExpectNotFound(c, err)
-
-	_, err = s.B.Create(ctx, item)
-	c.Assert(err, check.IsNil)
-
-	// create will fail on existing item
-	_, err = s.B.Create(context.Background(), item)
-	fixtures.ExpectAlreadyExists(c, err)
-
-	// get succeeds
-	out, err := s.B.Get(ctx, item.Key)
-	c.Assert(err, check.IsNil)
-	c.Assert(string(out.Value), check.Equals, string(item.Value))
-
-	// get range succeeds
-	res, err := s.B.GetRange(ctx, item.Key, backend.RangeEnd(item.Key), backend.NoLimit)
-	c.Assert(err, check.IsNil)
-	c.Assert(len(res.Items), check.Equals, 1)
-	c.Assert(string(res.Items[0].Value), check.Equals, string(item.Value))
-	c.Assert(string(res.Items[0].Key), check.Equals, string(item.Key))
-
-	// update succeeds
-	updated := backend.Item{Key: prefix("/hello"), Value: []byte("world 2")}
-	_, err = s.B.Update(ctx, updated)
-	c.Assert(err, check.IsNil)
-
-	out, err = s.B.Get(ctx, item.Key)
-	c.Assert(err, check.IsNil)
-	c.Assert(string(out.Value), check.Equals, string(updated.Value))
-
-	// delete succeeds
-	err = s.B.Delete(ctx, item.Key)
-	c.Assert(err, check.IsNil)
-
-	_, err = s.B.Get(ctx, item.Key)
-	fixtures.ExpectNotFound(c, err)
-
-	// second delete won't find the item
-	err = s.B.Delete(ctx, item.Key)
-	fixtures.ExpectNotFound(c, err)
-
-	// put new item suceeds
-	item = backend.Item{Key: prefix("/put"), Value: []byte("world")}
-	_, err = s.B.Put(ctx, item)
-	c.Assert(err, check.IsNil)
-
-	out, err = s.B.Get(ctx, item.Key)
-	c.Assert(err, check.IsNil)
-	c.Assert(string(out.Value), check.Equals, string(item.Value))
-}
-
-// Range tests scenarios with range queries
-func (s *BackendSuite) Range(c *check.C) {
-	ctx := context.Background()
-	prefix := MakePrefix()
-
-	// add one element that should not show up
-	_, err := s.B.Create(ctx, backend.Item{Key: prefix("/a"), Value: []byte("should not show up")})
-	c.Assert(err, check.IsNil)
-
-	_, err = s.B.Create(ctx, backend.Item{Key: prefix("/prefix/a"), Value: []byte("val a")})
-	c.Assert(err, check.IsNil)
-
-	_, err = s.B.Create(ctx, backend.Item{Key: prefix("/prefix/b"), Value: []byte("val b")})
-	c.Assert(err, check.IsNil)
-
-	_, err = s.B.Create(ctx, backend.Item{Key: prefix("/prefix/c/c1"), Value: []byte("val c1")})
-	c.Assert(err, check.IsNil)
-
-	_, err = s.B.Create(ctx, backend.Item{Key: prefix("/prefix/c/c2"), Value: []byte("val c2")})
-	c.Assert(err, check.IsNil)
-
-	// add element that does not match the range to make
-	// sure it won't get included in the list
-	_, err = s.B.Create(ctx, backend.Item{Key: prefix("a"), Value: []byte("no match a")})
-	c.Assert(err, check.IsNil)
-
-	// prefix range fetch
-	result, err := s.B.GetRange(ctx, prefix("/prefix"), backend.RangeEnd(prefix("/prefix")), backend.NoLimit)
-	c.Assert(err, check.IsNil)
-	expected := []backend.Item{
-		{Key: prefix("/prefix/a"), Value: []byte("val a")},
-		{Key: prefix("/prefix/b"), Value: []byte("val b")},
-		{Key: prefix("/prefix/c/c1"), Value: []byte("val c1")},
-		{Key: prefix("/prefix/c/c2"), Value: []byte("val c2")},
-	}
-	ExpectItems(c, result.Items, expected)
-
-	// sub prefix range fetch
-	result, err = s.B.GetRange(ctx, prefix("/prefix/c"), backend.RangeEnd(prefix("/prefix/c")), backend.NoLimit)
-	c.Assert(err, check.IsNil)
-	expected = []backend.Item{
-		{Key: prefix("/prefix/c/c1"), Value: []byte("val c1")},
-		{Key: prefix("/prefix/c/c2"), Value: []byte("val c2")},
-	}
-	ExpectItems(c, result.Items, expected)
-
-	// range match
-	result, err = s.B.GetRange(ctx, prefix("/prefix/c/c1"), backend.RangeEnd(prefix("/prefix/c/cz")), backend.NoLimit)
-	ExpectItems(c, result.Items, expected)
-
-	// pagination
-	result, err = s.B.GetRange(ctx, prefix("/prefix"), backend.RangeEnd(prefix("/prefix")), 2)
-	c.Assert(err, check.IsNil)
-	// expect two first records
-	expected = []backend.Item{
-		{Key: prefix("/prefix/a"), Value: []byte("val a")},
-		{Key: prefix("/prefix/b"), Value: []byte("val b")},
-	}
-	ExpectItems(c, result.Items, expected)
-
-	// fetch next two items
-	result, err = s.B.GetRange(ctx, backend.RangeEnd(prefix("/prefix/b")), backend.RangeEnd(prefix("/prefix")), 2)
-	c.Assert(err, check.IsNil)
-
-	// expect two last records
-	expected = []backend.Item{
-		{Key: prefix("/prefix/c/c1"), Value: []byte("val c1")},
-		{Key: prefix("/prefix/c/c2"), Value: []byte("val c2")},
-	}
-	ExpectItems(c, result.Items, expected)
-
-	// next fetch is empty
-	result, err = s.B.GetRange(ctx, backend.RangeEnd(prefix("/prefix/c/c2")), backend.RangeEnd(prefix("/prefix")), 2)
-	c.Assert(err, check.IsNil)
-	c.Assert(result.Items, check.HasLen, 0)
-}
-
-// DeleteRange tests delete items by range
-func (s *BackendSuite) DeleteRange(c *check.C) {
-	ctx := context.Background()
-	prefix := MakePrefix()
-
-	_, err := s.B.Create(ctx, backend.Item{Key: prefix("/prefix/a"), Value: []byte("val a")})
-	c.Assert(err, check.IsNil)
-
-	_, err = s.B.Create(ctx, backend.Item{Key: prefix("/prefix/b"), Value: []byte("val b")})
-	c.Assert(err, check.IsNil)
-
-	_, err = s.B.Create(ctx, backend.Item{Key: prefix("/prefix/c/c1"), Value: []byte("val c1")})
-	c.Assert(err, check.IsNil)
-
-	_, err = s.B.Create(ctx, backend.Item{Key: prefix("/prefix/c/c2"), Value: []byte("val c2")})
-	c.Assert(err, check.IsNil)
-
-	err = s.B.DeleteRange(ctx, prefix("/prefix/c"), backend.RangeEnd(prefix("/prefix/c")))
-	c.Assert(err, check.IsNil)
-
-	// make sure items with "/prefix/c" are gone
-	result, err := s.B.GetRange(ctx, prefix("/prefix"), backend.RangeEnd(prefix("/prefix")), backend.NoLimit)
-	c.Assert(err, check.IsNil)
-	expected := []backend.Item{
-		{Key: prefix("/prefix/a"), Value: []byte("val a")},
-		{Key: prefix("/prefix/b"), Value: []byte("val b")},
-	}
-	ExpectItems(c, result.Items, expected)
-}
-
-// PutRange tests scenarios with put range
-func (s *BackendSuite) PutRange(c *check.C) {
-	ctx := context.Background()
-	prefix := MakePrefix()
-
-	b, ok := s.B.(backend.Batch)
-	if !ok {
-		c.Fatalf("Backend should support Batch interface for this test")
-	}
-
-	// add one element that should not show up
-	items := []backend.Item{
-		{Key: prefix("/prefix/a"), Value: []byte("val a")},
-		{Key: prefix("/prefix/b"), Value: []byte("val b")},
-		{Key: prefix("/prefix/a"), Value: []byte("val a")},
-	}
-	err := b.PutRange(ctx, items)
-	c.Assert(err, check.IsNil)
-
-	// prefix range fetch
-	result, err := s.B.GetRange(ctx, prefix("/prefix"), backend.RangeEnd(prefix("/prefix")), backend.NoLimit)
-	c.Assert(err, check.IsNil)
-	expected := []backend.Item{
-		{Key: prefix("/prefix/a"), Value: []byte("val a")},
-		{Key: prefix("/prefix/b"), Value: []byte("val b")},
-	}
-	ExpectItems(c, result.Items, expected)
-}
-
-// CompareAndSwap tests compare and swap functionality
-func (s *BackendSuite) CompareAndSwap(c *check.C) {
-	prefix := MakePrefix()
-	ctx := context.Background()
-
-	// compare and swap on non existing value will fail
-	_, err := s.B.CompareAndSwap(ctx, backend.Item{Key: prefix("one"), Value: []byte("1")}, backend.Item{Key: prefix("one"), Value: []byte("2")})
-	fixtures.ExpectCompareFailed(c, err)
-
-	_, err = s.B.Create(ctx, backend.Item{Key: prefix("one"), Value: []byte("1")})
-	c.Assert(err, check.IsNil)
-
-	// success CAS!
-	_, err = s.B.CompareAndSwap(ctx, backend.Item{Key: prefix("one"), Value: []byte("1")}, backend.Item{Key: prefix("one"), Value: []byte("2")})
-	c.Assert(err, check.IsNil)
-
-	out, err := s.B.Get(ctx, prefix("one"))
-	c.Assert(err, check.IsNil)
-	c.Assert(string(out.Value), check.Equals, "2")
-
-	// value has been updated - not '1' any more
-	_, err = s.B.CompareAndSwap(ctx, backend.Item{Key: prefix("one"), Value: []byte("1")}, backend.Item{Key: prefix("one"), Value: []byte("3")})
-	fixtures.ExpectCompareFailed(c, err)
-
-	// existing value has not been changed by the failed CAS operation
-	out, err = s.B.Get(ctx, prefix("one"))
-	c.Assert(err, check.IsNil)
-	c.Assert(string(out.Value), check.Equals, "2")
-}
-
-// Expiration tests scenario with expiring values
-func (s *BackendSuite) Expiration(c *check.C) {
-	prefix := MakePrefix()
-	ctx := context.Background()
-
-	itemA := backend.Item{Key: prefix("a"), Value: []byte("val1")}
-	_, err := s.B.Put(ctx, itemA)
-	c.Assert(err, check.IsNil)
-
-	_, err = s.B.Put(ctx, backend.Item{Key: prefix("b"), Value: []byte("val1"), Expires: time.Now().Add(time.Second)})
-	c.Assert(err, check.IsNil)
-
-	var items []backend.Item
-	for i := 0; i < 4; i++ {
-		time.Sleep(time.Second)
-		res, err := s.B.GetRange(ctx, prefix(""), backend.RangeEnd(prefix("")), backend.NoLimit)
-		c.Assert(err, check.IsNil)
-		if len(res.Items) == 1 {
-			items = res.Items
-			break
+func (s *BackendSuite) collectChanges(c *C, expected int) []interface{} {
+	changes := make([]interface{}, expected)
+	for i, _ := range changes {
+		select {
+		case changes[i] = <-s.ChangesC:
+			// successfully collected changes
+		case <-time.After(2 * time.Second):
+			c.Fatalf("Timeout occurred waiting for events")
 		}
 	}
-	ExpectItems(c, items, []backend.Item{itemA})
+	return changes
 }
 
-// addSeconds adds seconds with a seconds precission
-// always rounding up to the next second,
-// because TTL engines are usually 1 second precision
-func addSeconds(t time.Time, seconds int64) time.Time {
-	return time.Unix(t.UTC().Unix()+seconds+1, 0)
+func (s *BackendSuite) expectChanges(c *C, expected ...interface{}) {
+	changes := s.collectChanges(c, len(expected))
+	for i, ch := range changes {
+		c.Assert(ch, DeepEquals, expected[i])
+	}
 }
 
-// KeepAlive tests keep alive API
-func (s *BackendSuite) KeepAlive(c *check.C) {
-	prefix := MakePrefix()
-	ctx := context.Background()
+func (s *BackendSuite) BasicCRUD(c *C) {
+	bucket := []string{"test", "create"}
+	c.Assert(s.B.CreateVal(bucket, "one", []byte("1"), backend.Forever), IsNil)
+	err := s.B.CreateVal(bucket, "one", []byte("2"), backend.Forever)
+	c.Assert(trace.IsAlreadyExists(err), Equals, true)
 
-	watcher, err := s.B.NewWatcher(ctx, backend.Watch{Prefixes: [][]byte{prefix("")}})
-	c.Assert(err, check.IsNil)
-	defer watcher.Close()
+	val, err := s.B.GetVal(bucket, "one")
+	c.Assert(err, IsNil)
+	c.Assert(string(val), Equals, "1")
 
-	item := backend.Item{Key: prefix("key"), Value: []byte("val1"), Expires: addSeconds(time.Now(), 2)}
-	lease, err := s.B.Put(ctx, item)
-	c.Assert(err, check.IsNil)
+	keys, err := s.B.GetKeys([]string{"keys"})
+	c.Assert(err, IsNil)
+	c.Assert(keys, HasLen, 0)
+
+	c.Assert(s.B.UpsertVal([]string{"a", "b"}, "bkey", []byte("val1"), 0), IsNil)
+	c.Assert(s.B.UpsertVal([]string{"a", "b"}, "akey", []byte("val2"), 0), IsNil)
+
+	_, err = s.B.GetVal([]string{"a"}, "b")
+	c.Assert(trace.IsBadParameter(err), Equals, true, Commentf("%#v", err))
+	_, err = s.B.GetVal([]string{"a"}, "b")
+	c.Assert(trace.IsBadParameter(err), Equals, true, Commentf("%#v", err))
+	_, err = s.B.GetVal([]string{"a", "b"}, "x")
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
+	_, err = s.B.GetVal([]string{"a", "b"}, "x")
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
+
+	keys, _ = s.B.GetKeys([]string{"a", "b", "bkey"})
+	c.Assert(len(keys), Equals, 0)
+
+	keys, err = s.B.GetKeys([]string{"a", "b"})
+	c.Assert(err, IsNil)
+	c.Assert(keys, DeepEquals, []string{"akey", "bkey"})
+
+	out, err := s.B.GetVal([]string{"a", "b"}, "bkey")
+	c.Assert(err, IsNil)
+	c.Assert(string(out), Equals, "val1")
+	out, err = s.B.GetVal([]string{"a", "b"}, "bkey")
+	c.Assert(err, IsNil)
+	c.Assert(string(out), Equals, "val1")
+
+	c.Assert(s.B.UpsertVal([]string{"a", "b"}, "bkey", []byte("val-updated"), 0), IsNil)
+	out, err = s.B.GetVal([]string{"a", "b"}, "bkey")
+	c.Assert(err, IsNil)
+	c.Assert(string(out), Equals, "val-updated")
+
+	c.Assert(s.B.DeleteKey([]string{"a", "b"}, "bkey"), IsNil)
+	c.Assert(trace.IsNotFound(s.B.DeleteKey([]string{"a", "b"}, "bkey")), Equals, true, Commentf("%#v", err))
+	_, err = s.B.GetVal([]string{"a", "b"}, "bkey")
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
+
+	c.Assert(s.B.UpsertVal([]string{"a", "c"}, "xkey", []byte("val3"), 0), IsNil)
+	c.Assert(s.B.UpsertVal([]string{"a", "c"}, "ykey", []byte("val4"), 0), IsNil)
+	c.Assert(s.B.DeleteBucket([]string{"a"}, "c"), IsNil)
+	_, err = s.B.GetVal([]string{"a", "c"}, "xkey")
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
+	_, err = s.B.GetVal([]string{"a", "c"}, "ykey")
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
+}
+
+// BatchCRUD tests batch CRUD operations if supported by the backend
+func (s *BackendSuite) BatchCRUD(c *C) {
+	getter, ok := s.B.(backend.ItemsGetter)
+	if !ok {
+		c.Skip("backend does not support batch get")
+		return
+	}
+	c.Assert(s.B.UpsertVal([]string{"a", "b"}, "bkey", []byte("val1"), 0), IsNil)
+	c.Assert(s.B.UpsertVal([]string{"a", "b"}, "akey", []byte("val2"), 0), IsNil)
+
+	items, err := getter.GetItems([]string{"a", "b"})
+	c.Assert(err, IsNil)
+	c.Assert(len(items), Equals, 2)
+	c.Assert(string(items[0].Value), Equals, "val2")
+	c.Assert(items[0].Key, Equals, "akey")
+	c.Assert(string(items[1].Value), Equals, "val1")
+	c.Assert(items[1].Key, Equals, "bkey")
+}
+
+// Directories checks directories access
+func (s *BackendSuite) Directories(c *C) {
+	bucket := []string{"level1", "level2", "level3"}
+	c.Assert(s.B.UpsertVal(bucket, "key", []byte("val"), 0), IsNil)
+
+	keys, err := s.B.GetKeys(bucket[:2])
+	c.Assert(err, IsNil)
+	c.Assert(keys, DeepEquals, []string{"level3"})
+
+	keys, err = s.B.GetKeys(bucket[:1])
+	c.Assert(err, IsNil)
+	c.Assert(keys, DeepEquals, []string{"level2"})
+}
+
+func (s *BackendSuite) Expiration(c *C) {
+	bucket := []string{"one", "two"}
+	c.Assert(s.B.UpsertVal(bucket, "bkey", []byte("val1"), time.Second), IsNil)
+	c.Assert(s.B.UpsertVal(bucket, "akey", []byte("val2"), 0), IsNil)
+
+	time.Sleep(2 * time.Second)
+
+	keys, err := s.B.GetKeys(bucket)
+	c.Assert(err, IsNil)
+	c.Assert(keys, DeepEquals, []string{"akey"})
+}
+
+func (s *BackendSuite) ValueAndTTL(c *C) {
+	bucket := []string{"test", "ttl"}
+	c.Assert(s.B.UpsertVal(bucket, "bkey",
+		[]byte("val1"), 2*time.Second), IsNil)
 
 	time.Sleep(time.Second)
 
-	// make sure that the value has not expired
-	out, err := s.B.Get(ctx, item.Key)
-	c.Assert(err, check.IsNil)
-	c.Assert(string(out.Value), check.Equals, string(item.Value))
-	c.Assert(string(out.Key), check.Equals, string(item.Key))
-
-	err = s.B.KeepAlive(ctx, *lease, addSeconds(time.Now(), 2))
-	c.Assert(err, check.IsNil)
-
-	// should have expired if not keep alive
-	diff := addSeconds(time.Now(), 1).Sub(time.Now())
-	time.Sleep(diff + 100*time.Millisecond)
-
-	out, err = s.B.Get(ctx, item.Key)
-	c.Assert(err, check.IsNil)
-	c.Assert(string(out.Value), check.Equals, string(item.Value))
-	c.Assert(string(out.Key), check.Equals, string(item.Key))
-
-	events := collectEvents(c, watcher, 3)
-	c.Assert(events[1].Type, check.Equals, backend.OpPut)
-	c.Assert(string(events[1].Item.Key), check.Equals, string(item.Key))
-	c.Assert(events[2].Type, check.Equals, backend.OpPut)
-	c.Assert(string(events[2].Item.Key), check.Equals, string(item.Key))
-
-	c.Assert(string(events[1].Item.Value), check.Equals, string(item.Value))
-	c.Assert(string(events[2].Item.Value), check.Equals, string(item.Value))
-
-	c.Assert(events[1].Item.Expires.IsZero(), check.Not(check.Equals), true, check.Commentf("expected non zero expiration time"))
-	c.Assert(events[2].Item.Expires.IsZero(), check.Not(check.Equals), true, check.Commentf("expected non zero expiration time"))
-	c.Assert(events[2].Item.Expires.After(events[1].Item.Expires), check.Equals, true, check.Commentf("expected %v after %v", events[2].Item.Expires, events[1].Item.Expires))
-
-	err = s.B.Delete(ctx, item.Key)
-	c.Assert(err, check.IsNil)
-
-	_, err = s.B.Get(ctx, item.Key)
-	fixtures.ExpectNotFound(c, err)
-
-	// keep alive on deleted or expired object should fail
-	err = s.B.KeepAlive(ctx, *lease, addSeconds(time.Now(), 2))
-	fixtures.ExpectNotFound(c, err)
+	value, err := s.B.GetVal(bucket, "bkey")
+	c.Assert(err, IsNil)
+	c.Assert(string(value), DeepEquals, "val1")
 }
 
-func collectEvents(c *check.C, watcher backend.Watcher, count int) []backend.Event {
-	var events []backend.Event
-	for i := 0; i < count; i++ {
-		select {
-		case e := <-watcher.Events():
-			events = append(events, e)
-		case <-watcher.Done():
-			c.Fatalf("Watcher has unexpectedly closed.")
-		case <-time.After(2 * time.Second):
-			c.Fatalf("Timeout waiting for event.")
-		}
-	}
-	return events
-}
-
-// Events tests scenarios with event watches
-func (s *BackendSuite) Events(c *check.C) {
-	prefix := MakePrefix()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	watcher, err := s.B.NewWatcher(ctx, backend.Watch{Prefixes: [][]byte{prefix("")}})
-	c.Assert(err, check.IsNil)
-	defer watcher.Close()
-
-	select {
-	case e := <-watcher.Events():
-		c.Assert(string(e.Type), check.Equals, string(backend.OpInit))
-	case <-watcher.Done():
-		c.Fatalf("Watcher has unexpectedly closed.")
-	case <-time.After(2 * time.Second):
-		c.Fatalf("Timeout waiting for event.")
-	}
-
-	item := &backend.Item{Key: prefix("b"), Value: []byte("val")}
-	_, err = s.B.Put(ctx, *item)
-	c.Assert(err, check.IsNil)
-
-	item, err = s.B.Get(ctx, item.Key)
-	c.Assert(err, check.IsNil)
-
-	select {
-	case e := <-watcher.Events():
-		c.Assert(e.Type, check.Equals, backend.OpPut)
-		c.Assert(string(e.Item.Key), check.Equals, string(item.Key))
-		c.Assert(string(e.Item.Value), check.Equals, string(item.Value))
-	case <-watcher.Done():
-		c.Fatalf("Watcher has unexpectedly closed.")
-	case <-time.After(2 * time.Second):
-		c.Fatalf("Timeout waiting for event.")
-	}
-
-	err = s.B.Delete(ctx, item.Key)
-	c.Assert(err, check.IsNil)
-
-	select {
-	case e := <-watcher.Events():
-		c.Assert(e.Type, check.Equals, backend.OpDelete)
-		c.Assert(string(e.Item.Key), check.Equals, string(item.Key))
-	case <-watcher.Done():
-		c.Fatalf("Watcher has unexpectedly closed.")
-	case <-time.After(2 * time.Second):
-		c.Fatalf("Timeout waiting for event.")
-	}
-}
-
-// WatchersClose tests scenarios with watches close
-func (s *BackendSuite) WatchersClose(c *check.C) {
-	prefix := MakePrefix()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	b, err := s.NewBackend()
-	c.Assert(err, check.IsNil)
-
-	watcher, err := b.NewWatcher(ctx, backend.Watch{Prefixes: [][]byte{prefix("")}})
-	c.Assert(err, check.IsNil)
-
-	// cancel context -> get watcher to close
-	cancel()
-
-	select {
-	case <-watcher.Done():
-	case <-time.After(time.Second):
-		c.Fatalf("Timeout waiting for watcher to close")
-	}
-
-	// closing backend should close associated watcher too
-	watcher, err = b.NewWatcher(context.Background(), backend.Watch{Prefixes: [][]byte{prefix("")}})
-	c.Assert(err, check.IsNil)
-
-	b.Close()
-
-	select {
-	case <-watcher.Done():
-	case <-time.After(time.Second):
-		c.Fatalf("Timeout waiting for watcher to close")
-	}
-}
-
-// Locking tests locking logic
-func (s *BackendSuite) Locking(c *check.C) {
+func (s *BackendSuite) Locking(c *C) {
 	tok1 := "token1"
 	tok2 := "token2"
 	ttl := time.Second * 5
 
-	ctx := context.TODO()
+	err := s.B.ReleaseLock(tok1)
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
 
-	err := backend.ReleaseLock(ctx, s.B, tok1)
-	fixtures.ExpectNotFound(c, err)
-
-	c.Assert(backend.AcquireLock(ctx, s.B, tok1, ttl), check.IsNil)
+	c.Assert(s.B.AcquireLock(tok1, ttl), IsNil)
 	x := int32(7)
 
 	go func() {
 		atomic.StoreInt32(&x, 9)
-		c.Assert(backend.ReleaseLock(ctx, s.B, tok1), check.IsNil)
+		c.Assert(s.B.ReleaseLock(tok1), IsNil)
 	}()
-	c.Assert(backend.AcquireLock(ctx, s.B, tok1, ttl), check.IsNil)
+	c.Assert(s.B.AcquireLock(tok1, ttl), IsNil)
 	atomic.AddInt32(&x, 9)
 
-	c.Assert(atomic.LoadInt32(&x), check.Equals, int32(18))
-	c.Assert(backend.ReleaseLock(ctx, s.B, tok1), check.IsNil)
+	c.Assert(atomic.LoadInt32(&x), Equals, int32(18))
+	c.Assert(s.B.ReleaseLock(tok1), IsNil)
 
-	c.Assert(backend.AcquireLock(ctx, s.B, tok1, ttl), check.IsNil)
+	c.Assert(s.B.AcquireLock(tok1, ttl), IsNil)
 	atomic.StoreInt32(&x, 7)
 	go func() {
 		atomic.StoreInt32(&x, 9)
-		c.Assert(backend.ReleaseLock(ctx, s.B, tok1), check.IsNil)
+		c.Assert(s.B.ReleaseLock(tok1), IsNil)
 	}()
-	c.Assert(backend.AcquireLock(ctx, s.B, tok1, ttl), check.IsNil)
+	c.Assert(s.B.AcquireLock(tok1, ttl), IsNil)
 	atomic.AddInt32(&x, 9)
-	c.Assert(atomic.LoadInt32(&x), check.Equals, int32(18))
-	c.Assert(backend.ReleaseLock(ctx, s.B, tok1), check.IsNil)
+	c.Assert(atomic.LoadInt32(&x), Equals, int32(18))
+	c.Assert(s.B.ReleaseLock(tok1), IsNil)
 
 	y := int32(0)
-	c.Assert(backend.AcquireLock(ctx, s.B, tok1, ttl), check.IsNil)
-	c.Assert(backend.AcquireLock(ctx, s.B, tok2, ttl), check.IsNil)
+	c.Assert(s.B.AcquireLock(tok1, ttl), IsNil)
+	c.Assert(s.B.AcquireLock(tok2, ttl), IsNil)
 	go func() {
 		atomic.StoreInt32(&y, 15)
-		c.Assert(backend.ReleaseLock(ctx, s.B, tok1), check.IsNil)
-		c.Assert(backend.ReleaseLock(ctx, s.B, tok2), check.IsNil)
+		c.Assert(s.B.ReleaseLock(tok1), IsNil)
+		c.Assert(s.B.ReleaseLock(tok2), IsNil)
 	}()
 
-	c.Assert(backend.AcquireLock(ctx, s.B, tok1, ttl), check.IsNil)
-	c.Assert(atomic.LoadInt32(&y), check.Equals, int32(15))
+	c.Assert(s.B.AcquireLock(tok1, ttl), IsNil)
+	c.Assert(atomic.LoadInt32(&y), Equals, int32(15))
 
-	c.Assert(backend.ReleaseLock(ctx, s.B, tok1), check.IsNil)
-	err = backend.ReleaseLock(ctx, s.B, tok1)
-	fixtures.ExpectNotFound(c, err)
-}
-
-// ConcurrentOperations tests concurrent operations on the same
-// shared backend
-func (s *BackendSuite) ConcurrentOperations(c *check.C) {
-	l := s.B
-	c.Assert(l, check.NotNil)
-	l2 := s.B2
-	c.Assert(l2, check.NotNil)
-
-	prefix := MakePrefix()
-	ctx := context.TODO()
-	value1 := "this first value should not be corrupted by concurrent ops"
-	value2 := "this second value should not be corrupted too"
-	const attempts = 50
-	resultsC := make(chan struct{}, attempts*4)
-	for i := 0; i < attempts; i++ {
-		go func(cnt int) {
-			_, err := l.Put(ctx, backend.Item{Key: prefix("key"), Value: []byte(value1)})
-			resultsC <- struct{}{}
-			c.Assert(err, check.IsNil)
-		}(i)
-
-		go func(cnt int) {
-			_, err := l2.CompareAndSwap(ctx,
-				backend.Item{Key: prefix("key"), Value: []byte(value2)},
-				backend.Item{Key: prefix("key"), Value: []byte(value1)})
-			resultsC <- struct{}{}
-			if err != nil && !trace.IsCompareFailed(err) {
-				c.Assert(err, check.IsNil)
-			}
-		}(i)
-
-		go func(cnt int) {
-			_, err := l2.Create(ctx, backend.Item{Key: prefix("key"), Value: []byte(value2)})
-			resultsC <- struct{}{}
-			if err != nil && !trace.IsAlreadyExists(err) {
-				c.Assert(err, check.IsNil)
-			}
-		}(i)
-
-		go func(cnt int) {
-			item, err := l.Get(ctx, prefix("key"))
-			resultsC <- struct{}{}
-			if err != nil && !trace.IsNotFound(err) {
-				c.Assert(err, check.IsNil)
-			}
-			// make sure data is not corrupted along the way
-			if err == nil {
-				val := string(item.Value)
-				if val != value1 && val != value2 {
-					c.Fatalf("expected one of %q or %q and got %q", value1, value2, val)
-				}
-			}
-		}(i)
-
-		go func(cnt int) {
-			err := l2.Delete(ctx, prefix("key"))
-			if err != nil && !trace.IsNotFound(err) {
-				c.Assert(err, check.IsNil)
-			}
-			resultsC <- struct{}{}
-		}(i)
-	}
-	timeoutC := time.After(3 * time.Second)
-	for i := 0; i < attempts*5; i++ {
-		select {
-		case <-resultsC:
-		case <-timeoutC:
-			c.Fatalf("timeout waiting for goroutines to finish")
-		}
-	}
-}
-
-// MakePrefix returns function that appends unique prefix
-// to any key, used to make test suite concurrent-run proof
-func MakePrefix() func(k string) []byte {
-	id := "/" + uuid.New()
-	return func(k string) []byte {
-		return []byte(id + k)
-	}
-}
-
-// ExpectItems tests that items equal to expected list
-func ExpectItems(c *check.C, items, expected []backend.Item) {
-	if len(items) != len(expected) {
-		c.Fatalf("Expected %v items, got %v.", len(expected), len(items))
-	}
-	for i := range items {
-		c.Assert(string(items[i].Key), check.Equals, string(expected[i].Key))
-		c.Assert(string(items[i].Value), check.Equals, string(expected[i].Value))
-	}
+	c.Assert(s.B.ReleaseLock(tok1), IsNil)
+	err = s.B.ReleaseLock(tok1)
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%T", err))
 }
 
 func toSet(vals []string) map[string]struct{} {

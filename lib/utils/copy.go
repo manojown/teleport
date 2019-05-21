@@ -16,39 +16,6 @@ limitations under the License.
 
 package utils
 
-// CopyByteSlice returns a copy of the byte slice.
-func CopyByteSlice(in []byte) []byte {
-	if in == nil {
-		return nil
-	}
-	out := make([]byte, len(in))
-	copy(out, in)
-	return out
-}
-
-// CopyByteSlices returns a copy of the byte slices.
-func CopyByteSlices(in [][]byte) [][]byte {
-	if in == nil {
-		return nil
-	}
-	out := make([][]byte, len(in))
-	for i := range in {
-		out[i] = CopyByteSlice(in[i])
-	}
-	return out
-}
-
-// JoinStringSlices joins two string slices and returns a resulting slice
-func JoinStringSlices(a []string, b []string) []string {
-	if len(a)+len(b) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(a)+len(b))
-	out = append(out, a...)
-	out = append(out, b...)
-	return out
-}
-
 // CopyStrings makes a deep copy of the passed in string slice and returns
 // the copy.
 func CopyStrings(in []string) []string {
@@ -103,21 +70,6 @@ func CopyStringMapInterface(a map[string]interface{}) map[string]interface{} {
 	out := make(map[string]interface{})
 	for key, value := range a {
 		out[key] = value
-	}
-
-	return out
-}
-
-// ReplaceInSlice replaces element old with new and returns a new slice.
-func ReplaceInSlice(s []string, old string, new string) []string {
-	out := make([]string, 0, len(s))
-
-	for _, x := range s {
-		if x == old {
-			out = append(out, new)
-		} else {
-			out = append(out, x)
-		}
 	}
 
 	return out

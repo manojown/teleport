@@ -162,6 +162,26 @@ func (s *KeyStoreTestSuite) TestDeleteAll(c *check.C) {
 	c.Assert(err, check.NotNil)
 }
 
+func (s *KeyStoreTestSuite) TestKeyExpiration(c *check.C) {
+	// make two keys: one is current, and the expire one
+	good := s.makeSignedKey(c, false)
+	good.ProxyHost = "good.host"
+	expired := s.makeSignedKey(c, true)
+	expired.ProxyHost = "expired.host"
+
+	s.store.AddKey("good.host", "sam", good)
+	s.store.AddKey("expired.host", "sam", expired)
+
+	// only "good" key should be returned
+	goodKey, err := s.store.GetKey("good.host", "sam")
+	c.Assert(err, check.IsNil)
+	c.Assert(goodKey, check.DeepEquals, good)
+
+	// expired key should not be returned
+	_, err = s.store.GetKey("expired.host", "sam")
+	c.Assert(err, check.NotNil)
+}
+
 func (s *KeyStoreTestSuite) TestKnownHosts(c *check.C) {
 	os.MkdirAll(s.store.KeyDir, 0777)
 	pub, _, _, _, err := ssh.ParseAuthorizedKey(CAPub)
@@ -242,23 +262,6 @@ func (s *KeyStoreTestSuite) makeSignedKey(c *check.C, makeExpired bool) *Key {
 		Cert:    cert,
 		TLSCert: tlsCert,
 	}
-}
-
-// TestCheckKey make sure Teleport clients don't load invalid user
-// certificates. The main check is the certificate algorithms.
-func (s *KeyStoreTestSuite) TestCheckKey(c *check.C) {
-	key := s.makeSignedKey(c, false)
-
-	// Swap out the key with a ECDSA SSH key.
-	ellipticCertificate, _, err := utils.CreateEllipticCertificate("foo", ssh.UserCert)
-	c.Assert(err, check.IsNil)
-	key.Cert = ssh.MarshalAuthorizedKey(ellipticCertificate)
-
-	err = s.store.AddKey("host.a", "bob", key)
-	c.Assert(err, check.IsNil)
-
-	_, err = s.store.GetKey("host.a", "bob")
-	c.Assert(err, check.NotNil)
 }
 
 var (

@@ -1,19 +1,3 @@
-/*
-Copyright 2018-2019 Gravitational, Inc.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package teleport
 
 import (
@@ -57,10 +41,6 @@ const (
 
 	// HTTPProxy is an environment variable pointing to a HTTP proxy.
 	HTTPProxy = "HTTP_PROXY"
-
-	// NoProxy is an environment variable matching the cases
-	// when HTTPS_PROXY or HTTP_PROXY is ignored
-	NoProxy = "NO_PROXY"
 )
 
 const (
@@ -72,66 +52,42 @@ const (
 )
 
 const (
-	// ComponentMemory is a memory backend
-	ComponentMemory = "memory"
-
 	// ComponentAuthority is a TLS and an SSH certificate authority
-	ComponentAuthority = "ca"
+	ComponentAuthority = "authority"
 
 	// ComponentProcess is a main control process
-	ComponentProcess = "proc"
-
-	// ComponentServer is a server subcomponent of some services
-	ComponentServer = "server"
+	ComponentProcess = "process"
 
 	// ComponentReverseTunnelServer is reverse tunnel server
 	// that together with agent establish a bi-directional SSH revers tunnel
 	// to bypass firewall restrictions
 	ComponentReverseTunnelServer = "proxy:server"
 
-	// ComponentReverseTunnelAgent is reverse tunnel agent
+	// ComponentReverseTunnel is reverse tunnel agent
 	// that together with server establish a bi-directional SSH revers tunnel
 	// to bypass firewall restrictions
 	ComponentReverseTunnelAgent = "proxy:agent"
 
-	// ComponentLabel is a component label name used in reporting
-	ComponentLabel = "component"
-
-	// ComponentKube is a kubernetes proxy
-	ComponentKube = "proxy:kube"
-
 	// ComponentAuth is the cluster CA node (auth server API)
 	ComponentAuth = "auth"
-
-	// ComponentGRPC is grpc server
-	ComponentGRPC = "grpc"
-
-	// ComponentMigrate is responsible for data migrations
-	ComponentMigrate = "migrate"
 
 	// ComponentNode is SSH node (SSH server serving requests)
 	ComponentNode = "node"
 
-	// ComponentForwardingNode is SSH node (SSH server serving requests)
+	// ComponentNode is SSH node (SSH server serving requests)
 	ComponentForwardingNode = "node:forward"
 
 	// ComponentProxy is SSH proxy (SSH server forwarding connections)
 	ComponentProxy = "proxy"
 
 	// ComponentDiagnostic is a diagnostic service
-	ComponentDiagnostic = "diag"
+	ComponentDiagnostic = "diagnostic"
 
 	// ComponentClient is a client
 	ComponentClient = "client"
 
 	// ComponentTunClient is a tunnel client
 	ComponentTunClient = "client:tunnel"
-
-	// ComponentCache is a cache component
-	ComponentCache = "cache"
-
-	// ComponentBackend is a backend component
-	ComponentBackend = "backend"
 
 	// ComponentCachingClient is a caching auth client
 	ComponentCachingClient = "client:cache"
@@ -149,7 +105,7 @@ const (
 	ComponentRemoteSubsystem = "subsystem:remote"
 
 	// ComponentAuditLog is audit log component
-	ComponentAuditLog = "audit"
+	ComponentAuditLog = "auditlog"
 
 	// ComponentKeyAgent is an agent that has loaded the sessions keys and
 	// certificates for a user connected to a proxy.
@@ -162,55 +118,17 @@ const (
 	// ComponentConnectProxy is the HTTP CONNECT proxy used to tunnel connection.
 	ComponentConnectProxy = "http:proxy"
 
-	// ComponentSOCKS is a SOCKS5 proxy.
-	ComponentSOCKS = "socks"
-
 	// ComponentKeyGen is the public/private keypair generator.
 	ComponentKeyGen = "keygen"
 
 	// ComponentSession is an active session.
 	ComponentSession = "session"
 
-	// ComponentDynamoDB represents dynamodb clients
-	ComponentDynamoDB = "dynamodb"
-
-	// Component pluggable authentication module (PAM)
-	ComponentPAM = "pam"
-
-	// ComponentUpload is a session recording upload server
-	ComponentUpload = "upload"
-
-	// ComponentWeb is a web server
-	ComponentWeb = "web"
-
-	// ComponentWebsocket is websocket server that the web client connects to.
-	ComponentWebsocket = "websocket"
-
-	// ComponentRBAC is role-based access control.
-	ComponentRBAC = "rbac"
-
-	// ComponentKeepAlive is keep-alive messages sent from clients to servers
-	// and vice versa.
-	ComponentKeepAlive = "keepalive"
-
-	// ComponentTSH is the "tsh" binary.
-	ComponentTSH = "tsh"
-
-	// ComponentKubeClient is the Kubernetes client.
-	ComponentKubeClient = "client:kube"
-
-	// ComponentBuffer is in-memory event circular buffer
-	// used to broadcast events to subscribers.
-	ComponentBuffer = "buffer"
-
 	// DebugEnvVar tells tests to use verbose debug output
 	DebugEnvVar = "DEBUG"
 
 	// VerboseLogEnvVar forces all logs to be verbose (down to DEBUG level)
 	VerboseLogsEnvVar = "TELEPORT_DEBUG"
-
-	// IterationsEnvVar sets tests iterations to run
-	IterationsEnvVar = "ITERATIONS"
 
 	// DefaultTerminalWidth defines the default width of a server-side allocated
 	// pseudo TTY
@@ -278,14 +196,8 @@ const (
 	// LinuxAdminGID is the ID of the standard adm group on linux
 	LinuxAdminGID = 4
 
-	// LinuxOS is the GOOS constant used for Linux.
+	// LinuxOS is the name of the linux OS
 	LinuxOS = "linux"
-
-	// WindowsOS is the GOOS constant used for Microsoft Windows.
-	WindowsOS = "windows"
-
-	// DarwinOS is the GOOS constant for Apple macOS/darwin.
-	DarwinOS = "darwin"
 
 	// DirMaskSharedGroup is the mask for a directory accessible
 	// by the owner and group
@@ -301,33 +213,8 @@ const (
 	// Off means mode is off
 	Off = "off"
 
-	// SchemeS3 is S3 file scheme, means upload or download to S3 like object
-	// storage
-	SchemeS3 = "s3"
-
-	// Region is AWS region parameter
-	Region = "region"
-
-	// SchemeFile is a local disk file storage
-	SchemeFile = "file"
-
-	// LogsDir is a log subdirectory for events and logs
-	LogsDir = "log"
-
 	// Syslog is a mode for syslog logging
 	Syslog = "syslog"
-
-	// HumanDateFormat is a human readable date formatting
-	HumanDateFormat = "Jan _2 15:04 UTC"
-
-	// HumanDateFormatSeconds is a human readable date formatting with seconds
-	HumanDateFormatSeconds = "Jan _2 15:04:05 UTC"
-
-	// HumanDateFormatMilli is a human readable date formatting with milliseconds
-	HumanDateFormatMilli = "Jan _2 15:04:05.000 UTC"
-
-	// DebugLevel is a debug logging level name
-	DebugLevel = "debug"
 )
 
 // Component generates "component:subcomponent1:subcomponent2" strings used
@@ -384,9 +271,6 @@ const (
 	// CertificateFormatUnspecified is used to check if the format was specified
 	// or not.
 	CertificateFormatUnspecified = ""
-
-	// DurationNever is human friendly shortcut that is interpreted as a Duration of 0
-	DurationNever = "never"
 )
 
 const (
@@ -398,26 +282,9 @@ const (
 	// allowed logins.
 	TraitLogins = "logins"
 
-	// TraitKubeGroups is the name the role variable used to store
-	// allowed kubernetes groups
-	TraitKubeGroups = "kubernetes_groups"
-
-	// TraitInternalLoginsVariable is the variable used to store allowed
+	// TraitInternalRoleVariable is the role variable used to store allowed
 	// logins for local accounts.
-	TraitInternalLoginsVariable = "{{internal.logins}}"
-
-	// TraitInternalKubeGroupsVariable is the variable used to store allowed
-	// kubernetes groups for local accounts.
-	TraitInternalKubeGroupsVariable = "{{internal.kubernetes_groups}}"
-)
-
-const (
-	// GSuiteIssuerURL is issuer URL used for GSuite provider
-	GSuiteIssuerURL = "https://accounts.google.com"
-	// GSuiteGroupsEndpoint is gsuite API endpoint
-	GSuiteGroupsEndpoint = "https://www.googleapis.com/admin/directory/v1/groups"
-	// GSuiteGroupsScope is a scope to get access to admin groups API
-	GSuiteGroupsScope = "https://www.googleapis.com/auth/admin.directory.group.readonly"
+	TraitInternalRoleVariable = "{{internal.logins}}"
 )
 
 // SCP is Secure Copy.
@@ -437,9 +304,6 @@ const DefaultImplicitRole = "default-implicit-role"
 // APIDomain is a default domain name for Auth server API
 const APIDomain = "teleport.cluster.local"
 
-// MinClientVersion is the minimum client version required by the server.
-const MinClientVersion = "3.0.0"
-
 const (
 	// RemoteClusterStatusOffline indicates that cluster is considered as
 	// offline, since it has missed a series of heartbeats
@@ -452,83 +316,4 @@ const (
 const (
 	// SharedDirMode is a mode for a directory shared with group
 	SharedDirMode = 0750
-
-	// PrivateDirMode is a mode for private directories
-	PrivateDirMode = 0700
 )
-
-const (
-	// SessionEvent is sent by servers to clients when an audit event occurs on
-	// the session.
-	SessionEvent = "x-teleport-event"
-)
-
-const (
-	// EnvKubeConfig is environment variable for kubeconfig
-	EnvKubeConfig = "KUBECONFIG"
-
-	// KubeConfigDir is a default directory where k8s stores its user local config
-	KubeConfigDir = ".kube"
-
-	// KubeConfigFile is a default filename where k8s stores its user local config
-	KubeConfigFile = "config"
-
-	// EnvHome is home environment variable
-	EnvHome = "HOME"
-
-	// EnvUserProfile is the home directory environment variable on Windows.
-	EnvUserProfile = "USERPROFILE"
-
-	// KubeServiceAddr is an address for kubernetes endpoint service
-	KubeServiceAddr = "kubernetes.default.svc.cluster.local:443"
-
-	// KubeCAPath is a hardcode of mounted CA inside every pod of K8s
-	KubeCAPath = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-
-	// KubeKindCSR is a certificate signing requests
-	KubeKindCSR = "CertificateSigningRequest"
-
-	// KubeKindPod is a kubernetes pod
-	KubeKindPod = "Pod"
-
-	// KubeMetadataNameSelector is a selector for name metadata in API requests
-	KubeMetadataNameSelector = "metadata.name"
-
-	// KubeMetadataLabelSelector is a selector for label
-	KubeMetadataLabelSelector = "metadata.label"
-
-	// KubeRunTests turns on kubernetes tests
-	KubeRunTests = "TEST_KUBE"
-
-	// KubeSystemMasters is a name of the builtin kubernets group for master nodes
-	KubeSystemMasters = "system:masters"
-
-	// KubeSystemAuthenticated is a builtin group that allows
-	// any user to access common API methods, e.g. discovery methods
-	// required for initial client usage
-	KubeSystemAuthenticated = "system:authenticated"
-
-	// UsageKubeOnly specifies certificate usage metadata
-	// that limits certificate to be only used for kubernetes proxying
-	UsageKubeOnly = "usage:kube"
-)
-
-const (
-	// UseOfClosedNetworkConnection is a special string some parts of
-	// go standard lib are using that is the only way to identify some errors
-	UseOfClosedNetworkConnection = "use of closed network connection"
-)
-
-const (
-	// OpenBrowserLinux is the command used to open a web browser on Linux.
-	OpenBrowserLinux = "xdg-open"
-
-	// OpenBrowserDarwin is the command used to open a web browser on macOS/Darwin.
-	OpenBrowserDarwin = "open"
-
-	// OpenBrowserWindows is the command used to open a web browser on Windows.
-	OpenBrowserWindows = "rundll32.exe"
-)
-
-// RSAKeySize is the size of the RSA key.
-const RSAKeySize = 2048

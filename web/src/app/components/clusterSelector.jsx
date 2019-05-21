@@ -35,10 +35,13 @@ class ClusterSelector extends React.Component {
 
   render() {
     const { sites, siteId } = this.props;
-    const siteOptions = sites.map(s => ({
-      label: s.name,
+    console.log("---------- data us",this.props,sites)
+    const siteOptions = sites.map(s => {
+      console.log("sssss",s.name,s.alias);
+      return ({
+      label: s.alias,
       value: s.name
-    }));
+    })});
 
     if (siteOptions.length === 1 && isUUID(siteOptions[0].value)){
       siteOptions[0].label = location.hostname;

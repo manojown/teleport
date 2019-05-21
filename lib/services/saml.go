@@ -1,5 +1,5 @@
 /*
-Copyright 2015-2019 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io/ioutil"
@@ -58,6 +59,8 @@ type SAMLConnector interface {
 	GetAttributes() []string
 	// MapAttributes maps attributes to roles
 	MapAttributes(assertionInfo saml2.AssertionInfo) []string
+	// RoleFromTemplate creates a role from a template and claims.
+	RoleFromTemplate(assertionInfo saml2.AssertionInfo) (Role, error)
 	// Check checks SAML connector for errors
 	CheckAndSetDefaults() error
 	// SetIssuer sets issuer
@@ -139,7 +142,7 @@ func GetSAMLConnectorMarshaler() SAMLConnectorMarshaler {
 // mostly adds support for extended versions
 type SAMLConnectorMarshaler interface {
 	// UnmarshalSAMLConnector unmarshals connector from binary representation
-	UnmarshalSAMLConnector(bytes []byte, opts ...MarshalOption) (SAMLConnector, error)
+	UnmarshalSAMLConnector(bytes []byte) (SAMLConnector, error)
 	// MarshalSAMLConnector marshals connector to binary representation
 	MarshalSAMLConnector(c SAMLConnector, opts ...MarshalOption) ([]byte, error)
 }
@@ -152,38 +155,21 @@ func GetSAMLConnectorSchema() string {
 type TeleportSAMLConnectorMarshaler struct{}
 
 // UnmarshalSAMLConnector unmarshals connector from
-func (*TeleportSAMLConnectorMarshaler) UnmarshalSAMLConnector(bytes []byte, opts ...MarshalOption) (SAMLConnector, error) {
-	cfg, err := collectOptions(opts)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
+func (*TeleportSAMLConnectorMarshaler) UnmarshalSAMLConnector(bytes []byte) (SAMLConnector, error) {
 	var h ResourceHeader
-	err = utils.FastUnmarshal(bytes, &h)
+	err := json.Unmarshal(bytes, &h)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 	switch h.Version {
 	case V2:
 		var c SAMLConnectorV2
-		if cfg.SkipValidation {
-			if err := utils.FastUnmarshal(bytes, &c); err != nil {
-				return nil, trace.BadParameter(err.Error())
-			}
-		} else {
-			if err := utils.UnmarshalWithSchema(GetSAMLConnectorSchema(), &c, bytes); err != nil {
-				return nil, trace.BadParameter(err.Error())
-			}
+		if err := utils.UnmarshalWithSchema(GetSAMLConnectorSchema(), &c, bytes); err != nil {
+			return nil, trace.BadParameter(err.Error())
 		}
 
 		if err := c.Metadata.CheckAndSetDefaults(); err != nil {
 			return nil, trace.Wrap(err)
-		}
-
-		if cfg.ID != 0 {
-			c.SetResourceID(cfg.ID)
-		}
-		if !cfg.Expires.IsZero() {
-			c.SetExpiry(cfg.Expires)
 		}
 
 		return &c, nil
@@ -208,15 +194,7 @@ func (*TeleportSAMLConnectorMarshaler) MarshalSAMLConnector(c SAMLConnector, opt
 		if !ok {
 			return nil, trace.BadParameter("don't know how to marshal %v", V2)
 		}
-		v2 := v.V2()
-		if !cfg.PreserveResourceID {
-			// avoid modifying the original object
-			// to prevent unexpected data races
-			copy := *v2
-			copy.SetResourceID(0)
-			v2 = &copy
-		}
-		return utils.FastMarshal(v2)
+		return json.Marshal(v.V2())
 	default:
 		return nil, trace.BadParameter("version %v is not supported", version)
 	}
@@ -226,44 +204,12 @@ func (*TeleportSAMLConnectorMarshaler) MarshalSAMLConnector(c SAMLConnector, opt
 type SAMLConnectorV2 struct {
 	// Kind is a resource kind
 	Kind string `json:"kind"`
-	// SubKind is a resource sub kind
-	SubKind string `json:"sub_kind,omitempty"`
 	// Version is version
 	Version string `json:"version"`
 	// Metadata is connector metadata
 	Metadata Metadata `json:"metadata"`
 	// Spec contains connector specification
 	Spec SAMLConnectorSpecV2 `json:"spec"`
-}
-
-// GetVersion returns resource version
-func (o *SAMLConnectorV2) GetVersion() string {
-	return o.Version
-}
-
-// GetKind returns resource kind
-func (o *SAMLConnectorV2) GetKind() string {
-	return o.Kind
-}
-
-// GetSubKind returns resource sub kind
-func (o *SAMLConnectorV2) GetSubKind() string {
-	return o.SubKind
-}
-
-// SetSubKind sets resource subkind
-func (o *SAMLConnectorV2) SetSubKind(sk string) {
-	o.SubKind = sk
-}
-
-// GetResourceID returns resource ID
-func (o *SAMLConnectorV2) GetResourceID() int64 {
-	return o.Metadata.ID
-}
-
-// SetResourceID sets resource ID
-func (o *SAMLConnectorV2) SetResourceID(id int64) {
-	o.Metadata.ID = id
 }
 
 // GetServiceProviderIssuer returns service provider issuer
@@ -475,7 +421,7 @@ func (o *SAMLConnectorV2) GetAttributes() []string {
 	return utils.Deduplicate(out)
 }
 
-// MapClaims maps SAML attributes to roles
+// MapClaims maps claims to roles
 func (o *SAMLConnectorV2) MapAttributes(assertionInfo saml2.AssertionInfo) []string {
 	var roles []string
 	for _, mapping := range o.Spec.AttributesToRoles {
@@ -483,23 +429,9 @@ func (o *SAMLConnectorV2) MapAttributes(assertionInfo saml2.AssertionInfo) []str
 			if attr.Name != mapping.Name {
 				continue
 			}
-		mappingLoop:
 			for _, value := range attr.Values {
-				for _, role := range mapping.Roles {
-					outRole, err := utils.ReplaceRegexp(mapping.Value, role, value.Value)
-					switch {
-					case err != nil:
-						if !trace.IsNotFound(err) {
-							log.Debugf("Failed to match expression %v, replace with: %v input: %v, err: %v", mapping.Value, role, value.Value, err)
-						}
-						// if value input did not match, no need to apply
-						// to all roles
-						continue mappingLoop
-					case outRole == "":
-						// skip empty role matches
-					case outRole != "":
-						roles = append(roles, outRole)
-					}
+				if value.Value == mapping.Value {
+					roles = append(roles, mapping.Roles...)
 				}
 			}
 		}
@@ -551,6 +483,51 @@ func executeSAMLSliceTemplate(raw []string, assertion map[string]string) ([]stri
 	return sl, nil
 }
 
+// RoleFromTemplate creates a role from a template and claims.
+func (o *SAMLConnectorV2) RoleFromTemplate(assertionInfo saml2.AssertionInfo) (Role, error) {
+	assertionMap := buildAssertionMap(assertionInfo)
+	for _, mapping := range o.Spec.AttributesToRoles {
+		for assrName, assrValue := range assertionMap {
+			// match assertion name
+			if assrName != mapping.Name {
+				continue
+			}
+
+			// match assertion value
+			if assrValue != mapping.Value {
+				continue
+			}
+
+			// claim name and value match, if a role template exists, execute template
+			roleTemplate := mapping.RoleTemplate
+			if roleTemplate != nil {
+				// at the moment, only allow templating for role name and logins
+				executedName, err := executeSAMLStringTemplate(roleTemplate.GetName(), assertionMap)
+				if err != nil {
+					return nil, trace.Wrap(err)
+				}
+				executedLogins, err := executeSAMLSliceTemplate(roleTemplate.GetLogins(), assertionMap)
+				if err != nil {
+					return nil, trace.Wrap(err)
+				}
+
+				roleTemplate.SetName(executedName)
+				roleTemplate.SetLogins(executedLogins)
+
+				// check all fields and make sure we have have a valid role
+				err = roleTemplate.CheckAndSetDefaults()
+				if err != nil {
+					return nil, trace.Wrap(err)
+				}
+
+				return roleTemplate.V3(), nil
+			}
+		}
+	}
+
+	return nil, trace.BadParameter("no matching assertion name/value, assertions: %v", assertionMap)
+}
+
 // GetServiceProvider initialises service provider spec from settings
 func (o *SAMLConnectorV2) GetServiceProvider(clock clockwork.Clock) (*saml2.SAMLServiceProvider, error) {
 	if o.Metadata.Name == "" {
@@ -596,7 +573,7 @@ func (o *SAMLConnectorV2) GetServiceProvider(clock clockwork.Clock) (*saml2.SAML
 		}
 
 		for _, kd := range metadata.IDPSSODescriptor.KeyDescriptors {
-			certData, err := base64.StdEncoding.DecodeString(strings.TrimSpace(kd.KeyInfo.X509Data.X509Certificate.Data))
+			certData, err := base64.StdEncoding.DecodeString(kd.KeyInfo.X509Data.X509Certificate.Data)
 			if err != nil {
 				return nil, trace.Wrap(err)
 			}
@@ -804,7 +781,7 @@ type AttributeMapping struct {
 	Name string `json:"name"`
 	// Value is attribute statement value to match
 	Value string `json:"value"`
-	// Roles is a list of teleport roles to map to
+	// Roles is a list of teleport roles to match
 	Roles []string `json:"roles,omitempty"`
 	// RoleTemplate is a template for a role that will be filled
 	// with data from claims.

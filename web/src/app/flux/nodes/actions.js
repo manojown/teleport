@@ -7,9 +7,18 @@ import Logger from 'app/lib/logger';
 const logger = Logger.create('Modules/Nodes');
 
 export function fetchNodes() {
+  console.log("called fetchNodes");
+  console.log("============");
+  console.log("called fetchNodes");
+  
   const siteId = reactor.evaluate(appGetters.siteId);
   return api.get(cfg.api.getSiteNodesUrl(siteId))
-    .then(res => res.items || [])
+    .then(res => {
+      console.log("called fetchNodes");
+      console.log(res.items);
+      console.log("called fetchNodes");
+      return res.items || []
+    })
     .done(items => reactor.dispatch(TLPT_NODES_RECEIVE, items))
     .fail(err => logger.error('fetchNodes', err));
 }

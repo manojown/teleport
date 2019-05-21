@@ -6,9 +6,9 @@ for testing & development purposes.
 ### Building 
 
 First, you need to build `teleport:latest` Docker image. This image is built
-when you type `make build` BUT...
+automatically when you type `make` BUT...
 
-But you have to build the base image first, by running `make docker`
+But you have to build the base image first, by running `make -C build.assets`
 from `$GOPATH/github.com/gravitational/teleport` (repository base dir).
 
 ### Starting 

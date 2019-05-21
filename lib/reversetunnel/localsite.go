@@ -22,12 +22,13 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/ssh/agent"
+
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/srv/forward"
-	"github.com/gravitational/teleport/lib/utils/proxy"
 
 	"github.com/gravitational/trace"
 	log "github.com/sirupsen/logrus"
@@ -75,6 +76,7 @@ type localSite struct {
 	domainName  string
 	connections []*remoteConn
 	lastUsed    int
+	lastActive  time.Time
 	srv         *server
 
 	// client provides access to the Auth Server API of the local cluster.
@@ -85,11 +87,6 @@ type localSite struct {
 
 	// certificateCache caches host certificates for the forwarding server.
 	certificateCache *certificateCache
-}
-
-// GetTunnelsCount always returns 1 for local cluster
-func (s *localSite) GetTunnelsCount() int {
-	return 1
 }
 
 func (s *localSite) CachingAccessPoint() (auth.AccessPoint, error) {
@@ -135,12 +132,7 @@ func (s *localSite) DialAuthServer() (conn net.Conn, err error) {
 	return nil, trace.ConnectionProblem(err, "unable to connect to auth server")
 }
 
-func (s *localSite) Dial(params DialParams) (net.Conn, error) {
-	err := params.CheckAndSetDefaults()
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
+func (s *localSite) Dial(from net.Addr, to net.Addr, userAgent agent.Agent) (net.Conn, error) {
 	clusterConfig, err := s.accessPoint.GetClusterConfig()
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -149,39 +141,32 @@ func (s *localSite) Dial(params DialParams) (net.Conn, error) {
 	// if the proxy is in recording mode use the agent to dial and build a
 	// in-memory forwarding server
 	if clusterConfig.GetSessionRecording() == services.RecordAtProxy {
-		if params.UserAgent == nil {
+		if userAgent == nil {
 			return nil, trace.BadParameter("user agent missing")
 		}
-		return s.dialWithAgent(params)
+		return s.dialWithAgent(from, to, userAgent)
 	}
 
-	return s.DialTCP(params.From, params.To)
+	return s.dial(from, to)
 }
 
-func (s *localSite) DialTCP(from net.Addr, to net.Addr) (net.Conn, error) {
+func (s *localSite) dial(from net.Addr, to net.Addr) (net.Conn, error) {
 	s.log.Debugf("Dialing from %v to %v", from, to)
 
-	dialer := proxy.DialerFromEnvironment(to.String())
-	return dialer.DialTimeout(to.Network(), to.String(), defaults.DefaultDialTimeout)
+	return net.DialTimeout(to.Network(), to.String(), defaults.DefaultDialTimeout)
 }
 
-func (s *localSite) dialWithAgent(params DialParams) (net.Conn, error) {
-	s.log.Debugf("Dialing with an agent from %v to %v.", params.From, params.To)
+func (s *localSite) dialWithAgent(from net.Addr, to net.Addr, userAgent agent.Agent) (net.Conn, error) {
+	s.log.Debugf("Dialing with an agent from %v to %v", from, to)
 
-	addr := params.Address
-	host, _, err := net.SplitHostPort(params.To.String())
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	// Get a host certificate for the forwarding node from the cache.
-	hostCertificate, err := s.certificateCache.GetHostCertificate(addr, []string{host})
+	// get a host certificate for the forwarding node from the cache
+	hostCertificate, err := s.certificateCache.GetHostCertificate(to.String())
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 
 	// get a net.Conn to the target server
-	targetConn, err := net.DialTimeout(params.To.Network(), params.To.String(), defaults.DefaultDialTimeout)
+	targetConn, err := net.DialTimeout(to.Network(), to.String(), defaults.DefaultDialTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -191,15 +176,14 @@ func (s *localSite) dialWithAgent(params DialParams) (net.Conn, error) {
 	// once conn is closed.
 	serverConfig := forward.ServerConfig{
 		AuthClient:      s.client,
-		UserAgent:       params.UserAgent,
+		UserAgent:       userAgent,
 		TargetConn:      targetConn,
-		SrcAddr:         params.From,
-		DstAddr:         params.To,
+		SrcAddr:         from,
+		DstAddr:         to,
 		HostCertificate: hostCertificate,
 		Ciphers:         s.srv.Config.Ciphers,
 		KEXAlgorithms:   s.srv.Config.KEXAlgorithms,
 		MACAlgorithms:   s.srv.Config.MACAlgorithms,
-		DataDir:         s.srv.Config.DataDir,
 	}
 	remoteServer, err := forward.New(serverConfig)
 	if err != nil {

@@ -1,5 +1,5 @@
 /*
-Copyright 2015-2019 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,154 +17,21 @@ limitations under the License.
 package utils
 
 import (
-	"encoding/json"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
-	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/modules"
 	"github.com/gravitational/trace"
 	"github.com/pborman/uuid"
-	log "github.com/sirupsen/logrus"
+	"golang.org/x/crypto/ssh"
 )
-
-// Tracer helps to trace execution of functions
-type Tracer struct {
-	// Started records starting time of the call
-	Started time.Time
-	// Description is arbitrary description
-	Description string
-}
-
-// NewTracer returns a new tracer
-func NewTracer(description string) *Tracer {
-	return &Tracer{Started: time.Now().UTC(), Description: description}
-}
-
-// Start logs start of the trace
-func (t *Tracer) Start() *Tracer {
-	log.Debugf("Tracer started %v.", t.Description)
-	return t
-}
-
-// Stop logs stop of the trace
-func (t *Tracer) Stop() *Tracer {
-	log.Debugf("Tracer completed %v in %v.", t.Description, time.Now().Sub(t.Started))
-	return t
-}
-
-// ThisFunction returns calling function name
-func ThisFunction() string {
-	var pc [32]uintptr
-	runtime.Callers(2, pc[:])
-	return runtime.FuncForPC(pc[0]).Name()
-}
-
-// SyncString is a string value
-// that can be concurrently accessed
-type SyncString struct {
-	sync.Mutex
-	string
-}
-
-// Value returns value of the string
-func (s *SyncString) Value() string {
-	s.Lock()
-	defer s.Unlock()
-	return s.string
-}
-
-// Set sets the value of the string
-func (s *SyncString) Set(v string) {
-	s.Lock()
-	defer s.Unlock()
-	s.string = v
-}
-
-// ClickableURL fixes address in url to make sure
-// it's clickable, e.g. it replaces "undefined" address like
-// 0.0.0.0 used in network listeners format with loopback 127.0.0.1
-func ClickableURL(in string) string {
-	out, err := url.Parse(in)
-	if err != nil {
-		return in
-	}
-	host, port, err := net.SplitHostPort(out.Host)
-	if err != nil {
-		return in
-	}
-	ip := net.ParseIP(host)
-	// if address is not an IP, unspecified, e.g. all interfaces 0.0.0.0 or multicast,
-	// replace with localhost that is clickable
-	if len(ip) == 0 || ip.IsUnspecified() || ip.IsMulticast() {
-		out.Host = fmt.Sprintf("127.0.0.1:%v", port)
-		return out.String()
-	}
-	return out.String()
-}
-
-// AsBool converts string to bool, in case of the value is empty
-// or unknown, defaults to false
-func AsBool(v string) bool {
-	if v == "" {
-		return false
-	}
-	out, _ := ParseBool(v)
-	return out
-}
-
-// ParseBool parses string as boolean value,
-// returns error in case if value is not recognized
-func ParseBool(value string) (bool, error) {
-	switch strings.ToLower(value) {
-	case "yes", "yeah", "y", "true", "1", "on":
-		return true, nil
-	case "no", "nope", "n", "false", "0", "off":
-		return false, nil
-	default:
-		return false, trace.BadParameter("unsupported value: %q", value)
-	}
-}
-
-// ParseAdvertiseAddr validates advertise address,
-// makes sure it's not an unreachable or multicast address
-// returns address split into host and port, port could be empty
-// if not specified
-func ParseAdvertiseAddr(advertiseIP string) (string, string, error) {
-	advertiseIP = strings.TrimSpace(advertiseIP)
-	host := advertiseIP
-	port := ""
-	if len(net.ParseIP(host)) == 0 && strings.Contains(advertiseIP, ":") {
-		var err error
-		host, port, err = net.SplitHostPort(advertiseIP)
-		if err != nil {
-			return "", "", trace.BadParameter("failed to parse address %q", advertiseIP)
-		}
-		if _, err := strconv.Atoi(port); err != nil {
-			return "", "", trace.BadParameter("bad port %q, expected integer", port)
-		}
-		if host == "" {
-			return "", "", trace.BadParameter("missing host parameter")
-		}
-	}
-	ip := net.ParseIP(host)
-	if len(ip) != 0 {
-		if ip.IsUnspecified() || ip.IsMulticast() {
-			return "", "", trace.BadParameter("unreachable advertise IP: %v", advertiseIP)
-		}
-	}
-	return host, port, nil
-}
 
 // StringsSet creates set of string (map[string]struct{})
 // from a list of strings
@@ -232,11 +99,9 @@ func SplitHostPort(hostname string) (string, string, error) {
 	return host, port, nil
 }
 
-// ReadPath reads file contents
+type HostKeyCallback func(hostID string, remote net.Addr, key ssh.PublicKey) error
+
 func ReadPath(path string) ([]byte, error) {
-	if path == "" {
-		return nil, trace.NotFound("empty path")
-	}
 	s, err := filepath.Abs(path)
 	if err != nil {
 		return nil, trace.ConvertSystemError(err)
@@ -297,37 +162,10 @@ func (p *PortList) Pop() string {
 	return val
 }
 
-// PopInt returns a value from the list, it panics if not enough values
-// were allocated
-func (p *PortList) PopInt() int {
-	i, err := strconv.Atoi(p.Pop())
-	if err != nil {
-		panic(err)
-	}
-	return i
-}
-
-// PopIntSlice returns a slice of values from the list, it panics if not enough
-// ports were allocated
-func (p *PortList) PopIntSlice(num int) []int {
-	ports := make([]int, num)
-	for i := range ports {
-		ports[i] = p.PopInt()
-	}
-	return ports
-}
-
-// PortStartingNumber is a starting port number for tests
-const PortStartingNumber = 20000
-
 // GetFreeTCPPorts returns n ports starting from port 20000.
-func GetFreeTCPPorts(n int, offset ...int) (PortList, error) {
+func GetFreeTCPPorts(n int) (PortList, error) {
 	list := make(PortList, 0, n)
-	start := PortStartingNumber
-	if len(offset) != 0 {
-		start = offset[0]
-	}
-	for i := start; i < start+n; i++ {
+	for i := 20000; i < 20000+n; i++ {
 		list = append(list, strconv.Itoa(i))
 	}
 	return list, nil
@@ -404,26 +242,6 @@ func SliceContainsStr(slice []string, value string) bool {
 	return false
 }
 
-// RemoveFromSlice makes a copy of the slice and removes the passed in values from the copy.
-func RemoveFromSlice(slice []string, values ...string) []string {
-	output := make([]string, 0, len(slice))
-
-	remove := make(map[string]bool)
-	for _, value := range values {
-		remove[value] = true
-	}
-
-	for _, s := range slice {
-		_, ok := remove[s]
-		if ok {
-			continue
-		}
-		output = append(output, s)
-	}
-
-	return output
-}
-
 // CheckCertificateFormatFlag checks if the certificate format is valid.
 func CheckCertificateFormatFlag(s string) (string, error) {
 	switch s {
@@ -432,83 +250,6 @@ func CheckCertificateFormatFlag(s string) (string, error) {
 	default:
 		return "", trace.BadParameter("invalid certificate format parameter: %q", s)
 	}
-}
-
-// Strings is a list of string that can unmarshal from list of strings
-// or a scalar string from scalar yaml or json property
-type Strings []string
-
-// UnmarshalJSON unmarshals scalar string or strings slice to Strings
-func (s *Strings) UnmarshalJSON(data []byte) error {
-	if len(data) == 0 {
-		return nil
-	}
-	var stringVar string
-	if err := json.Unmarshal(data, &stringVar); err == nil {
-		*s = []string{stringVar}
-		return nil
-	}
-	var stringsVar []string
-	if err := json.Unmarshal(data, &stringsVar); err != nil {
-		return trace.Wrap(err)
-	}
-	*s = stringsVar
-	return nil
-}
-
-// UnmarshalYAML is used to allow Strings to unmarshal from
-// scalar string value or from the list
-func (s *Strings) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	// try unmarshal as string
-	var val string
-	err := unmarshal(&val)
-	if err == nil {
-		*s = []string{val}
-		return nil
-	}
-
-	// try unmarshal as slice
-	var slice []string
-	err = unmarshal(&slice)
-	if err == nil {
-		*s = slice
-		return nil
-	}
-
-	return err
-}
-
-// MarshalJSON marshals to scalar value
-// if there is only one value in the list
-// to list otherwise
-func (s Strings) MarshalJSON() ([]byte, error) {
-	if len(s) == 1 {
-		return json.Marshal(s[0])
-	}
-	return json.Marshal([]string(s))
-}
-
-// MarshalYAML marshals to scalar value
-// if there is only one value in the list,
-// marshals to list otherwise
-func (s Strings) MarshalYAML() (interface{}, error) {
-	if len(s) == 1 {
-		return s[0], nil
-	}
-	return []string(s), nil
-}
-
-// Addrs returns strings list converted to address list
-func (s Strings) Addrs(defaultPort int) ([]NetAddr, error) {
-	addrs := make([]NetAddr, len(s))
-	for i, val := range s {
-		addr, err := ParseHostPortAddr(val, defaultPort)
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-		addrs[i] = *addr
-	}
-	return addrs, nil
 }
 
 const (

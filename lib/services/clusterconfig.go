@@ -1,5 +1,5 @@
 /*
-Copyright 2017-2019 Gravitational, Inc.
+Copyright 2017 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package services
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -55,40 +56,6 @@ type ClusterConfig interface {
 	// CheckAndSetDefaults checks and set default values for missing fields.
 	CheckAndSetDefaults() error
 
-	// GetAuditConfig returns audit settings
-	GetAuditConfig() AuditConfig
-
-	// SetAuditConfig sets audit config
-	SetAuditConfig(AuditConfig)
-
-	// GetClientIdleTimeout returns client idle timeout setting
-	GetClientIdleTimeout() time.Duration
-
-	// SetClientIdleTimeout sets client idle timeout setting
-	SetClientIdleTimeout(t time.Duration)
-
-	// GetDisconnectExpiredCert returns disconnect expired certificate setting
-	GetDisconnectExpiredCert() bool
-
-	// SetDisconnectExpiredCert sets disconnect client with expired certificate setting
-	SetDisconnectExpiredCert(bool)
-
-	// GetKeepAliveInterval gets the keep-alive interval for server to client
-	// connections.
-	GetKeepAliveInterval() time.Duration
-
-	// SetKeepAliveInterval sets the keep-alive interval for server to client
-	// connections.
-	SetKeepAliveInterval(t time.Duration)
-
-	// GetKeepAliveCountMax gets the number of missed keep-alive messages before
-	// the server disconnects the client.
-	GetKeepAliveCountMax() int64
-
-	// SetKeepAliveCountMax sets the number of missed keep-alive messages before
-	// the server disconnects the client.
-	SetKeepAliveCountMax(c int64)
-
 	// Copy creates a copy of the resource and returns it.
 	Copy() ClusterConfig
 }
@@ -124,28 +91,23 @@ func DefaultClusterConfig() ClusterConfig {
 		Spec: ClusterConfigSpecV3{
 			SessionRecording:    RecordAtNode,
 			ProxyChecksHostKeys: HostKeyCheckYes,
-			KeepAliveInterval:   NewDuration(defaults.KeepAliveInterval),
-			KeepAliveCountMax:   int64(defaults.KeepAliveCountMax),
 		},
 	}
 }
 
-// ShouldUploadSessions returns whether audit config
-// instructs server to upload sessions
-func (a AuditConfig) ShouldUploadSessions() bool {
-	return a.AuditSessionsURI != ""
-}
+// ClusterConfigV3 implements the ClusterConfig interface.
+type ClusterConfigV3 struct {
+	// Kind is a resource kind - always resource.
+	Kind string `json:"kind"`
 
-// AuditConfigFromObject returns audit config from interface object
-func AuditConfigFromObject(in interface{}) (*AuditConfig, error) {
-	var cfg AuditConfig
-	if in == nil {
-		return &cfg, nil
-	}
-	if err := utils.ObjectToStruct(in, &cfg); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return &cfg, nil
+	// Version is a resource version.
+	Version string `json:"version"`
+
+	// Metadata is metadata about the resource.
+	Metadata Metadata `json:"metadata"`
+
+	// Spec is the specification of the resource.
+	Spec ClusterConfigSpecV3 `json:"spec"`
 }
 
 const (
@@ -170,34 +132,18 @@ const (
 	HostKeyCheckNo string = "no"
 )
 
-// GetVersion returns resource version
-func (c *ClusterConfigV3) GetVersion() string {
-	return c.Version
-}
+// ClusterConfigSpecV3 is the actual data we care about for ClusterConfig.
+type ClusterConfigSpecV3 struct {
+	// SessionRecording controls where (or if) the session is recorded.
+	SessionRecording string `json:"session_recording"`
 
-// GetSubKind returns resource subkind
-func (c *ClusterConfigV3) GetSubKind() string {
-	return c.SubKind
-}
+	// ClusterID is the unique cluster ID that is set once during the first auth
+	// server startup.
+	ClusterID string `json:"cluster_id"`
 
-// SetSubKind sets resource subkind
-func (c *ClusterConfigV3) SetSubKind(sk string) {
-	c.SubKind = sk
-}
-
-// GetKind returns resource kind
-func (c *ClusterConfigV3) GetKind() string {
-	return c.Kind
-}
-
-// GetResourceID returns resource ID
-func (c *ClusterConfigV3) GetResourceID() int64 {
-	return c.Metadata.ID
-}
-
-// SetResourceID sets resource ID
-func (c *ClusterConfigV3) SetResourceID(id int64) {
-	c.Metadata.ID = id
+	// ProxyChecksHostKeys is used to control if the proxy will check host keys
+	// when in recording mode.
+	ProxyChecksHostKeys string `json:"proxy_checks_host_keys"`
 }
 
 // GetName returns the name of the cluster.
@@ -210,7 +156,7 @@ func (c *ClusterConfigV3) SetName(e string) {
 	c.Metadata.Name = e
 }
 
-// Expires returns object expiry setting
+// Expires retuns object expiry setting
 func (c *ClusterConfigV3) Expiry() time.Time {
 	return c.Metadata.Expiry()
 }
@@ -260,58 +206,6 @@ func (c *ClusterConfigV3) SetProxyChecksHostKeys(t string) {
 	c.Spec.ProxyChecksHostKeys = t
 }
 
-// GetAuditConfig returns audit settings
-func (c *ClusterConfigV3) GetAuditConfig() AuditConfig {
-	return c.Spec.Audit
-}
-
-// SetAuditConfig sets audit config
-func (c *ClusterConfigV3) SetAuditConfig(cfg AuditConfig) {
-	c.Spec.Audit = cfg
-}
-
-// GetClientIdleTimeout returns client idle timeout setting
-func (c *ClusterConfigV3) GetClientIdleTimeout() time.Duration {
-	return c.Spec.ClientIdleTimeout.Duration()
-}
-
-// SetClientIdleTimeout sets client idle timeout setting
-func (c *ClusterConfigV3) SetClientIdleTimeout(d time.Duration) {
-	c.Spec.ClientIdleTimeout = Duration(d)
-}
-
-// GetDisconnectExpiredCert returns disconnect expired certificate setting
-func (c *ClusterConfigV3) GetDisconnectExpiredCert() bool {
-	return c.Spec.DisconnectExpiredCert.Value()
-}
-
-// SetDisconnectExpiredCert sets disconnect client with expired certificate setting
-func (c *ClusterConfigV3) SetDisconnectExpiredCert(b bool) {
-	c.Spec.DisconnectExpiredCert = NewBool(b)
-}
-
-// GetKeepAliveInterval gets the keep-alive interval.
-func (c *ClusterConfigV3) GetKeepAliveInterval() time.Duration {
-	return c.Spec.KeepAliveInterval.Duration()
-}
-
-// SetKeepAliveInterval sets the keep-alive interval.
-func (c *ClusterConfigV3) SetKeepAliveInterval(t time.Duration) {
-	c.Spec.KeepAliveInterval = Duration(t)
-}
-
-// GetKeepAliveCountMax gets the number of missed keep-alive messages before
-// the server disconnects the client.
-func (c *ClusterConfigV3) GetKeepAliveCountMax() int64 {
-	return c.Spec.KeepAliveCountMax
-}
-
-// SetKeepAliveCountMax sets the number of missed keep-alive messages before
-// the server disconnects the client.
-func (c *ClusterConfigV3) SetKeepAliveCountMax(m int64) {
-	c.Spec.KeepAliveCountMax = m
-}
-
 // CheckAndSetDefaults checks validity of all parameters and sets defaults.
 func (c *ClusterConfigV3) CheckAndSetDefaults() error {
 	// make sure we have defaults for all metadata fields
@@ -339,15 +233,6 @@ func (c *ClusterConfigV3) CheckAndSetDefaults() error {
 	ok = utils.SliceContainsStr(all, c.Spec.ProxyChecksHostKeys)
 	if !ok {
 		return trace.BadParameter("proxy_checks_host_keys must be one of: %v", strings.Join(all, ","))
-	}
-
-	// Set the keep-alive interval and max missed keep-alives before the
-	// client is disconnected.
-	if c.Spec.KeepAliveInterval.Duration() == 0 {
-		c.Spec.KeepAliveInterval = NewDuration(defaults.KeepAliveInterval)
-	}
-	if c.Spec.KeepAliveCountMax == 0 {
-		c.Spec.KeepAliveCountMax = int64(defaults.KeepAliveCountMax)
 	}
 
 	return nil
@@ -378,46 +263,6 @@ const ClusterConfigSpecSchemaTemplate = `{
     },
     "cluster_id": {
       "type": "string"
-    },
-    "client_idle_timeout": {
-      "type": "string"
-    },
-    "disconnect_expired_cert": {
-      "anyOf": [{"type": "string"}, { "type": "boolean"}]
-    },
-    "keep_alive_interval": {
-      "type": "string"
-    },
-    "keep_alive_count_max": {
-      "type": "number"
-    },
-    "audit": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "type": {
-          "type": "string"
-        },
-        "region": {
-          "type": "string"
-        },
-        "audit_events_uri": {
-          "anyOf": [
-            {"type": "string"},
-            {"type": "array",
-             "items": {
-               "type": "string"
-             }
-            }
-          ]
-        },
-        "audit_sessions_uri": {
-          "type": "string"
-        },
-        "audit_table_name": {
-          "type": "string"
-        }
-      }
     }%v
   }
 }`
@@ -438,7 +283,7 @@ func GetClusterConfigSchema(extensionSchema string) string {
 // mostly adds support for extended versions.
 type ClusterConfigMarshaler interface {
 	Marshal(c ClusterConfig, opts ...MarshalOption) ([]byte, error)
-	Unmarshal(bytes []byte, opts ...MarshalOption) (ClusterConfig, error)
+	Unmarshal(bytes []byte) (ClusterConfig, error)
 }
 
 var clusterConfigMarshaler ClusterConfigMarshaler = &TeleportClusterConfigMarshaler{}
@@ -461,27 +306,16 @@ func GetClusterConfigMarshaler() ClusterConfigMarshaler {
 type TeleportClusterConfigMarshaler struct{}
 
 // Unmarshal unmarshals ClusterConfig from JSON.
-func (t *TeleportClusterConfigMarshaler) Unmarshal(bytes []byte, opts ...MarshalOption) (ClusterConfig, error) {
+func (t *TeleportClusterConfigMarshaler) Unmarshal(bytes []byte) (ClusterConfig, error) {
 	var clusterConfig ClusterConfigV3
 
 	if len(bytes) == 0 {
 		return nil, trace.BadParameter("missing resource data")
 	}
 
-	cfg, err := collectOptions(opts)
+	err := utils.UnmarshalWithSchema(GetClusterConfigSchema(""), &clusterConfig, bytes)
 	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	if cfg.SkipValidation {
-		if err := utils.FastUnmarshal(bytes, &clusterConfig); err != nil {
-			return nil, trace.BadParameter(err.Error())
-		}
-	} else {
-		err = utils.UnmarshalWithSchema(GetClusterConfigSchema(""), &clusterConfig, bytes)
-		if err != nil {
-			return nil, trace.BadParameter(err.Error())
-		}
+		return nil, trace.BadParameter(err.Error())
 	}
 
 	err = clusterConfig.CheckAndSetDefaults()
@@ -489,32 +323,15 @@ func (t *TeleportClusterConfigMarshaler) Unmarshal(bytes []byte, opts ...Marshal
 		return nil, trace.Wrap(err)
 	}
 
-	if cfg.ID != 0 {
-		clusterConfig.SetResourceID(cfg.ID)
-	}
-	if !cfg.Expires.IsZero() {
-		clusterConfig.SetExpiry(cfg.Expires)
-	}
 	return &clusterConfig, nil
 }
 
 // Marshal marshals ClusterConfig to JSON.
 func (t *TeleportClusterConfigMarshaler) Marshal(c ClusterConfig, opts ...MarshalOption) ([]byte, error) {
-	cfg, err := collectOptions(opts)
+	b, err := json.Marshal(c)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	switch resource := c.(type) {
-	case *ClusterConfigV3:
-		if !cfg.PreserveResourceID {
-			// avoid modifying the original object
-			// to prevent unexpected data races
-			copy := *resource
-			copy.SetResourceID(0)
-			resource = &copy
-		}
-		return utils.FastMarshal(resource)
-	default:
-		return nil, trace.BadParameter("unrecognized resource version %T", c)
-	}
+
+	return b, nil
 }

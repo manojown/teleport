@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,9 +29,6 @@ import (
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib"
-	"github.com/gravitational/teleport/lib/backend/legacy"
-	"github.com/gravitational/teleport/lib/backend/legacy/boltbk"
-	"github.com/gravitational/teleport/lib/backend/legacy/dir"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/fixtures"
 	"github.com/gravitational/teleport/lib/service"
@@ -119,61 +117,6 @@ func (s *ConfigTestSuite) TestSampleConfig(c *check.C) {
 	c.Assert(lib.IsInsecureDevMode(), check.Equals, false)
 }
 
-// TestBooleanParsing tests that boolean options
-// are parsed properly
-func (s *ConfigTestSuite) TestBooleanParsing(c *check.C) {
-	testCases := []struct {
-		s string
-		b bool
-	}{
-		{s: "true", b: true},
-		{s: "'true'", b: true},
-		{s: "yes", b: true},
-		{s: "'yes'", b: true},
-		{s: "'1'", b: true},
-		{s: "1", b: true},
-		{s: "no", b: false},
-		{s: "0", b: false},
-	}
-	for i, tc := range testCases {
-		comment := check.Commentf("test case %v", i)
-		conf, err := ReadFromString(base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`
-teleport:
-  advertise_ip: 10.10.10.1
-auth_service:
-  enabled: yes
-  disconnect_expired_cert: %v
-`, tc.s))))
-		c.Assert(err, check.IsNil)
-		c.Assert(conf.Auth.DisconnectExpiredCert.Value(), check.Equals, tc.b, comment)
-	}
-}
-
-// TestDurationParsing tests that duration options
-// are parsed properly
-func (s *ConfigTestSuite) TestDuration(c *check.C) {
-	testCases := []struct {
-		s string
-		d time.Duration
-	}{
-		{s: "1s", d: time.Second},
-		{s: "never", d: 0},
-		{s: "'1m'", d: time.Minute},
-	}
-	for i, tc := range testCases {
-		comment := check.Commentf("test case %v", i)
-		conf, err := ReadFromString(base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`
-teleport:
-  advertise_ip: 10.10.10.1
-auth_service:
-  enabled: yes
-  client_idle_timeout: %v
-`, tc.s))))
-		c.Assert(err, check.IsNil)
-		c.Assert(conf.Auth.ClientIdleTimeout.Value(), check.Equals, tc.d, comment)
-	}
-}
-
 func (s *ConfigTestSuite) TestConfigReading(c *check.C) {
 	// non-existing file:
 	conf, err := ReadFromFile("/heaven/trees/apple.ymL")
@@ -204,8 +147,6 @@ func (s *ConfigTestSuite) TestConfigReading(c *check.C) {
 	c.Assert(conf.Auth.Enabled(), check.Equals, true)
 	c.Assert(conf.Auth.ListenAddress, check.Equals, "tcp://auth")
 	c.Assert(conf.Auth.LicenseFile, check.Equals, "lic.pem")
-	c.Assert(conf.Auth.DisconnectExpiredCert.Value(), check.Equals, true)
-	c.Assert(conf.Auth.ClientIdleTimeout.Value(), check.Equals, 17*time.Second)
 	c.Assert(conf.SSH.Configured(), check.Equals, true)
 	c.Assert(conf.SSH.Enabled(), check.Equals, true)
 	c.Assert(conf.SSH.ListenAddress, check.Equals, "tcp://ssh")
@@ -372,12 +313,11 @@ func (s *ConfigTestSuite) TestApplyConfig(c *check.C) {
 	conf, err := ReadConfig(bytes.NewBufferString(SmallConfigString))
 	c.Assert(err, check.IsNil)
 	c.Assert(conf, check.NotNil)
-	c.Assert(conf.Proxy.PublicAddr, check.DeepEquals, utils.Strings{"web3:443"})
 
 	cfg := service.MakeDefaultConfig()
 	err = ApplyFileConfig(conf, cfg)
 	c.Assert(err, check.IsNil)
-	c.Assert(cfg.Auth.StaticTokens.GetStaticTokens(), check.DeepEquals, services.ProvisionTokensFromV1([]services.ProvisionTokenV1{
+	c.Assert(cfg.Auth.StaticTokens.GetStaticTokens(), check.DeepEquals, []services.ProvisionToken{
 		{
 			Token:   "xxx",
 			Roles:   teleport.Roles([]teleport.Role{"Proxy", "Node"}),
@@ -388,94 +328,13 @@ func (s *ConfigTestSuite) TestApplyConfig(c *check.C) {
 			Roles:   teleport.Roles([]teleport.Role{"Auth"}),
 			Expires: time.Unix(0, 0).UTC(),
 		},
-	}))
+	})
 	c.Assert(cfg.Auth.ClusterName.GetClusterName(), check.Equals, "magadan")
-	c.Assert(cfg.AdvertiseIP, check.Equals, "10.10.10.1")
+	c.Assert(cfg.AdvertiseIP, check.DeepEquals, net.ParseIP("10.10.10.1"))
 
 	c.Assert(cfg.Proxy.Enabled, check.Equals, true)
 	c.Assert(cfg.Proxy.WebAddr.FullAddress(), check.Equals, "tcp://webhost:3080")
 	c.Assert(cfg.Proxy.ReverseTunnelListenAddr.FullAddress(), check.Equals, "tcp://tunnelhost:1001")
-}
-
-// TestApplyConfigNoneEnabled makes sure that if a section is not enabled,
-// it's fields are not read in.
-func (s *ConfigTestSuite) TestApplyConfigNoneEnabled(c *check.C) {
-	conf, err := ReadConfig(bytes.NewBufferString(NoServicesConfigString))
-	c.Assert(err, check.IsNil)
-	c.Assert(conf, check.NotNil)
-
-	cfg := service.MakeDefaultConfig()
-	err = ApplyFileConfig(conf, cfg)
-	c.Assert(err, check.IsNil)
-
-	c.Assert(cfg.Auth.Enabled, check.Equals, false)
-	c.Assert(cfg.Auth.PublicAddrs, check.HasLen, 0)
-	c.Assert(cfg.Proxy.Enabled, check.Equals, false)
-	c.Assert(cfg.Proxy.PublicAddrs, check.HasLen, 0)
-	c.Assert(cfg.SSH.Enabled, check.Equals, false)
-	c.Assert(cfg.SSH.PublicAddrs, check.HasLen, 0)
-}
-
-func (s *ConfigTestSuite) TestBackendDefaults(c *check.C) {
-	read := func(val string) *service.Config {
-		// default value is dir backend
-		conf, err := ReadConfig(bytes.NewBufferString(val))
-		c.Assert(err, check.IsNil)
-		c.Assert(conf, check.NotNil)
-
-		cfg := service.MakeDefaultConfig()
-		err = ApplyFileConfig(conf, cfg)
-		c.Assert(err, check.IsNil)
-		return cfg
-	}
-
-	// default value is dir backend
-	cfg := read(`teleport:
-  data_dir: /var/lib/teleport
-`)
-
-	c.Assert(cfg.Auth.StorageConfig.Type, check.Equals, dir.GetName())
-	c.Assert(cfg.Auth.StorageConfig.Params[defaults.BackendPath], check.Equals, filepath.Join("/var/lib/teleport", defaults.BackendDir))
-
-	// with dir backend, if no path is specified, a good one is picked
-	cfg = read(`teleport:
-  data_dir: /var/lib/teleport
-  storage:
-    type: dir
-`)
-
-	c.Assert(cfg.Auth.StorageConfig.Type, check.Equals, dir.GetName())
-	c.Assert(cfg.Auth.StorageConfig.Params[defaults.BackendPath], check.Equals, filepath.Join("/var/lib/teleport", defaults.BackendDir))
-
-	// with dir backend, custom path is honored
-	cfg = read(`teleport:
-  data_dir: /var/lib/teleport
-  storage:
-    type: dir
-    path: /var/lib/teleport/mybackend
-`)
-
-	c.Assert(cfg.Auth.StorageConfig.Type, check.Equals, dir.GetName())
-	c.Assert(cfg.Auth.StorageConfig.Params[defaults.BackendPath], check.Equals, "/var/lib/teleport/mybackend")
-
-	// if there was a prior usage of bolt, bolt is picked as a default value
-	tempDir := c.MkDir()
-	_, err := boltbk.New(legacy.Params{defaults.BackendPath: tempDir})
-	c.Assert(err, check.IsNil)
-
-	cfg = read(fmt.Sprintf(`teleport:
-  data_dir: %v
-`, tempDir))
-
-	c.Assert(cfg.Auth.StorageConfig.Type, check.Equals, boltbk.GetName())
-	c.Assert(cfg.Auth.StorageConfig.Params[defaults.BackendPath], check.Equals, tempDir)
-
-	// kubernetes proxy is disabled by default
-	cfg = read(`teleport:
-  data_dir: /var/lib/teleport
-`)
-
-	c.Assert(cfg.Proxy.Kube.Enabled, check.Equals, false)
 }
 
 // TestParseKey ensures that keys are parsed correctly if they are in
@@ -547,7 +406,7 @@ func checkStaticConfig(c *check.C, conf *FileConfig) {
 	c.Assert(conf.Proxy.Configured(), check.Equals, false) // Missing "proxy_service" section must lead to 'not configured'
 	c.Assert(conf.Proxy.Enabled(), check.Equals, true)     // Missing "proxy_service" section must lead to 'true'
 	c.Assert(conf.Proxy.Disabled(), check.Equals, false)   // Missing "proxy_service" does NOT mean it's been disabled
-	c.Assert(conf.AdvertiseIP, check.Equals, "10.10.10.1:3022")
+	c.Assert(conf.AdvertiseIP.String(), check.Equals, "10.10.10.1")
 	c.Assert(conf.PIDFile, check.Equals, "/var/run/teleport.pid")
 
 	c.Assert(conf.Limits.MaxConnections, check.Equals, int64(90))
@@ -568,9 +427,6 @@ func checkStaticConfig(c *check.C, conf *FileConfig) {
 	c.Assert(conf.SSH.Commands[1].Name, check.Equals, "date")
 	c.Assert(conf.SSH.Commands[1].Command, check.DeepEquals, []string{"/bin/date"})
 	c.Assert(conf.SSH.Commands[1].Period.Nanoseconds(), check.Equals, int64(20000000))
-	c.Assert(conf.SSH.PublicAddr, check.DeepEquals, utils.Strings{
-		"luna3:22",
-	})
 
 	c.Assert(conf.Global.Keys[0].PrivateKey, check.Equals, "private key")
 	c.Assert(conf.Global.Keys[0].Cert, check.Equals, "node.cert")
@@ -594,10 +450,6 @@ func checkStaticConfig(c *check.C, conf *FileConfig) {
 	})
 	c.Assert(conf.Auth.StaticTokens, check.DeepEquals,
 		StaticTokens{"proxy,node:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "auth:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
-
-	c.Assert(conf.Auth.PublicAddr, check.DeepEquals, utils.Strings{
-		"auth.default.svc.cluster.local:3080",
-	})
 
 	policy, err := conf.CachePolicy.Parse()
 	c.Assert(err, check.IsNil)
@@ -658,8 +510,6 @@ func makeConfigFixture() string {
 	conf.Auth.EnabledFlag = "Yeah"
 	conf.Auth.ListenAddress = "tcp://auth"
 	conf.Auth.LicenseFile = "lic.pem"
-	conf.Auth.ClientIdleTimeout = services.NewDuration(17 * time.Second)
-	conf.Auth.DisconnectExpiredCert = services.NewBool(true)
 
 	// ssh service:
 	conf.SSH.EnabledFlag = "true"
@@ -723,18 +573,6 @@ ssh_service:
 
 		c.Assert(cfg.SSH.PermitUserEnvironment, check.Equals, tt.outPermitUserEnvironment, comment)
 	}
-}
-
-// TestDebugFlag ensures that the debug command-line flag is correctly set in the config.
-func (s *ConfigTestSuite) TestDebugFlag(c *check.C) {
-	clf := CommandLineFlags{
-		Debug: true,
-	}
-	cfg := service.MakeDefaultConfig()
-	c.Assert(cfg.Debug, check.Equals, false)
-	err := Configure(&clf, cfg)
-	c.Assert(err, check.IsNil)
-	c.Assert(cfg.Debug, check.Equals, true)
 }
 
 func (s *ConfigTestSuite) TestLicenseFile(c *check.C) {

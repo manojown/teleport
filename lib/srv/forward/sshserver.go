@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -30,8 +31,6 @@ import (
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/events"
-	"github.com/gravitational/teleport/lib/pam"
-	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/srv"
 	"github.com/gravitational/teleport/lib/sshutils"
@@ -39,9 +38,8 @@ import (
 	"github.com/gravitational/teleport/lib/utils/proxy"
 	"github.com/gravitational/trace"
 
-	"github.com/jonboulle/clockwork"
 	"github.com/pborman/uuid"
-	"github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 // Server is a forwarding server. Server is used to create a single in-memory
@@ -65,7 +63,7 @@ import (
 //   	return nil, trace.Wrap(err)
 //   }
 type Server struct {
-	log *logrus.Entry
+	log *log.Entry
 
 	id string
 
@@ -120,14 +118,6 @@ type Server struct {
 	authService     auth.AccessPoint
 	sessionRegistry *srv.SessionRegistry
 	sessionServer   session.Service
-	dataDir         string
-
-	// closeContext and closeCancel are used to signal when the in-memory
-	// server is closing and all blocking goroutines should unblock.
-	closeContext context.Context
-	closeCancel  context.CancelFunc
-
-	clock clockwork.Clock
 }
 
 // ServerConfig is the configuration needed to create an instance of a Server.
@@ -150,21 +140,12 @@ type ServerConfig struct {
 	// MACAlgorithms is a list of message authentication codes (MAC) that
 	// the server supports. If omitted the defaults will be used.
 	MACAlgorithms []string
-
-	// DataDir is a local data directory used for local server storage
-	DataDir string
-
-	// Clock is an optoinal clock to override default real time clock
-	Clock clockwork.Clock
 }
 
 // CheckDefaults makes sure all required parameters are passed in.
 func (s *ServerConfig) CheckDefaults() error {
 	if s.AuthClient == nil {
 		return trace.BadParameter("auth client required")
-	}
-	if s.DataDir == "" {
-		return trace.BadParameter("missing parameter DataDir")
 	}
 	if s.UserAgent == nil {
 		return trace.BadParameter("user agent required to connect to remote host")
@@ -181,22 +162,19 @@ func (s *ServerConfig) CheckDefaults() error {
 	if s.HostCertificate == nil {
 		return trace.BadParameter("host certificate required to act on behalf of remote host")
 	}
-	if s.Clock == nil {
-		s.Clock = clockwork.NewRealClock()
-	}
 
 	return nil
 }
 
 // New creates a new unstarted Server.
 func New(c ServerConfig) (*Server, error) {
-	// Check and make sure we everything we need to build a forwarding node.
+	// check and make sure we everything we need to build a forwarding node
 	err := c.CheckDefaults()
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 
-	// Build a pipe connection to hook up the client and the server. we save both
+	// build a pipe connection to hook up the client and the server. we save both
 	// here and will pass them along to the context when we create it so they
 	// can be closed by the context.
 	serverConn, clientConn := utils.DualPipeNetConn(c.SrcAddr, c.DstAddr)
@@ -205,7 +183,7 @@ func New(c ServerConfig) (*Server, error) {
 	}
 
 	s := &Server{
-		log: logrus.WithFields(logrus.Fields{
+		log: log.WithFields(log.Fields{
 			trace.Component: teleport.ComponentForwardingNode,
 			trace.ComponentFields: map[string]string{
 				"src-addr": c.SrcAddr.String(),
@@ -214,7 +192,7 @@ func New(c ServerConfig) (*Server, error) {
 		}),
 		id:              uuid.New(),
 		targetConn:      c.TargetConn,
-		serverConn:      utils.NewTrackingConn(serverConn),
+		serverConn:      serverConn,
 		clientConn:      clientConn,
 		userAgent:       c.UserAgent,
 		hostCertificate: c.HostCertificate,
@@ -222,48 +200,31 @@ func New(c ServerConfig) (*Server, error) {
 		auditLog:        c.AuthClient,
 		authService:     c.AuthClient,
 		sessionServer:   c.AuthClient,
-		dataDir:         c.DataDir,
-		clock:           c.Clock,
 	}
-
-	// Set the ciphers, KEX, and MACs that the in-memory server will send to the
-	// client in its SSH_MSG_KEXINIT.
-	s.ciphers = c.Ciphers
-	s.kexAlgorithms = c.KEXAlgorithms
-	s.macAlgorithms = c.MACAlgorithms
 
 	s.sessionRegistry, err = srv.NewSessionRegistry(s)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 
-	// Common auth handlers.
+	// common auth handlers
 	s.authHandlers = &srv.AuthHandlers{
-		Entry: logrus.WithFields(logrus.Fields{
+		Entry: log.WithFields(log.Fields{
 			trace.Component:       teleport.ComponentForwardingNode,
-			trace.ComponentFields: logrus.Fields{},
+			trace.ComponentFields: log.Fields{},
 		}),
-		Server:      s,
+		Server:      nil,
 		Component:   teleport.ComponentForwardingNode,
 		AuditLog:    c.AuthClient,
 		AccessPoint: c.AuthClient,
 	}
 
-	// Common term handlers.
+	// common term handlers
 	s.termHandlers = &srv.TermHandlers{
 		SessionRegistry: s.sessionRegistry,
 	}
 
-	// Create a close context that is used internally to signal when the server
-	// is closing and for any blocking goroutines to unblock.
-	s.closeContext, s.closeCancel = context.WithCancel(context.Background())
-
 	return s, nil
-}
-
-// GetDataDir returns server local storage
-func (s *Server) GetDataDir() string {
-	return s.dataDir
 }
 
 // ID returns the ID of the proxy that creates the in-memory forwarding server.
@@ -288,10 +249,10 @@ func (s *Server) Component() string {
 }
 
 // EmitAuditEvent sends an event to the Audit Log.
-func (s *Server) EmitAuditEvent(event events.Event, fields events.EventFields) {
+func (s *Server) EmitAuditEvent(eventType string, fields events.EventFields) {
 	auditLog := s.GetAuditLog()
 	if auditLog != nil {
-		if err := auditLog.EmitAuditEvent(event, fields); err != nil {
+		if err := auditLog.EmitAuditEvent(eventType, fields); err != nil {
 			s.log.Error(err)
 		}
 	} else {
@@ -320,61 +281,16 @@ func (s *Server) GetSessionServer() session.Service {
 	return s.sessionServer
 }
 
-// GetPAM returns the PAM configuration for a server. Because the forwarding
-// server runs in-memory, it does not support PAM.
-func (s *Server) GetPAM() (*pam.Config, error) {
-	return nil, trace.BadParameter("PAM not supported by forwarding server")
-}
-
-// GetInfo returns a services.Server that represents this server.
-func (s *Server) GetInfo() services.Server {
-	return &services.ServerV2{
-		Kind:    services.KindNode,
-		Version: services.V2,
-		Metadata: services.Metadata{
-			Name:      s.ID(),
-			Namespace: s.GetNamespace(),
-		},
-		Spec: services.ServerSpecV2{
-			Addr: s.AdvertiseAddr(),
-		},
-	}
-}
-
 // Dial returns the client connection created by pipeAddrConn.
 func (s *Server) Dial() (net.Conn, error) {
 	return s.clientConn, nil
 }
 
-// GetClock returns server clock implementation
-func (s *Server) GetClock() clockwork.Clock {
-	return s.clock
-}
-
 func (s *Server) Serve() {
-	config := &ssh.ServerConfig{}
-
-	// Configure callback for user certificate authentication.
-	config.PublicKeyCallback = s.authHandlers.UserKeyAuth
-
-	// Set host certificate the in-memory server will present to clients.
-	config.AddHostKey(s.hostCertificate)
-
-	// Set the ciphers, KEX, and MACs that the client will send to the target
-	// server in its SSH_MSG_KEXINIT.
-	config.Ciphers = s.ciphers
-	config.KeyExchanges = s.kexAlgorithms
-	config.MACs = s.macAlgorithms
-
-	clusterConfig, err := s.GetAccessPoint().GetClusterConfig()
-	if err != nil {
-		s.log.Errorf("Unable to fetch cluster config: %v.", err)
-		return
+	config := &ssh.ServerConfig{
+		PublicKeyCallback: s.authHandlers.UserKeyAuth,
 	}
-
-	s.log.Debugf("Supported ciphers: %q.", s.ciphers)
-	s.log.Debugf("Supported KEX algorithms: %q.", s.kexAlgorithms)
-	s.log.Debugf("Supported MAC algorithms: %q.", s.macAlgorithms)
+	config.AddHostKey(s.hostCertificate)
 
 	sconn, chans, reqs, err := ssh.NewServerConn(s.serverConn, config)
 	if err != nil {
@@ -415,21 +331,13 @@ func (s *Server) Serve() {
 		return
 	}
 
-	// The keep-alive loop will keep pinging the remote server and after it has
-	// missed a certain number of keep-alive requests it will cancel the
-	// closeContext which signals the server to shutdown.
-	go srv.StartKeepAliveLoop(srv.KeepAliveParams{
-		Conns: []srv.RequestSender{
-			s.sconn,
-			s.remoteClient,
-		},
-		Interval:     clusterConfig.GetKeepAliveInterval(),
-		MaxCount:     clusterConfig.GetKeepAliveCountMax(),
-		CloseContext: s.closeContext,
-		CloseCancel:  s.closeCancel,
-	})
-
-	go s.handleConnection(chans, reqs)
+	// Create a cancelable context and pass it to a keep alive loop. The keep
+	// alive loop will keep pinging the remote server and after it has missed a
+	// certain number of keep alive requests it will cancel the context which
+	// will close any listening goroutines.
+	heartbeatContext, cancel := context.WithCancel(context.Background())
+	go s.keepAliveLoop(cancel)
+	go s.handleConnection(heartbeatContext, chans, reqs)
 }
 
 // Close will close all underlying connections that the forwarding server holds.
@@ -455,10 +363,6 @@ func (s *Server) Close() error {
 		}
 	}
 
-	// Signal to waiting goroutines that the server is closing (for example,
-	// the keep alive loop).
-	s.closeCancel()
-
 	return trace.NewAggregate(errs...)
 }
 
@@ -481,11 +385,15 @@ func (s *Server) newRemoteClient(systemLogin string) (*ssh.Client, error) {
 		Timeout:         defaults.DefaultDialTimeout,
 	}
 
-	// Ciphers, KEX, and MACs preferences are honored by both the in-memory
-	// server as well as the client in the connection to the target node.
-	clientConfig.Ciphers = s.ciphers
-	clientConfig.KeyExchanges = s.kexAlgorithms
-	clientConfig.MACs = s.macAlgorithms
+	if len(s.ciphers) > 0 {
+		clientConfig.Ciphers = s.ciphers
+	}
+	if len(s.kexAlgorithms) > 0 {
+		clientConfig.KeyExchanges = s.kexAlgorithms
+	}
+	if len(s.macAlgorithms) > 0 {
+		clientConfig.MACs = s.macAlgorithms
+	}
 
 	dstAddr := s.targetConn.RemoteAddr().String()
 	client, err := proxy.NewClientConnWithDeadline(s.targetConn, dstAddr, clientConfig)
@@ -496,7 +404,7 @@ func (s *Server) newRemoteClient(systemLogin string) (*ssh.Client, error) {
 	return client, nil
 }
 
-func (s *Server) handleConnection(chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request) {
+func (s *Server) handleConnection(heartbeatContext context.Context, chans <-chan ssh.NewChannel, reqs <-chan *ssh.Request) {
 	defer s.log.Debugf("Closing forwarding server connected to %v and releasing resources.", s.sconn.LocalAddr())
 	defer s.Close()
 
@@ -514,10 +422,38 @@ func (s *Server) handleConnection(chans <-chan ssh.NewChannel, reqs <-chan *ssh.
 				return
 			}
 			go s.handleChannel(newChannel)
-		// If the server is closing (either the heartbeat failed or Close() was
-		// called, exit out of the connection handler loop.
-		case <-s.closeContext.Done():
+		// If the heartbeats failed, close everything and cleanup.
+		case <-heartbeatContext.Done():
 			return
+		}
+	}
+}
+
+func (s *Server) keepAliveLoop(cancel context.CancelFunc) {
+	var missed int
+
+	// tick at 1/3 of the idle timeout duration
+	keepAliveTick := time.NewTicker(defaults.DefaultIdleConnectionDuration / 3)
+	defer keepAliveTick.Stop()
+
+	for {
+		select {
+		case <-keepAliveTick.C:
+			// send a keep alive to the target node and the client to ensure both are alive.
+			proxyToNodeOk := s.sendKeepAliveWithTimeout(s.remoteClient, defaults.ReadHeadersTimeout)
+			proxyToClientOk := s.sendKeepAliveWithTimeout(s.sconn, defaults.ReadHeadersTimeout)
+			if proxyToNodeOk && proxyToClientOk {
+				missed = 0
+				continue
+			}
+
+			// if we miss 3 in a row the connections dead, call cancel and cleanup
+			missed += 1
+			if missed == 3 {
+				s.log.Infof("Missed %v keep alive messages, closing connection", missed)
+				cancel()
+				return
+			}
 		}
 	}
 }
@@ -551,8 +487,13 @@ func (s *Server) handleChannel(nch ssh.NewChannel) {
 	channelType := nch.ChannelType()
 
 	switch channelType {
-	// Channels of type "session" handle requests that are involved in running
-	// commands on a server, subsystem requests, and agent forwarding.
+	// A client requested the terminal size to be sent along with every
+	// session message (Teleport-specific SSH channel for web-based terminals).
+	case "x-teleport-request-resize-events":
+		ch, _, _ := nch.Accept()
+		go s.handleTerminalResize(ch)
+	// Channels of type "session" handle requests that are invovled in running
+	// commands on a server.
 	case "session":
 		ch, requests, err := nch.Accept()
 		if err != nil {
@@ -588,18 +529,12 @@ func (s *Server) handleDirectTCPIPRequest(ch ssh.Channel, req *sshutils.DirectTC
 
 	// Create context for this channel. This context will be closed when
 	// forwarding is complete.
-	ctx, err := srv.NewServerContext(s, s.sconn, s.identityContext)
-	if err != nil {
-		ctx.Errorf("Unable to create connection context: %v.", err)
-		ch.Stderr().Write([]byte("Unable to create connection context."))
-		return
-	}
-	ctx.Connection = s.serverConn
+	ctx := srv.NewServerContext(s, s.sconn, s.identityContext)
 	ctx.RemoteClient = s.remoteClient
 	defer ctx.Close()
 
 	// Check if the role allows port forwarding for this user.
-	err = s.authHandlers.CheckPortForward(dstAddr, ctx)
+	err := s.authHandlers.CheckPortForward(dstAddr, ctx)
 	if err != nil {
 		ch.Stderr().Write([]byte(err.Error()))
 		return
@@ -617,11 +552,10 @@ func (s *Server) handleDirectTCPIPRequest(ch ssh.Channel, req *sshutils.DirectTC
 	defer conn.Close()
 
 	// Emit a port forwarding audit event.
-	s.EmitAuditEvent(events.PortForward, events.EventFields{
+	s.EmitAuditEvent(events.PortForwardEvent, events.EventFields{
 		events.PortForwardAddr:    dstAddr,
 		events.PortForwardSuccess: true,
 		events.EventLogin:         s.identityContext.Login,
-		events.EventUser:          s.identityContext.TeleportUser,
 		events.LocalAddr:          s.sconn.LocalAddr().String(),
 		events.RemoteAddr:         s.sconn.RemoteAddr().String(),
 	})
@@ -643,22 +577,27 @@ func (s *Server) handleDirectTCPIPRequest(ch ssh.Channel, req *sshutils.DirectTC
 	wg.Wait()
 }
 
+// handleTerminalResize is called by the web proxy via its SSH connection.
+// when a web browser connects to the web API, the web proxy asks us,
+// by creating this new SSH channel, to start injecting the terminal size
+// into every SSH write back to it.
+//
+// This is the only way to make web-based terminal UI not break apart
+// when window changes its size.
+func (s *Server) handleTerminalResize(channel ssh.Channel) {
+	err := s.sessionRegistry.PushTermSizeToParty(s.sconn, channel)
+	if err != nil {
+		s.log.Warnf("Unable to push terminal size to party: %v", err)
+	}
+}
+
 // handleSessionRequests handles out of band session requests once the session
 // channel has been created this function's loop handles all the "exec",
 // "subsystem" and "shell" requests.
 func (s *Server) handleSessionRequests(ch ssh.Channel, in <-chan *ssh.Request) {
 	// Create context for this channel. This context will be closed when the
 	// session request is complete.
-	// There is no need for the forwarding server to initiate disconnects,
-	// based on teleport business logic, because this logic is already
-	// done on the server's terminating side.
-	ctx, err := srv.NewServerContext(s, s.sconn, s.identityContext)
-	if err != nil {
-		ctx.Errorf("Unable to create connection context: %v.", err)
-		ch.Stderr().Write([]byte("Unable to create connection context."))
-		return
-	}
-	ctx.Connection = s.serverConn
+	ctx := srv.NewServerContext(s, s.sconn, s.identityContext)
 	ctx.RemoteClient = s.remoteClient
 	ctx.AddCloser(ch)
 	defer ctx.Close()
@@ -817,6 +756,35 @@ func (s *Server) handleEnv(ch ssh.Channel, req *ssh.Request, ctx *srv.ServerCont
 	}
 
 	return nil
+}
+
+// RequestSender is an interface that impliments SendRequest. It is used so
+// server and client connections can be passed to functions to send requests.
+type RequestSender interface {
+	// SendRequest is used to send a out-of-band request.
+	SendRequest(name string, wantReply bool, payload []byte) (bool, []byte, error)
+}
+
+// sendKeepAliveWithTimeout sends a keepalive@openssh.com message to the remote
+// client. A manual timeout is needed here because SendRequest will wait for a
+// response forever.
+func (s *Server) sendKeepAliveWithTimeout(conn RequestSender, timeout time.Duration) bool {
+	errorCh := make(chan error, 1)
+
+	go func() {
+		_, _, err := conn.SendRequest(teleport.KeepAliveReqType, true, nil)
+		errorCh <- err
+	}()
+
+	select {
+	case err := <-errorCh:
+		if err != nil {
+			return false
+		}
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 func (s *Server) replyError(ch ssh.Channel, req *ssh.Request, err error) {

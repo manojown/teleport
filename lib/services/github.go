@@ -51,8 +51,7 @@ type GithubConnector interface {
 	// SetTeamsToLogins sets the mapping of Github teams to allowed logins
 	SetTeamsToLogins([]TeamMapping)
 	// MapClaims returns the list of allows logins based on the retrieved claims
-	// returns list of logins and kubernetes groups
-	MapClaims(GithubClaims) ([]string, []string)
+	MapClaims(GithubClaims) []string
 	// GetDisplay returns the connector display name
 	GetDisplay() string
 	// SetDisplay sets the connector display name
@@ -76,8 +75,6 @@ func NewGithubConnector(name string, spec GithubConnectorSpecV3) GithubConnector
 type GithubConnectorV3 struct {
 	// Kind is a resource kind, for Github connector it is "github"
 	Kind string `json:"kind"`
-	// SubKind is a resource sub kind
-	SubKind string `json:"sub_kind,omitempty"`
 	// Version is resource version
 	Version string `json:"version"`
 	// Metadata is resource metadata
@@ -107,9 +104,7 @@ type TeamMapping struct {
 	// Team is a team within the organization a user belongs to
 	Team string `json:"team"`
 	// Logins is a list of allowed logins for this org/team
-	Logins []string `json:"logins,omitempty"`
-	// KubeGroups is a list of allowed kubernetes groups for this org/team
-	KubeGroups []string `json:"kubernetes_groups,omitempty"`
+	Logins []string `json:"logins"`
 }
 
 // GithubClaims represents Github user information obtained during OAuth2 flow
@@ -118,36 +113,6 @@ type GithubClaims struct {
 	Username string
 	// OrganizationToTeams is the user's organization and team membership
 	OrganizationToTeams map[string][]string
-}
-
-// GetVersion returns resource version
-func (c *GithubConnectorV3) GetVersion() string {
-	return c.Version
-}
-
-// GetKind returns resource kind
-func (c *GithubConnectorV3) GetKind() string {
-	return c.Kind
-}
-
-// GetSubKind returns resource sub kind
-func (c *GithubConnectorV3) GetSubKind() string {
-	return c.SubKind
-}
-
-// SetSubKind sets resource subkind
-func (c *GithubConnectorV3) SetSubKind(s string) {
-	c.SubKind = s
-}
-
-// GetResourceID returns resource ID
-func (c *GithubConnectorV3) GetResourceID() int64 {
-	return c.Metadata.ID
-}
-
-// SetResourceID sets resource ID
-func (c *GithubConnectorV3) SetResourceID(id int64) {
-	c.Metadata.ID = id
 }
 
 // GetName returns the name of the connector
@@ -238,10 +203,9 @@ func (c *GithubConnectorV3) SetDisplay(display string) {
 	c.Spec.Display = display
 }
 
-// MapClaims returns a list of logins based on the provided claims,
-// returns a list of logins and list of kubernetes groups
-func (c *GithubConnectorV3) MapClaims(claims GithubClaims) ([]string, []string) {
-	var logins, kubeGroups []string
+// MapClaims returns a list of logins based on the provided claims
+func (c *GithubConnectorV3) MapClaims(claims GithubClaims) []string {
+	var logins []string
 	for _, mapping := range c.GetTeamsToLogins() {
 		teams, ok := claims.OrganizationToTeams[mapping.Organization]
 		if !ok {
@@ -252,11 +216,10 @@ func (c *GithubConnectorV3) MapClaims(claims GithubClaims) ([]string, []string) 
 			// see if the user belongs to this team
 			if team == mapping.Team {
 				logins = append(logins, mapping.Logins...)
-				kubeGroups = append(kubeGroups, mapping.KubeGroups...)
 			}
 		}
 	}
-	return utils.Deduplicate(logins), utils.Deduplicate(kubeGroups)
+	return utils.Deduplicate(logins)
 }
 
 var githubConnectorMarshaler GithubConnectorMarshaler = &TeleportGithubConnectorMarshaler{}
@@ -314,23 +277,7 @@ func (*TeleportGithubConnectorMarshaler) Unmarshal(bytes []byte) (GithubConnecto
 
 // MarshalGithubConnector marshals Github connector to JSON
 func (*TeleportGithubConnectorMarshaler) Marshal(c GithubConnector, opts ...MarshalOption) ([]byte, error) {
-	cfg, err := collectOptions(opts)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	switch resource := c.(type) {
-	case *GithubConnectorV3:
-		if !cfg.PreserveResourceID {
-			// avoid modifying the original object
-			// to prevent unexpected data races
-			copy := *resource
-			copy.SetResourceID(0)
-			resource = &copy
-		}
-		return utils.FastMarshal(resource)
-	default:
-		return nil, trace.BadParameter("unrecognized resource version %T", c)
-	}
+	return json.Marshal(c)
 }
 
 // GithubConnectorV3SchemaTemplate is the JSON schema for a Github connector
@@ -372,12 +319,6 @@ var TeamMappingSchema = `{
     "organization": {"type": "string"},
     "team": {"type": "string"},
     "logins": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "kubernetes_groups": {
       "type": "array",
       "items": {
         "type": "string"

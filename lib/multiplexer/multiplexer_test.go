@@ -31,6 +31,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/gravitational/teleport/lib/fixtures"
 	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/utils"
 
@@ -40,19 +41,17 @@ import (
 func Test(t *testing.T) { check.TestingT(t) }
 
 type MuxSuite struct {
-	signer ssh.Signer
+	signers []ssh.Signer
 }
 
-var _ = fmt.Printf
 var _ = check.Suite(&MuxSuite{})
 
 func (s *MuxSuite) SetUpSuite(c *check.C) {
-	var err error
-
 	utils.InitLoggerForTests()
 
-	_, s.signer, err = utils.CreateCertificate("foo", ssh.HostCert)
+	pk, err := ssh.ParsePrivateKey(fixtures.PEMBytes["ecdsa"])
 	c.Assert(err, check.IsNil)
+	s.signers = []ssh.Signer{pk}
 }
 
 // TestMultiplexing tests basic use case of multiplexing TLS
@@ -92,16 +91,15 @@ func (s *MuxSuite) TestMultiplexing(c *check.C) {
 		"test",
 		utils.NetAddr{AddrNetwork: "tcp", Addr: "localhost:0"},
 		sshHandler,
-		[]ssh.Signer{s.signer},
+		s.signers,
 		sshutils.AuthMethods{Password: pass("abc123")},
 	)
 	c.Assert(err, check.IsNil)
 	go srv.Serve(mux.SSH())
 	defer srv.Close()
 	clt, err := ssh.Dial("tcp", listener.Addr().String(), &ssh.ClientConfig{
-		Auth:            []ssh.AuthMethod{ssh.Password("abc123")},
-		Timeout:         time.Second,
-		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
+		Auth:    []ssh.AuthMethod{ssh.Password("abc123")},
+		Timeout: time.Second,
 	})
 	c.Assert(err, check.IsNil)
 	defer clt.Close()
@@ -339,9 +337,8 @@ func (s *MuxSuite) TestDisableSSH(c *check.C) {
 	defer backend1.Close()
 
 	_, err = ssh.Dial("tcp", listener.Addr().String(), &ssh.ClientConfig{
-		Auth:            []ssh.AuthMethod{ssh.Password("abc123")},
-		Timeout:         time.Second,
-		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
+		Auth:    []ssh.AuthMethod{ssh.Password("abc123")},
+		Timeout: time.Second,
 	})
 	c.Assert(err, check.NotNil)
 
@@ -400,16 +397,15 @@ func (s *MuxSuite) TestDisableTLS(c *check.C) {
 		"test",
 		utils.NetAddr{AddrNetwork: "tcp", Addr: "localhost:0"},
 		sshHandler,
-		[]ssh.Signer{s.signer},
+		s.signers,
 		sshutils.AuthMethods{Password: pass("abc123")},
 	)
 	c.Assert(err, check.IsNil)
 	go srv.Serve(mux.SSH())
 	defer srv.Close()
 	clt, err := ssh.Dial("tcp", listener.Addr().String(), &ssh.ClientConfig{
-		Auth:            []ssh.AuthMethod{ssh.Password("abc123")},
-		Timeout:         time.Second,
-		HostKeyCallback: ssh.FixedHostKey(s.signer.PublicKey()),
+		Auth:    []ssh.AuthMethod{ssh.Password("abc123")},
+		Timeout: time.Second,
 	})
 	c.Assert(err, check.IsNil)
 	defer clt.Close()

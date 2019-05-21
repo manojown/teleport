@@ -1,5 +1,5 @@
 /*
-Copyright 2017-2019 Gravitational, Inc.
+Copyright 2017 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,7 +23,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
-	"net"
 	"time"
 
 	"github.com/gravitational/teleport"
@@ -70,12 +69,6 @@ type Identity struct {
 	Username string
 	// Groups is a list of groups (Teleport roles) encoded in the identity
 	Groups []string
-	// Usage is a list of usage restrictions encoded in the identity
-	Usage []string
-	// Principals is a list of Unix logins allowed.
-	Principals []string
-	// KubernetesGroups is a list of Kubernetes groups allowed
-	KubernetesGroups []string
 }
 
 // CheckAndSetDefaults checks and sets default values
@@ -95,20 +88,14 @@ func (id *Identity) Subject() pkix.Name {
 		CommonName: id.Username,
 	}
 	subject.Organization = append([]string{}, id.Groups...)
-	subject.OrganizationalUnit = append([]string{}, id.Usage...)
-	subject.Locality = append([]string{}, id.Principals...)
-	subject.Province = append([]string{}, id.KubernetesGroups...)
 	return subject
 }
 
 // FromSubject returns identity from subject name
 func FromSubject(subject pkix.Name) (*Identity, error) {
 	i := &Identity{
-		Username:         subject.CommonName,
-		Groups:           subject.Organization,
-		Usage:            subject.OrganizationalUnit,
-		Principals:       subject.Locality,
-		KubernetesGroups: subject.Province,
+		Username: subject.CommonName,
+		Groups:   subject.Organization,
 	}
 	if err := i.CheckAndSetDefaults(); err != nil {
 		return nil, trace.Wrap(err)
@@ -164,31 +151,19 @@ func (ca *CertAuthority) GenerateCertificate(req CertificateRequest) ([]byte, er
 		"dns_names":   req.DNSNames,
 		"common_name": req.Subject.CommonName,
 		"org":         req.Subject.Organization,
-		"org_unit":    req.Subject.OrganizationalUnit,
-		"locality":    req.Subject.Locality,
-	}).Infof("Generating TLS certificate %v.", req)
+	}).Infof("Generating TLS certificate.")
 
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject:      req.Subject,
-		// NotBefore is one minute in the past to prevent "Not yet valid" errors on
-		// time skewed clusters.
-		NotBefore:   req.Clock.Now().UTC().Add(-1 * time.Minute),
-		NotAfter:    req.NotAfter,
-		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-		// BasicConstraintsValid is true to not allow any intermediate certs.
-		BasicConstraintsValid: true,
-		IsCA: false,
-	}
-
-	// sort out principals into DNS names and IP addresses
-	for i := range req.DNSNames {
-		if ip := net.ParseIP(req.DNSNames[i]); ip != nil {
-			template.IPAddresses = append(template.IPAddresses, ip)
-		} else {
-			template.DNSNames = append(template.DNSNames, req.DNSNames[i])
-		}
+		// substitue one minute to prevent "Not yet valid" errors on time scewed clusters
+		NotBefore:             req.Clock.Now().UTC().Add(-1 * time.Minute),
+		NotAfter:              req.NotAfter,
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true, // no intermediate certs allowed
+		IsCA:     false,
+		DNSNames: req.DNSNames,
 	}
 
 	certBytes, err := x509.CreateCertificate(rand.Reader, template, ca.Cert, req.PublicKey, ca.Signer)

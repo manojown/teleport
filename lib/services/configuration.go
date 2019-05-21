@@ -1,5 +1,5 @@
 /*
-Copyright 2017-2019 Gravitational, Inc.
+Copyright 2017 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,21 +21,14 @@ package services
 // in the backend.
 type ClusterConfiguration interface {
 	// SetClusterName gets services.ClusterName from the backend.
-	GetClusterName(opts ...MarshalOption) (ClusterName, error)
+	GetClusterName() (ClusterName, error)
 	// SetClusterName sets services.ClusterName on the backend.
 	SetClusterName(ClusterName) error
-	// UpsertClusterName upserts cluster name
-	UpsertClusterName(ClusterName) error
-
-	// DeleteClusterName deletes cluster name resource
-	DeleteClusterName() error
 
 	// GetStaticTokens gets services.StaticTokens from the backend.
 	GetStaticTokens() (StaticTokens, error)
 	// SetStaticTokens sets services.StaticTokens on the backend.
 	SetStaticTokens(StaticTokens) error
-	// DeleteStaticTokens deletes static tokens resource
-	DeleteStaticTokens() error
 
 	// GetAuthPreference gets services.AuthPreference from the backend.
 	GetAuthPreference() (AuthPreference, error)
@@ -43,9 +36,7 @@ type ClusterConfiguration interface {
 	SetAuthPreference(AuthPreference) error
 
 	// GetClusterConfig gets services.ClusterConfig from the backend.
-	GetClusterConfig(opts ...MarshalOption) (ClusterConfig, error)
+	GetClusterConfig() (ClusterConfig, error)
 	// SetClusterConfig sets services.ClusterConfig on the backend.
 	SetClusterConfig(ClusterConfig) error
-	// DeleteClusterConfig deletes cluster config resource
-	DeleteClusterConfig() error
 }

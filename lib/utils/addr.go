@@ -38,29 +38,6 @@ type NetAddr struct {
 	Path string `json:"path,omitempty"`
 }
 
-// Host returns host part of address without port
-func (a *NetAddr) Host() string {
-	host, _, err := net.SplitHostPort(a.Addr)
-	if err != nil {
-		return a.Addr
-	}
-	return host
-}
-
-// Port returns defaultPort if no port is set or is invalid,
-// the real port otherwise
-func (a *NetAddr) Port(defaultPort int) int {
-	_, port, err := net.SplitHostPort(a.Addr)
-	if err != nil {
-		return defaultPort
-	}
-	porti, err := strconv.Atoi(port)
-	if err != nil {
-		return defaultPort
-	}
-	return porti
-}
-
 // Equals returns true if address is equal to other
 func (a *NetAddr) Equals(other NetAddr) bool {
 	return a.Addr == other.Addr && a.AddrNetwork == other.AddrNetwork && a.Path == other.Path
@@ -126,7 +103,7 @@ func (a *NetAddr) UnmarshalYAML(unmarshal func(interface{}) error) error {
 func (a *NetAddr) Set(s string) error {
 	v, err := ParseAddr(s)
 	if err != nil {
-		return trace.Wrap(err)
+		return err
 	}
 	a.Addr = v.Addr
 	a.AddrNetwork = v.AddrNetwork
@@ -136,15 +113,16 @@ func (a *NetAddr) Set(s string) error {
 // ParseAddr takes strings like "tcp://host:port/path" and returns
 // *NetAddr or an error
 func ParseAddr(a string) (*NetAddr, error) {
-	if a == "" {
-		return nil, trace.BadParameter("missing parameter address")
-	}
 	if !strings.Contains(a, "://") {
-		return &NetAddr{Addr: a, AddrNetwork: "tcp"}, nil
+		host, port, err := net.SplitHostPort(a)
+		if err != nil {
+			return nil, trace.BadParameter("invalid network address: '%v', expecting host:port", a)
+		}
+		return &NetAddr{Addr: fmt.Sprintf("%v:%v", host, port), AddrNetwork: "tcp"}, nil
 	}
 	u, err := url.Parse(a)
 	if err != nil {
-		return nil, trace.BadParameter("failed to parse %q: %v", a, err)
+		return nil, fmt.Errorf("failed to parse '%v':%v", a, err)
 	}
 	switch u.Scheme {
 	case "tcp":
@@ -172,40 +150,22 @@ func FromAddr(a net.Addr) NetAddr {
 	return NetAddr{AddrNetwork: a.Network(), Addr: a.String()}
 }
 
-// JoinAddrSlices joins two addr slices and returns a resulting slice
-func JoinAddrSlices(a []NetAddr, b []NetAddr) []NetAddr {
-	if len(a)+len(b) == 0 {
-		return nil
-	}
-	out := make([]NetAddr, 0, len(a)+len(b))
-	out = append(out, a...)
-	out = append(out, b...)
-	return out
-}
-
 // ParseHostPortAddr takes strings like "host:port" and returns
 // *NetAddr or an error
 //
 // If defaultPort == -1 it expects 'hostport' string to have it
 func ParseHostPortAddr(hostport string, defaultPort int) (*NetAddr, error) {
-	addr, err := ParseAddr(hostport)
+	host, port, err := net.SplitHostPort(hostport)
 	if err != nil {
-		return nil, trace.Wrap(err)
+		if defaultPort > 0 {
+			host, port, err = net.SplitHostPort(
+				net.JoinHostPort(hostport, strconv.Itoa(defaultPort)))
+		}
+		if err != nil {
+			return nil, trace.Errorf("failed to parse '%v': %v", hostport, err)
+		}
 	}
-	// port is required but not set
-	if defaultPort == -1 && addr.Addr == addr.Host() {
-		return nil, trace.BadParameter("missing port in address %q", hostport)
-	}
-	addr.Addr = fmt.Sprintf("%v:%v", addr.Host(), addr.Port(defaultPort))
-	return addr, nil
-}
-
-// DialAddrFromListenAddr returns dial address from listen address
-func DialAddrFromListenAddr(listenAddr NetAddr) NetAddr {
-	if listenAddr.IsEmpty() {
-		return listenAddr
-	}
-	return NetAddr{Addr: ReplaceLocalhost(listenAddr.Addr, "127.0.0.1")}
+	return ParseAddr(fmt.Sprintf("tcp://%s", net.JoinHostPort(host, port)))
 }
 
 func NewNetAddrVal(defaultVal NetAddr, val *NetAddr) *NetAddrVal {
@@ -361,22 +321,19 @@ func guessHostIP(addrs []net.Addr) (ip net.IP) {
 		}
 		ips = append(ips, ipAddr)
 	}
-
 	for i := range ips {
-		first := &net.IPNet{IP: net.IPv4(10, 0, 0, 0), Mask: net.CIDRMask(8, 32)}
-		second := &net.IPNet{IP: net.IPv4(192, 168, 0, 0), Mask: net.CIDRMask(16, 32)}
-		third := &net.IPNet{IP: net.IPv4(172, 16, 0, 0), Mask: net.CIDRMask(12, 32)}
-
-		// our first pick would be "10.0.0.0/8"
-		if first.Contains(ips[i]) {
+		switch ips[i][12] {
+		// our first pick would be "10.x.x.x" IPs:
+		case 10:
+			return ips[i]
+			// our 2nd pick would be "192.x.x.x"
+		case 192:
 			ip = ips[i]
-			break
-			// our 2nd pick would be "192.168.0.0/16"
-		} else if second.Contains(ips[i]) {
-			ip = ips[i]
-			// our 3rd pick would be "172.16.0.0/12"
-		} else if third.Contains(ips[i]) && !second.Contains(ip) {
-			ip = ips[i]
+			// our 3rd pick would be "172.x.x.x"
+		case 172:
+			if ip == nil {
+				ip = ips[i]
+			}
 		}
 	}
 	if ip == nil {

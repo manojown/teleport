@@ -12,6 +12,7 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
 */
 
 package reversetunnel
@@ -34,37 +35,14 @@ import (
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/sshca"
 	"github.com/gravitational/teleport/lib/sshutils"
+	"github.com/gravitational/teleport/lib/state"
 	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
-	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
 )
-
-var (
-	remoteClustersStats = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "remote_clusters",
-			Help: "Number inbound connections from remote clusters and clusters stats",
-		},
-		[]string{"cluster"},
-	)
-	trustedClustersStats = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "trusted_clusters",
-			Help: "Number of tunnels per state",
-		},
-		[]string{"cluster", "state"},
-	)
-)
-
-func init() {
-	// Metrics have to be registered to be exposed:
-	prometheus.MustRegister(remoteClustersStats)
-	prometheus.MustRegister(trustedClustersStats)
-}
 
 // server is a "reverse tunnel server". it exposes the cluster capabilities
 // (like access to a cluster's auth) to remote trusted clients
@@ -79,6 +57,9 @@ type server struct {
 	// localAccessPoint provides access to a cached subset of the Auth
 	// Server API.
 	localAccessPoint auth.AccessPoint
+
+	hostCertChecker ssh.CertChecker
+	userCertChecker ssh.CertChecker
 
 	// srv is the "base class" i.e. the underlying SSH server
 	srv     *sshutils.Server
@@ -96,7 +77,7 @@ type server struct {
 	clusterPeers map[string]*clusterPeers
 
 	// newAccessPoint returns new caching access point
-	newAccessPoint auth.NewCachingAccessPoint
+	newAccessPoint state.NewCachingAccessPoint
 
 	// cancel function will cancel the
 	cancel context.CancelFunc
@@ -139,7 +120,7 @@ type Config struct {
 	LocalAccessPoint auth.AccessPoint
 	// NewCachingAccessPoint returns new caching access points
 	// per remote cluster
-	NewCachingAccessPoint auth.NewCachingAccessPoint
+	NewCachingAccessPoint state.NewCachingAccessPoint
 	// DirectClusters is a list of clusters accessed directly
 	DirectClusters []DirectCluster
 	// Context is a signalling context
@@ -163,15 +144,6 @@ type Config struct {
 	// MACAlgorithms is a list of message authentication codes (MAC) that
 	// the server supports. If omitted the defaults will be used.
 	MACAlgorithms []string
-
-	// DataDir is a local server data directory
-	DataDir string
-	// PollingPeriod specifies polling period for internal sync
-	// goroutines, used to speed up sync-ups in tests.
-	PollingPeriod time.Duration
-
-	// Component is a component used in logs
-	Component string
 }
 
 // CheckAndSetDefaults checks parameters and sets default values
@@ -188,14 +160,8 @@ func (cfg *Config) CheckAndSetDefaults() error {
 	if cfg.Listener == nil {
 		return trace.BadParameter("missing parameter Listener")
 	}
-	if cfg.DataDir == "" {
-		return trace.BadParameter("missing parameter DataDir")
-	}
 	if cfg.Context == nil {
 		cfg.Context = context.TODO()
-	}
-	if cfg.PollingPeriod == 0 {
-		cfg.PollingPeriod = defaults.HighResPollingPeriod
 	}
 	if cfg.Limiter == nil {
 		var err error
@@ -206,9 +172,6 @@ func (cfg *Config) CheckAndSetDefaults() error {
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = clockwork.NewRealClock()
-	}
-	if cfg.Component == "" {
-		cfg.Component = teleport.Component(teleport.ComponentProxy, teleport.ComponentServer)
 	}
 	return nil
 }
@@ -232,7 +195,7 @@ func NewServer(cfg Config) (Server, error) {
 		cancel:           cancel,
 		clusterPeers:     make(map[string]*clusterPeers),
 		Entry: log.WithFields(log.Fields{
-			trace.Component: cfg.Component,
+			trace.Component: teleport.ComponentReverseTunnelServer,
 		}),
 	}
 
@@ -256,13 +219,12 @@ func NewServer(cfg Config) (Server, error) {
 			PublicKey: srv.keyAuth,
 		},
 		sshutils.SetLimiter(cfg.Limiter),
-		sshutils.SetCiphers(cfg.Ciphers),
-		sshutils.SetKEXAlgorithms(cfg.KEXAlgorithms),
-		sshutils.SetMACAlgorithms(cfg.MACAlgorithms),
 	)
 	if err != nil {
 		return nil, err
 	}
+	srv.hostCertChecker = ssh.CertChecker{IsAuthority: srv.isHostAuthority}
+	srv.userCertChecker = ssh.CertChecker{IsAuthority: srv.isUserAuthority}
 	srv.srv = s
 	go srv.periodicFunctions()
 	return srv, nil
@@ -322,10 +284,6 @@ func (s *server) periodicFunctions() {
 			if err != nil {
 				s.Warningf("Failed to disconnect clusters: %v.", err)
 			}
-			err = s.reportClusterStats()
-			if err != nil {
-				s.Warningf("Failed to report cluster stats: %v.", err)
-			}
 		}
 	}
 }
@@ -354,23 +312,6 @@ func (s *server) fetchClusterPeers() error {
 	s.removeClusterPeers(connsToRemove)
 	s.updateClusterPeers(connsToUpdate)
 	return s.addClusterPeers(connsToAdd)
-}
-
-func (s *server) reportClusterStats() error {
-	defer func() {
-		if r := recover(); r != nil {
-			s.Warningf("Recovered from panic: %v.", r)
-		}
-	}()
-	clusters := s.GetSites()
-	for _, cluster := range clusters {
-		gauge, err := remoteClustersStats.GetMetricWithLabelValues(cluster.GetName())
-		if err != nil {
-			return trace.Wrap(err)
-		}
-		gauge.Set(float64(cluster.GetTunnelsCount()))
-	}
-	return nil
 }
 
 func (s *server) addClusterPeers(conns map[string]services.TunnelConnection) error {
@@ -485,7 +426,7 @@ func (s *server) Shutdown(ctx context.Context) error {
 }
 
 func (s *server) HandleNewChan(conn net.Conn, sconn *ssh.ServerConn, nch ssh.NewChannel) {
-	// Apply read/write timeouts to the server connection.
+	// apply read/write timeouts to the server connection
 	conn = utils.ObeyIdleTimeout(conn,
 		defaults.ReverseTunnelAgentHeartbeatPeriod*10,
 		"reverse tunnel server")
@@ -503,7 +444,7 @@ func (s *server) HandleNewChan(conn net.Conn, sconn *ssh.ServerConn, nch ssh.New
 		nch.Reject(ssh.ConnectionFailed, msg)
 		return
 	}
-	s.Debugf("New tunnel from %v.", sconn.RemoteAddr())
+	s.Debugf("new tunnel from %s", sconn.RemoteAddr())
 	if sconn.Permissions.Extensions[extCertType] != extCertTypeHost {
 		s.Error(trace.BadParameter("can't retrieve certificate type in certType"))
 		return
@@ -527,7 +468,7 @@ func (s *server) HandleNewChan(conn net.Conn, sconn *ssh.ServerConn, nch ssh.New
 
 // isHostAuthority is called during checking the client key, to see if the signing
 // key is the real host CA authority key.
-func (s *server) isHostAuthority(auth ssh.PublicKey, address string) bool {
+func (s *server) isHostAuthority(auth ssh.PublicKey) bool {
 	keys, err := s.getTrustedCAKeys(services.HostCA)
 	if err != nil {
 		s.Errorf("failed to retrieve trusted keys, err: %v", err)
@@ -557,16 +498,8 @@ func (s *server) isUserAuthority(auth ssh.PublicKey) bool {
 	return false
 }
 
-func (s *server) getTrustedCAKeysByID(id services.CertAuthID) ([]ssh.PublicKey, error) {
-	ca, err := s.localAccessPoint.GetCertAuthority(id, false, services.SkipValidation())
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return ca.Checkers()
-}
-
-func (s *server) getTrustedCAKeys(certType services.CertAuthType) ([]ssh.PublicKey, error) {
-	cas, err := s.localAccessPoint.GetCertAuthorities(certType, false, services.SkipValidation())
+func (s *server) getTrustedCAKeys(CertType services.CertAuthType) ([]ssh.PublicKey, error) {
+	cas, err := s.localAccessPoint.GetCertAuthorities(CertType, false)
 	if err != nil {
 		return nil, err
 	}
@@ -579,6 +512,28 @@ func (s *server) getTrustedCAKeys(certType services.CertAuthType) ([]ssh.PublicK
 		out = append(out, checkers...)
 	}
 	return out, nil
+}
+
+func (s *server) checkTrustedKey(CertType services.CertAuthType, domainName string, key ssh.PublicKey) error {
+	cas, err := s.localAccessPoint.GetCertAuthorities(CertType, false)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	for _, ca := range cas {
+		if ca.GetClusterName() != domainName {
+			continue
+		}
+		checkers, err := ca.Checkers()
+		if err != nil {
+			return trace.Wrap(err)
+		}
+		for _, checker := range checkers {
+			if sshutils.KeysEqual(key, checker) {
+				return nil
+			}
+		}
+	}
+	return trace.NotFound("authority domain %v not found or has no mathching keys", domainName)
 }
 
 func (s *server) keyAuth(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
@@ -601,9 +556,21 @@ func (s *server) keyAuth(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permiss
 			logger.Warningf("Failed to authenticate host, err: %v.", err)
 			return nil, err
 		}
-		err := s.checkHostCert(logger, conn.User(), authDomain, cert)
+		err := s.hostCertChecker.CheckHostKey(conn.User(), conn.RemoteAddr(), key)
 		if err != nil {
 			logger.Warningf("Failed to authenticate host, err: %v.", err)
+			return nil, trace.Wrap(err)
+		}
+		if err := s.hostCertChecker.CheckCert(conn.User(), cert); err != nil {
+			logger.Warningf("Failed to authenticate host err: %v.", err)
+			return nil, trace.Wrap(err)
+		}
+		// this fixes possible injection attack
+		// when we have 2 trusted remote sites, and one can simply
+		// pose as another. so we have to check that authority
+		// matches by some other way (in absence of x509 chains)
+		if err := s.checkTrustedKey(services.HostCA, authDomain, cert.SignatureKey); err != nil {
+			logger.Warningf("This client claims to be signed as cluster %q, but no matching signing keys found", authDomain)
 			return nil, trace.Wrap(err)
 		}
 		return &ssh.Permissions{
@@ -614,15 +581,15 @@ func (s *server) keyAuth(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permiss
 			},
 		}, nil
 	case ssh.UserCert:
-		certChecker := utils.CertChecker{
-			CertChecker: ssh.CertChecker{
-				IsUserAuthority: s.isUserAuthority,
-			},
-		}
-		_, err := certChecker.Authenticate(conn, key)
+		_, err := s.userCertChecker.Authenticate(conn, key)
 		if err != nil {
 			logger.Warningf("Failed to authenticate user, err: %v.", err)
 			return nil, err
+		}
+
+		if err := s.userCertChecker.CheckCert(conn.User(), cert); err != nil {
+			logger.Warningf("Failed to authenticate user err: %v.", err)
+			return nil, trace.Wrap(err)
 		}
 
 		return &ssh.Permissions{
@@ -634,43 +601,6 @@ func (s *server) keyAuth(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permiss
 	default:
 		return nil, trace.BadParameter("unsupported cert type: %v", cert.CertType)
 	}
-}
-
-// checkHostCert verifies that host certificate is signed
-// by the recognized certificate authority
-func (s *server) checkHostCert(logger *log.Entry, user string, clusterName string, cert *ssh.Certificate) error {
-	if cert.CertType != ssh.HostCert {
-		return trace.BadParameter("expected host cert, got wrong cert type: %d", cert.CertType)
-	}
-
-	// fetch keys of the certificate authority to check
-	// if there is a match
-	keys, err := s.getTrustedCAKeysByID(services.CertAuthID{
-		Type:       services.HostCA,
-		DomainName: clusterName,
-	})
-	if err != nil {
-		return trace.Wrap(err)
-	}
-
-	// match key of the certificate authority with the signature key
-	var match bool
-	for _, k := range keys {
-		if sshutils.KeysEqual(k, cert.SignatureKey) {
-			match = true
-			break
-		}
-	}
-	if !match {
-		return trace.NotFound("cluster %v has no matching CA keys", clusterName)
-	}
-
-	checker := utils.CertChecker{}
-	if err := checker.CheckCert(user, cert); err != nil {
-		return trace.BadParameter(err.Error())
-	}
-
-	return nil
 }
 
 func (s *server) upsertSite(conn net.Conn, sshConn *ssh.ServerConn) (*remoteSite, *remoteConn, error) {
@@ -791,14 +721,14 @@ func (s *server) RemoveSite(domainName string) error {
 }
 
 type remoteConn struct {
-	sshConn       ssh.Conn
-	conn          net.Conn
-	invalid       int32
-	log           *log.Entry
-	discoveryC    ssh.Channel
-	discoveryErr  error
-	closed        int32
-	lastHeartbeat int64
+	sshConn      ssh.Conn
+	conn         net.Conn
+	invalid      int32
+	log          *log.Entry
+	counter      int32
+	discoveryC   ssh.Channel
+	discoveryErr error
+	closed       int32
 }
 
 func (rc *remoteConn) openDiscoveryChannel() (ssh.Channel, error) {
@@ -841,16 +771,6 @@ func (rc *remoteConn) isInvalid() bool {
 	return atomic.LoadInt32(&rc.invalid) == 1
 }
 
-func (rc *remoteConn) setLastHeartbeat(tm time.Time) {
-	atomic.StoreInt64(&rc.lastHeartbeat, tm.UnixNano())
-}
-
-// isReady returns true when connection is ready to be tried,
-// it returns true when connection has received the first heartbeat
-func (rc *remoteConn) isReady() bool {
-	return atomic.LoadInt64(&rc.lastHeartbeat) != 0
-}
-
 // newRemoteSite helper creates and initializes 'remoteSite' instance
 func newRemoteSite(srv *server, domainName string) (*remoteSite, error) {
 	connInfo, err := services.NewTunnelConnection(
@@ -891,7 +811,7 @@ func newRemoteSite(srv *server, domainName string) (*remoteSite, error) {
 	remoteSite.localClient = srv.localAuthClient
 	remoteSite.localAccessPoint = srv.localAccessPoint
 
-	clt, _, err := remoteSite.getRemoteClient()
+	clt, isLegacyRemoteCluster, err := remoteSite.getRemoteClient()
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -916,7 +836,11 @@ func newRemoteSite(srv *server, domainName string) (*remoteSite, error) {
 	remoteSite.certificateCache = certificateCache
 
 	go remoteSite.periodicSendDiscoveryRequests()
-	go remoteSite.periodicUpdateCertAuthorities()
+
+	// if remote cluster is legacy, attempt periodic certificate exchanges
+	if isLegacyRemoteCluster {
+		go remoteSite.periodicAttemptCertExchange()
+	}
 
 	return remoteSite, nil
 }

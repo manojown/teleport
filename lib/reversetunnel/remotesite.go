@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth"
@@ -36,9 +37,9 @@ import (
 	"github.com/gravitational/teleport/lib/utils"
 	"github.com/gravitational/trace"
 
-	oxyforward "github.com/gravitational/oxy/forward"
 	"github.com/gravitational/roundtrip"
 	"github.com/jonboulle/clockwork"
+	oxyforward "github.com/mailgun/oxy/forward"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -52,14 +53,13 @@ type remoteSite struct {
 	domainName  string
 	connections []*remoteConn
 	lastUsed    int
+	lastActive  time.Time
 	srv         *server
 	transport   *http.Transport
 	connInfo    services.TunnelConnection
-	// lastConnInfo is the last conn
-	lastConnInfo services.TunnelConnection
-	ctx          context.Context
-	cancel       context.CancelFunc
-	clock        clockwork.Clock
+	ctx         context.Context
+	cancel      context.CancelFunc
+	clock       clockwork.Clock
 
 	// certificateCache caches host certificates for the forwarding server.
 	certificateCache *certificateCache
@@ -76,12 +76,6 @@ type remoteSite struct {
 	// remoteAccessPoint provides access to a cached subset of the Auth Server API of
 	// the remote cluster this site belongs to.
 	remoteAccessPoint auth.AccessPoint
-
-	// remoteCA is the last remote certificate authority recorded by the client.
-	// It is used to detect CA rotation status changes. If the rotation
-	// state has been changed, the tunnel will reconnect to re-create the client
-	// with new settings.
-	remoteCA services.CertAuthority
 }
 
 func (s *remoteSite) getRemoteClient() (auth.ClientI, bool, error) {
@@ -100,10 +94,6 @@ func (s *remoteSite) getRemoteClient() (auth.ClientI, bool, error) {
 		}
 		tlsConfig := s.srv.ClientTLS.Clone()
 		tlsConfig.RootCAs = pool
-		// encode the name of this cluster to identify this cluster,
-		// connecting to the remote one (it is used to find the right certificate
-		// authority to verify)
-		tlsConfig.ServerName = auth.EncodeClusterName(s.srv.ClusterName)
 		clt, err := auth.NewTLSClientWithDialer(s.authServerContextDialer, tlsConfig)
 		if err != nil {
 			return nil, false, trace.Wrap(err)
@@ -122,11 +112,6 @@ func (s *remoteSite) getRemoteClient() (auth.ClientI, bool, error) {
 
 func (s *remoteSite) authServerContextDialer(ctx context.Context, network, address string) (net.Conn, error) {
 	return s.DialAuthServer()
-}
-
-// GetTunnelsCount always returns 0 for local cluster
-func (s *remoteSite) GetTunnelsCount() int {
-	return s.connectionCount()
 }
 
 func (s *remoteSite) CachingAccessPoint() (auth.AccessPoint, error) {
@@ -172,57 +157,23 @@ func (s *remoteSite) Close() error {
 	return nil
 }
 
-// nextConn returns next connection that is ready
-// and has not been marked as invalid
-// it will close connections marked as invalid
 func (s *remoteSite) nextConn() (*remoteConn, error) {
 	s.Lock()
 	defer s.Unlock()
 
-	s.removeInvalidConns()
-
-	for i := 0; i < len(s.connections); i++ {
+	for {
+		if len(s.connections) == 0 {
+			return nil, trace.NotFound("no active tunnels to cluster %v", s.GetName())
+		}
 		s.lastUsed = (s.lastUsed + 1) % len(s.connections)
 		remoteConn := s.connections[s.lastUsed]
-		// connection could have been initated, but agent
-		// on the other side is not ready yet.
-		// Proxy assumes that connection is ready to serve when
-		// it has received a first heartbeat, otherwise
-		// it could attempt to use it before the agent
-		// had a chance to start handling connection requests,
-		// what could lead to proxy marking the connection
-		// as invalid without a good reason.
-		if remoteConn.isReady() {
+		if !remoteConn.isInvalid() {
 			return remoteConn, nil
 		}
+		s.connections = append(s.connections[:s.lastUsed], s.connections[s.lastUsed+1:]...)
+		s.lastUsed = 0
+		go remoteConn.Close()
 	}
-
-	return nil, trace.NotFound("%v is offline: no active tunnels to %v found", s.GetName(), s.srv.ClusterName)
-}
-
-// removeInvalidConns removes connections marked as invalid,
-// it should be called only under write lock
-func (s *remoteSite) removeInvalidConns() {
-	// for first pass, do nothing if no connections are marked
-	count := 0
-	for _, conn := range s.connections {
-		if conn.isInvalid() {
-			count++
-		}
-	}
-	if count == 0 {
-		return
-	}
-	s.lastUsed = 0
-	conns := make([]*remoteConn, 0, len(s.connections)-count)
-	for i := range s.connections {
-		if !s.connections[i].isInvalid() {
-			conns = append(conns, s.connections[i])
-		} else {
-			go s.connections[i].Close()
-		}
-	}
-	s.connections = conns
 }
 
 // addConn helper adds a new active remote cluster connection to the list
@@ -242,8 +193,17 @@ func (s *remoteSite) addConn(conn net.Conn, sshConn ssh.Conn) (*remoteConn, erro
 	return rc, nil
 }
 
+func (s *remoteSite) getLatestTunnelConnection() (services.TunnelConnection, error) {
+	conns, err := s.localAccessPoint.GetTunnelConnections(s.domainName)
+	if err != nil {
+		s.Warningf("failed to fetch tunnel statuses: %v", err)
+		return nil, trace.Wrap(err)
+	}
+	return services.LatestTunnelConnection(conns)
+}
+
 func (s *remoteSite) GetStatus() string {
-	connInfo, err := s.getLastConnInfo()
+	connInfo, err := s.getLatestTunnelConnection()
 	if err != nil {
 		return teleport.RemoteClusterStatusOffline
 	}
@@ -256,29 +216,13 @@ func (s *remoteSite) copyConnInfo() services.TunnelConnection {
 	return s.connInfo.Clone()
 }
 
-func (s *remoteSite) setLastConnInfo(connInfo services.TunnelConnection) {
-	s.Lock()
-	defer s.Unlock()
-	s.lastConnInfo = connInfo.Clone()
-}
-
-func (s *remoteSite) getLastConnInfo() (services.TunnelConnection, error) {
-	s.RLock()
-	defer s.RUnlock()
-	if s.lastConnInfo == nil {
-		return nil, trace.NotFound("no last connection found")
-	}
-	return s.lastConnInfo.Clone(), nil
-}
-
 func (s *remoteSite) registerHeartbeat(t time.Time) {
 	connInfo := s.copyConnInfo()
 	connInfo.SetLastHeartbeat(t)
 	connInfo.SetExpiry(s.clock.Now().Add(defaults.ReverseTunnelOfflineThreshold))
-	s.setLastConnInfo(connInfo)
 	err := s.localAccessPoint.UpsertTunnelConnection(connInfo)
 	if err != nil {
-		s.Warningf("Failed to register heartbeat: %v.", err)
+		s.Warningf("failed to register heartbeat: %v", err)
 	}
 }
 
@@ -293,7 +237,7 @@ func (s *remoteSite) deleteConnectionRecord() {
 // the connection as invalid.
 func (s *remoteSite) handleHeartbeat(conn *remoteConn, ch ssh.Channel, reqC <-chan *ssh.Request) {
 	defer func() {
-		s.Infof("Cluster connection closed.")
+		s.Infof("cluster connection closed")
 		conn.Close()
 	}()
 	for {
@@ -303,10 +247,10 @@ func (s *remoteSite) handleHeartbeat(conn *remoteConn, ch ssh.Channel, reqC <-ch
 			return
 		case req := <-reqC:
 			if req == nil {
-				s.Infof("Cluster agent disconnected.")
+				s.Infof("cluster agent disconnected")
 				conn.markInvalid(trace.ConnectionProblem(nil, "agent disconnected"))
 				if !s.hasValidConnections() {
-					s.Debugf("Deleting connection record.")
+					s.Debugf("deleting connection record")
 					s.deleteConnectionRecord()
 				}
 				return
@@ -321,11 +265,9 @@ func (s *remoteSite) handleHeartbeat(conn *remoteConn, ch ssh.Channel, reqC <-ch
 			if roundtrip != 0 {
 				s.WithFields(log.Fields{"latency": roundtrip}).Debugf("ping <- %v", conn.conn.RemoteAddr())
 			} else {
-				s.Debugf("Ping <- %v.", conn.conn.RemoteAddr())
+				s.Debugf("ping <- %v", conn.conn.RemoteAddr())
 			}
-			tm := time.Now().UTC()
-			conn.setLastHeartbeat(tm)
-			go s.registerHeartbeat(tm)
+			go s.registerHeartbeat(time.Now())
 		// since we block on select, time.After is re-created everytime we process a request.
 		case <-time.After(defaults.ReverseTunnelOfflineThreshold):
 			conn.markInvalid(trace.ConnectionProblem(nil, "no heartbeats for %v", defaults.ReverseTunnelOfflineThreshold))
@@ -338,36 +280,18 @@ func (s *remoteSite) GetName() string {
 }
 
 func (s *remoteSite) GetLastConnected() time.Time {
-	connInfo, err := s.getLastConnInfo()
+	connInfo, err := s.getLatestTunnelConnection()
 	if err != nil {
 		return time.Time{}
 	}
 	return connInfo.GetLastHeartbeat()
 }
 
-func (s *remoteSite) compareAndSwapCertAuthority(ca services.CertAuthority) error {
-	s.Lock()
-	defer s.Unlock()
-
-	if s.remoteCA == nil {
-		s.remoteCA = ca
-		return nil
-	}
-
-	rotation := s.remoteCA.GetRotation()
-	if rotation.Matches(ca.GetRotation()) {
-		s.remoteCA = ca
-		return nil
-	}
-	s.remoteCA = ca
-	return trace.CompareFailed("remote certificate authority rotation has been updated")
-}
-
 func (s *remoteSite) periodicSendDiscoveryRequests() {
 	ticker := time.NewTicker(defaults.ReverseTunnelAgentHeartbeatPeriod)
 	defer ticker.Stop()
 	if err := s.sendDiscoveryRequest(); err != nil {
-		s.Warningf("Failed to send discovery: %v.", err)
+		s.Warningf("failed to send discovery: %v", err)
 	}
 	for {
 		select {
@@ -383,84 +307,68 @@ func (s *remoteSite) periodicSendDiscoveryRequests() {
 	}
 }
 
-// updateCertAuthorities updates local and remote cert authorities
-func (s *remoteSite) updateCertAuthorities() error {
-	// update main cluster cert authorities on the remote side
-	// remote side makes sure that only relevant fields
-	// are updated
-	hostCA, err := s.localClient.GetCertAuthority(services.CertAuthID{
+// DELETE IN: 2.6.0
+// attemptCertExchange tries to exchange TLS certificates with remote
+// clusters that have upgraded to 2.5.0
+func (s *remoteSite) attemptCertExchange() error {
+	// this logic is explicitly using the local non cached
+	// client as it has to have write access to the auth server
+	localCA, err := s.localClient.GetCertAuthority(services.CertAuthID{
 		Type:       services.HostCA,
 		DomainName: s.srv.ClusterName,
 	}, false)
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	err = s.remoteClient.RotateExternalCertAuthority(hostCA)
+	re, err := s.remoteClient.ExchangeCerts(auth.ExchangeCertsRequest{
+		PublicKey: localCA.GetCheckingKeys()[0],
+		TLSCert:   localCA.GetTLSKeyPairs()[0].Cert,
+	})
 	if err != nil {
 		return trace.Wrap(err)
 	}
-
-	userCA, err := s.localClient.GetCertAuthority(services.CertAuthID{
-		Type:       services.UserCA,
-		DomainName: s.srv.ClusterName,
-	}, false)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-	err = s.remoteClient.RotateExternalCertAuthority(userCA)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-
-	// update remote cluster's host cert authoritiy on a local cluster
-	// local proxy is authorized to perform this operation only for
-	// host authorities of remote clusters.
-	remoteCA, err := s.remoteClient.GetCertAuthority(services.CertAuthID{
+	remoteCA, err := s.localClient.GetCertAuthority(services.CertAuthID{
 		Type:       services.HostCA,
 		DomainName: s.domainName,
 	}, false)
 	if err != nil {
 		return trace.Wrap(err)
 	}
-
-	if remoteCA.GetClusterName() != s.domainName {
-		return trace.BadParameter(
-			"remote cluster sent different cluster name %v instead of expected one %v",
-			remoteCA.GetClusterName(), s.domainName)
-	}
-	err = s.localClient.UpsertCertAuthority(remoteCA)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-
-	return s.compareAndSwapCertAuthority(remoteCA)
+	_, err = s.localClient.ExchangeCerts(auth.ExchangeCertsRequest{
+		PublicKey: remoteCA.GetCheckingKeys()[0],
+		TLSCert:   re.TLSCert,
+	})
+	return trace.Wrap(err)
 }
 
-func (s *remoteSite) periodicUpdateCertAuthorities() {
-	s.Debugf("Ticking with period %v", s.srv.PollingPeriod)
-	ticker := time.NewTicker(s.srv.PollingPeriod)
+// DELETE IN: 2.6.0
+// This logic is only relevant for upgrades from 2.5.0 to 2.6.0
+func (s *remoteSite) periodicAttemptCertExchange() {
+	ticker := time.NewTicker(defaults.NetworkBackoffDuration)
 	defer ticker.Stop()
+	if err := s.attemptCertExchange(); err != nil {
+		s.Warningf("Attempt at cert exchange failed: %v.", err)
+	} else {
+		s.Debugf("Certificate exchange has completed, going to force reconnect.")
+		s.srv.RemoveSite(s.domainName)
+		s.Close()
+		return
+	}
+
 	for {
 		select {
 		case <-s.ctx.Done():
 			s.Debugf("Context is closing.")
 			return
 		case <-ticker.C:
-			err := s.updateCertAuthorities()
+			err := s.attemptCertExchange()
 			if err != nil {
-				switch {
-				case trace.IsNotFound(err):
-					s.Debugf("Remote cluster %v does not support cert authorities rotation yet.", s.domainName)
-				case trace.IsCompareFailed(err):
-					s.Infof("Remote cluster has updated certificate authorities, going to force reconnect.")
-					s.srv.RemoveSite(s.domainName)
-					s.Close()
-					return
-				case trace.IsConnectionProblem(err):
-					s.Debugf("Remote cluster %v is offline.", s.domainName)
-				default:
-					s.Warningf("Could not perform cert authorities updated: %v.", trace.DebugReport(err))
-				}
+				s.Warningf("Could not perform certificate exchange: %v.", trace.DebugReport(err))
+			} else {
+				s.Debugf("Certificate exchange has completed, going to force reconnect.")
+				s.srv.RemoveSite(s.domainName)
+				s.Close()
+				return
 			}
 		}
 	}
@@ -474,7 +382,7 @@ func (s *remoteSite) isOnline(conn services.TunnelConnection) bool {
 // connections
 func (s *remoteSite) findDisconnectedProxies() ([]services.Server, error) {
 	connInfo := s.copyConnInfo()
-	conns, err := s.localAccessPoint.GetTunnelConnections(s.domainName, services.SkipValidation())
+	conns, err := s.localAccessPoint.GetTunnelConnections(s.domainName)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -514,14 +422,14 @@ func (s *remoteSite) sendDiscoveryRequest() error {
 	if len(disconnectedProxies) == 0 {
 		return nil
 	}
-	clusterName, err := s.localAccessPoint.GetClusterName()
+	clusterName, err := s.localAccessPoint.GetDomainName()
 	if err != nil {
 		return trace.Wrap(err)
 	}
 	connInfo := s.copyConnInfo()
-	s.Debugf("Proxy %q is going to request discovery for: %q.", connInfo.GetProxyName(), Proxies(disconnectedProxies))
+	s.Debugf("proxy %q is going to request discovery for: %q", connInfo.GetProxyName(), Proxies(disconnectedProxies))
 	req := discoveryRequest{
-		ClusterName: clusterName.GetClusterName(),
+		ClusterName: clusterName,
 		Proxies:     disconnectedProxies,
 	}
 	payload, err := marshalDiscoveryRequest(req)
@@ -598,12 +506,7 @@ func (s *remoteSite) DialAuthServer() (conn net.Conn, err error) {
 // Dial is used to connect a requesting client (say, tsh) to an SSH server
 // located in a remote connected site, the connection goes through the
 // reverse proxy tunnel.
-func (s *remoteSite) Dial(params DialParams) (net.Conn, error) {
-	err := params.CheckAndSetDefaults()
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
+func (s *remoteSite) Dial(from net.Addr, to net.Addr, userAgent agent.Agent) (net.Conn, error) {
 	clusterConfig, err := s.localAccessPoint.GetClusterConfig()
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -612,15 +515,15 @@ func (s *remoteSite) Dial(params DialParams) (net.Conn, error) {
 	// if the proxy is in recording mode use the agent to dial and build a
 	// in-memory forwarding server
 	if clusterConfig.GetSessionRecording() == services.RecordAtProxy {
-		if params.UserAgent == nil {
+		if userAgent == nil {
 			return nil, trace.BadParameter("user agent missing")
 		}
-		return s.dialWithAgent(params)
+		return s.dialWithAgent(from, to, userAgent)
 	}
-	return s.DialTCP(params.From, params.To)
+	return s.dial(from, to)
 }
 
-func (s *remoteSite) DialTCP(from, to net.Addr) (net.Conn, error) {
+func (s *remoteSite) dial(from, to net.Addr) (net.Conn, error) {
 	s.Debugf("Dialing from %v to %v", from, to)
 
 	conn, err := s.connThroughTunnel(chanTransportDialReq, to.String())
@@ -631,22 +534,16 @@ func (s *remoteSite) DialTCP(from, to net.Addr) (net.Conn, error) {
 	return conn, nil
 }
 
-func (s *remoteSite) dialWithAgent(params DialParams) (net.Conn, error) {
-	s.Debugf("Dialing with an agent from %v to %v.", params.From, params.To)
+func (s *remoteSite) dialWithAgent(from, to net.Addr, userAgent agent.Agent) (net.Conn, error) {
+	s.Debugf("Dialing with an agent from %v to %v", from, to)
 
-	addr := params.Address
-	host, _, err := net.SplitHostPort(params.To.String())
+	// get a host certificate for the forwarding node from the cache
+	hostCertificate, err := s.certificateCache.GetHostCertificate(to.String())
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 
-	// Get a host certificate for the forwarding node from the cache.
-	hostCertificate, err := s.certificateCache.GetHostCertificate(addr, []string{host})
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	targetConn, err := s.connThroughTunnel(chanTransportDialReq, params.To.String())
+	targetConn, err := s.connThroughTunnel(chanTransportDialReq, to.String())
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -660,15 +557,14 @@ func (s *remoteSite) dialWithAgent(params DialParams) (net.Conn, error) {
 	// remote cluster.
 	serverConfig := forward.ServerConfig{
 		AuthClient:      s.localClient,
-		UserAgent:       params.UserAgent,
+		UserAgent:       userAgent,
 		TargetConn:      targetConn,
-		SrcAddr:         params.From,
-		DstAddr:         params.To,
+		SrcAddr:         from,
+		DstAddr:         to,
 		HostCertificate: hostCertificate,
 		Ciphers:         s.srv.Config.Ciphers,
 		KEXAlgorithms:   s.srv.Config.KEXAlgorithms,
 		MACAlgorithms:   s.srv.Config.MACAlgorithms,
-		DataDir:         s.srv.Config.DataDir,
 	}
 	remoteServer, err := forward.New(serverConfig)
 	if err != nil {

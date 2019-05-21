@@ -1,5 +1,3 @@
-Have a question? Please use [Our Forum](https://community.gravitational.com)
-
 **What happened**:
 
 **What you expected to happen**:

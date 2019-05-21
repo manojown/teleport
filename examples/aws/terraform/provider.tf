@@ -1,5 +1,5 @@
 terraform {
-  required_version = "~> 0.11.7"
+  required_version = "~> 0.10.8"
 }
 
 provider "random" {
@@ -15,6 +15,6 @@ variable "aws_max_retries" {
 }
 
 provider "aws" {
-  version                 = "~> 1.18.0"
+  version                 = "~> 1.7"
   region     = "${var.region}"
 }

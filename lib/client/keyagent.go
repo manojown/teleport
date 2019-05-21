@@ -17,10 +17,8 @@ limitations under the License.
 package client
 
 import (
-	"bufio"
 	"crypto/x509"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"strings"
@@ -31,7 +29,6 @@ import (
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/sshutils"
-	"github.com/gravitational/teleport/lib/utils"
 	"github.com/gravitational/trace"
 
 	"github.com/sirupsen/logrus"
@@ -51,8 +48,8 @@ type LocalKeyAgent struct {
 	// sshAgent is the system ssh agent
 	sshAgent agent.Agent
 
-	// noHosts is a in-memory map used in tests to track which hosts a user has
-	// manually (via keyboard input) refused connecting to.
+	// map of "no hosts". these are hosts that user manually (via keyboard
+	// input) refused connecting to.
 	noHosts map[string]bool
 
 	// function which asks a user to trust host/key combination (during host auth)
@@ -111,11 +108,6 @@ func NewLocalAgent(keyDir string, proxyHost string, username string) (a *LocalKe
 	}
 
 	return a, nil
-}
-
-// UpdateProxyHost changes the proxy host that the local agent operates on.
-func (a *LocalKeyAgent) UpdateProxyHost(proxyHost string) {
-	a.proxyHost = proxyHost
 }
 
 // LoadKey adds a key into the Teleport ssh agent as well as the system ssh
@@ -251,118 +243,83 @@ func (a *LocalKeyAgent) GetCerts() (*x509.CertPool, error) {
 	return a.keyStore.GetCerts(a.proxyHost)
 }
 
-func (a *LocalKeyAgent) GetCertsPEM() ([]byte, error) {
-	return a.keyStore.GetCertsPEM(a.proxyHost)
-}
-
 // UserRefusedHosts returns 'true' if a user refuses connecting to remote hosts
 // when prompted during host authorization
 func (a *LocalKeyAgent) UserRefusedHosts() bool {
 	return len(a.noHosts) > 0
 }
 
-// CheckHostSignature checks if the given host key was signed by a Teleport
-// certificate authority (CA) or a host certificate the user has seen before.
-func (a *LocalKeyAgent) CheckHostSignature(addr string, remote net.Addr, key ssh.PublicKey) error {
-	certChecker := utils.CertChecker{
-		CertChecker: ssh.CertChecker{
-			IsHostAuthority: a.checkHostCertificate,
-			HostKeyFallback: a.checkHostKey,
-		},
-	}
-	err := certChecker.CheckHostKey(addr, remote, key)
-	if err != nil {
-		a.log.Debugf("Host validation failed: %v.", err)
-		return trace.Wrap(err)
-	}
-	a.log.Debugf("Validated host %v.", addr)
-	return nil
-}
+// CheckHostSignature checks if the given host key was signed by one of the trusted
+// certificaate authorities (CAs)
+func (a *LocalKeyAgent) CheckHostSignature(host string, remote net.Addr, key ssh.PublicKey) error {
+	hostPromptFunc := func(host string, key ssh.PublicKey) error {
+		userAnswer := "no"
+		if !a.noHosts[host] {
+			fmt.Printf("The authenticity of host '%s' can't be established. "+
+				"Its public key is:\n%s\nAre you sure you want to continue (yes/no)? ",
+				host, ssh.MarshalAuthorizedKey(key))
 
-// checkHostCertificate validates a host certificate. First checks the
-// ~/.tsh/known_hosts cache and if not found, prompts the user to accept
-// or reject.
-func (a *LocalKeyAgent) checkHostCertificate(key ssh.PublicKey, addr string) bool {
-	// Check the local cache (where all Teleport CAs are placed upon login) to
-	// see if any of them match.
-	keys, err := a.keyStore.GetKnownHostKeys("")
-	if err != nil {
-		a.log.Errorf("Unable to fetch certificate authorities: %v.", err)
-		return false
-	}
-	for i := range keys {
-		if sshutils.KeysEqual(key, keys[i]) {
-			return true
+			bytes := make([]byte, 12)
+			os.Stdin.Read(bytes)
+			userAnswer = strings.TrimSpace(strings.ToLower(string(bytes)))
 		}
-	}
-
-	// If this certificate was not seen before, prompt the user essentially
-	// treating it like a key.
-	err = a.checkHostKey(addr, nil, key)
-	if err != nil {
-		return false
-	}
-	return true
-}
-
-// checkHostKey validates a host key. First checks the
-// ~/.tsh/known_hosts cache and if not found, prompts the user to accept
-// or reject.
-func (a *LocalKeyAgent) checkHostKey(addr string, remote net.Addr, key ssh.PublicKey) error {
-	var err error
-
-	// Check if this exact host is in the local cache.
-	keys, _ := a.keyStore.GetKnownHostKeys(addr)
-	if len(keys) > 0 && sshutils.KeysEqual(key, keys[0]) {
-		a.log.Debugf("Verified host %s.", addr)
+		if !strings.HasPrefix(userAnswer, "y") {
+			return trace.AccessDenied("untrusted host %v", host)
+		}
+		// success
 		return nil
 	}
-
-	// If this key was not seen before, prompt the user with a fingerprint.
+	// overwritten host prompt func? (probably for tests)
 	if a.hostPromptFunc != nil {
-		err = a.hostPromptFunc(addr, key)
-	} else {
-		err = a.defaultHostPromptFunc(addr, key, os.Stdout, os.Stdin)
+		hostPromptFunc = a.hostPromptFunc
 	}
-	if err != nil {
-		a.noHosts[addr] = true
-		return trace.Wrap(err)
-	}
-
-	// If the user trusts the key, store the key in the local known hosts
-	// cache ~/.tsh/known_hosts.
-	err = a.keyStore.AddKnownHostKeys(addr, []ssh.PublicKey{key})
-	if err != nil {
-		a.log.Warnf("Failed to save the host key: %v.", err)
-		return trace.Wrap(err)
-	}
-	return nil
-}
-
-// defaultHostPromptFunc is the default host key/certificates prompt.
-func (a *LocalKeyAgent) defaultHostPromptFunc(host string, key ssh.PublicKey, writer io.Writer, reader io.Reader) error {
-	var err error
-
-	userAnswer := "no"
-	if !a.noHosts[host] {
-		fmt.Fprintf(writer, "The authenticity of host '%s' can't be established. "+
-			"Its public key is:\n%s\nAre you sure you want to continue (yes/no)? ",
-			host, ssh.MarshalAuthorizedKey(key))
-
-		userAnswer, err = bufio.NewReader(reader).ReadString('\n')
-		if err != nil {
+	cert, ok := key.(*ssh.Certificate)
+	if !ok {
+		// not a signed cert? perhaps we're given a host public key (happens when the host is running
+		// sshd instead of teleport daemon
+		keys, _ := a.keyStore.GetKnownHostKeys(host)
+		if len(keys) > 0 && sshutils.KeysEqual(key, keys[0]) {
+			a.log.Debugf("Verified host %s", host)
+			return nil
+		}
+		// ask user:
+		if err := hostPromptFunc(host, key); err != nil {
+			a.noHosts[host] = true
 			return trace.Wrap(err)
 		}
-		userAnswer = strings.TrimSpace(strings.ToLower(userAnswer))
+		// remember the host key (put it into 'known_hosts')
+		if err := a.keyStore.AddKnownHostKeys(host, []ssh.PublicKey{key}); err != nil {
+			a.log.Warnf("Error saving the host key: %v", err)
+		}
+		return nil
 	}
-	ok, err := utils.ParseBool(userAnswer)
+	key = cert.SignatureKey
+	// we are given a certificate. see if it was signed by any of the known_host keys:
+	keys, err := a.keyStore.GetKnownHostKeys("")
 	if err != nil {
+		a.log.Error(err)
 		return trace.Wrap(err)
 	}
-	if !ok {
-		return trace.BadParameter("not trusted")
+	a.log.Debugf("Got %d known hosts", len(keys))
+	for i := range keys {
+		if sshutils.KeysEqual(cert.SignatureKey, keys[i]) {
+			a.log.Debugf("Verified host %s", host)
+			return nil
+		}
 	}
-	return nil
+	// final step: if we have not seen the host key/cert before, lets ask the user if
+	// he trusts it, and add to the known_hosts if he says "yes"
+	if err = hostPromptFunc(host, key); err != nil {
+		// he said "no"
+		a.noHosts[host] = true
+		return trace.Wrap(err)
+	}
+	// user said "yes"
+	err = a.keyStore.AddKnownHostKeys(host, []ssh.PublicKey{key})
+	if err != nil {
+		a.log.Warn(err)
+	}
+	return err
 }
 
 // AddKey activates a new signed session key by adding it into the keystore and also

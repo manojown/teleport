@@ -45,8 +45,8 @@ const (
 	// run behind an environment/firewall which only allows outgoing connections)
 	SSHProxyTunnelListenPort = 3024
 
-	// KubeProxyListenPort is a default port for kubernetes proxies
-	KubeProxyListenPort = 3026
+	// Default SSH port
+	SSHDefaultPort = 22
 
 	// When running as a "SSH Proxy" this port will be used to
 	// serve auth requests.
@@ -54,12 +54,6 @@ const (
 
 	// Default DB to use for persisting state. Another options is "etcd"
 	BackendType = "bolt"
-
-	// BackendDir is a default backend subdirectory
-	BackendDir = "backend"
-
-	// BackendPath is a default backend path parameter
-	BackendPath = "path"
 
 	// Name of events bolt database file stored in DataDir
 	EventsBoltFile = "events.db"
@@ -84,11 +78,9 @@ const (
 	// connection attempts
 	DefaultDialTimeout = 30 * time.Second
 
-	// HTTPMaxIdleConns is the max idle connections across all hosts.
-	HTTPMaxIdleConns = 2000
-
-	// HTTPMaxIdleConnsPerHost is the max idle connections per-host.
-	HTTPMaxIdleConnsPerHost = 1000
+	// HTTPIdleConnsPerHost specifies maximum idle connections per host
+	// in HTTP connection pool
+	HTTPIdleConnsPerHost = 5
 
 	// HTTPIdleTimeout is a default timeout for idle HTTP connections
 	HTTPIdleTimeout = 30 * time.Second
@@ -98,13 +90,7 @@ const (
 
 	// DefaultIdleConnectionDuration indicates for how long Teleport will hold
 	// the SSH connection open if there are no reads/writes happening over it.
-	// 15 minutes default is compliant with PCI DSS standards
-	DefaultIdleConnectionDuration = 15 * time.Minute
-
-	// DefaultGracefulShutdownTimeout is a default timeout for
-	// graceful shutdown waiting for connections to drain off
-	// before cutting the connections forcefully.
-	DefaultGracefulShutdownTimeout = 5 * time.Minute
+	DefaultIdleConnectionDuration = 20 * time.Minute
 
 	// ShutdownPollPeriod is a polling period for graceful shutdowns of SSH servers
 	ShutdownPollPeriod = 500 * time.Millisecond
@@ -172,12 +158,6 @@ const (
 	// LogRotationPeriod defines how frequently to rotate the audit log file
 	LogRotationPeriod = (time.Hour * 24)
 
-	// UploaderScanPeriod is a default uploader scan period
-	UploaderScanPeriod = 5 * time.Second
-
-	// UploaderConcurrentUploads is a default number of concurrent
-	UploaderConcurrentUploads = 10
-
 	// MaxLoginAttempts sets the max. number of allowed failed login attempts
 	// before a user account is locked for AccountLockInterval
 	MaxLoginAttempts int = 5
@@ -211,24 +191,6 @@ const (
 	// WaitCopyTimeout is how long Teleport will wait for a session to finish
 	// copying data from the PTY after "exit-status" has been received.
 	WaitCopyTimeout = 5 * time.Second
-
-	// ClientCacheSize is the size of the RPC clients expiring cache
-	ClientCacheSize = 1024
-
-	// CSRSignTimeout is a default timeout for CSR request to be processed by K8s
-	CSRSignTimeout = 30 * time.Second
-
-	// Localhost is the address of localhost. Used for the default binding
-	// address for port forwarding.
-	Localhost = "127.0.0.1"
-
-	// AnyAddress is used to refer to the non-routable meta-address used to
-	// refer to all addresses on the machine.
-	AnyAddress = "0.0.0.0"
-
-	// CallbackTimeout is how long to wait for a response from SSO provider
-	// before timeout.
-	CallbackTimeout = 180 * time.Second
 )
 
 var (
@@ -239,34 +201,28 @@ var (
 	// after which we are going to declare the reverse tunnel offline
 	ReverseTunnelOfflineThreshold = 5 * ReverseTunnelAgentHeartbeatPeriod
 
-	// ServerAnnounceTTL is a period between heartbeats
+	// ServerHeartbeatTTL is a period between heartbeats
 	// Median sleep time between node pings is this value / 2 + random
 	// deviation added to this time to avoid lots of simultaneous
 	// heartbeats coming to auth server
-	ServerAnnounceTTL = 600 * time.Second
-
-	// ServerKeepAliveTTL is a period between server keep alives,
-	// when servers announce only presence withough sending full data
-	ServerKeepAliveTTL = 60 * time.Second
+	ServerHeartbeatTTL = 90 * time.Second
 
 	// AuthServersRefreshPeriod is a period for clients to refresh their
 	// their stored list of auth servers
 	AuthServersRefreshPeriod = 30 * time.Second
 
-	// TerminalResizePeriod is how long tsh waits before updating the size of the
-	// terminal window.
-	TerminalResizePeriod = 2 * time.Second
-
-	// SessionRefreshPeriod is how often session data is updated on the backend.
-	// The web client polls this information about session to update the UI.
-	//
-	// TODO(klizhentas): All polling periods should go away once backend supports
-	// events.
+	// SessionRefreshPeriod is how often tsh polls information about session
+	// TODO(klizhentas) all polling periods should go away once backend
+	// releases events
 	SessionRefreshPeriod = 2 * time.Second
 
 	// SessionIdlePeriod is the period of inactivity after which the
 	// session will be considered idle
 	SessionIdlePeriod = SessionRefreshPeriod * 10
+
+	// TerminalSizeRefreshPeriod is how frequently clients who share sessions sync up
+	// their terminal sizes
+	TerminalSizeRefreshPeriod = 2 * time.Second
 
 	// NewtworkBackoffDuration is a standard backoff on network requests
 	// usually is slow, e.g. once in 30 seconds
@@ -282,53 +238,6 @@ var (
 
 	// ReportingPeriod is a period for reports in logs
 	ReportingPeriod = 5 * time.Minute
-
-	// HighResPollingPeriod is a default high resolution polling period
-	HighResPollingPeriod = 10 * time.Second
-
-	// HeartbeatCheckPeriod is a period between heartbeat status checks
-	HeartbeatCheckPeriod = 5 * time.Second
-
-	// LowResPollingPeriod is a default low resolution polling period
-	LowResPollingPeriod = 600 * time.Second
-
-	// HighResReportingPeriod is a high resolution polling reporting
-	// period used in services
-	HighResReportingPeriod = 10 * time.Second
-
-	// KeepAliveInterval is interval at which Teleport will send keep-alive
-	// messages to the client. The interval of 15 minutes mirrors
-	// ClientAliveInterval of sshd.
-	KeepAliveInterval = 15 * time.Minute
-
-	// KeepAliveCountMax is the number of keep-alive messages that can be sent
-	// without receiving a response from the client before the client is
-	// disconnected. The max count mirrors ClientAliveCountMax of sshd.
-	KeepAliveCountMax = 3
-
-	// DiskAlertThreshold is the disk space alerting threshold.
-	DiskAlertThreshold = 90
-
-	// DiskAlertInterval is disk space check interval.
-	DiskAlertInterval = 5 * time.Minute
-
-	// TopRequestsCapacity sets up default top requests capacity
-	TopRequestsCapacity = 128
-
-	// CachePollPeriod is a period for cache internal events polling,
-	// used in cases when cache is being used to subscribe for events
-	// and this parameter controls how often cache checks for new events
-	// to arrive
-	CachePollPeriod = 500 * time.Millisecond
-
-	// AuthQueueSize is auth service queue size
-	AuthQueueSize = 8192
-
-	// ProxyQueueSize is proxy service queue size
-	ProxyQueueSize = 8192
-
-	// NodeQueueSize is node service queue size
-	NodeQueueSize = 128
 )
 
 // Default connection limits, they can be applied separately on any of the Teleport
@@ -339,10 +248,6 @@ const (
 
 	// Number of max. simultaneous connected users/logins
 	LimiterMaxConcurrentUsers = 250
-
-	// LimiterMaxConcurrentSignatures limits maximum number of concurrently
-	// executing signatures generated by the auth server
-	LimiterMaxConcurrentSignatures = 100
 )
 
 const (
@@ -361,10 +266,6 @@ const (
 	// CertDuration is a default certificate duration
 	// 12 is default as it' longer than average working day (I hope so)
 	CertDuration = 12 * time.Hour
-	// RotationGracePeriod is a default rotation period for graceful
-	// certificate rotations, by default to set to maximum allowed user
-	// cert duration
-	RotationGracePeriod = MaxCertDuration
 )
 
 // list of roles teleport service can run as:
@@ -400,12 +301,6 @@ var (
 
 	// CACertFile is the default name of the certificate authority file to watch
 	CACertFile = "ca.cert"
-)
-
-const (
-	// ServiceName is the default PAM policy to use if one is not passed in
-	// configuration.
-	ServiceName = "sshd"
 )
 
 const (
@@ -448,11 +343,6 @@ func ProxyListenAddr() *utils.NetAddr {
 	return makeAddr(BindIP, SSHProxyListenPort)
 }
 
-// KubeProxyListenAddr returns the default listening address for the Kubernetes Proxy service
-func KubeProxyListenAddr() *utils.NetAddr {
-	return makeAddr(BindIP, KubeProxyListenPort)
-}
-
 // ProxyWebListenAddr returns the default listening address for the Web-based SSH Proxy service
 func ProxyWebListenAddr() *utils.NetAddr {
 	return makeAddr(BindIP, HTTPListenPort)
@@ -479,36 +369,10 @@ func makeAddr(host string, port int16) *utils.NetAddr {
 	return retval
 }
 
-// CATTL is a default lifetime of a CA certificate
-const CATTL = time.Hour * 24 * 365 * 10
-
 const (
-	// WebsocketVersion is the version of the protocol.
-	WebsocketVersion = "1"
+	// RSABits is the default RSA bits for the private key
+	RSABits = 2048
 
-	// WebsocketClose is sent when the SSH session is over without any errors.
-	WebsocketClose = "c"
-
-	// WebsocketAudit is sending a audit event over the websocket to the web client.
-	WebsocketAudit = "a"
-
-	// WebsocketRaw is sending raw terminal bytes over the websocket to the web
-	// client.
-	WebsocketRaw = "r"
-
-	// WebsocketResize is receiving a resize request.
-	WebsocketResize = "w"
+	// CATTL is a default lifetime of a CA certificate
+	CATTL = time.Hour * 24 * 365 * 10
 )
-
-// The following are cryptographic primitives Teleport does not support in
-// it's default configuration.
-const (
-	DiffieHellmanGroup14SHA1 = "diffie-hellman-group14-sha1"
-	DiffieHellmanGroup1SHA1  = "diffie-hellman-group1-sha1"
-	HMACSHA1                 = "hmac-sha1"
-	HMACSHA196               = "hmac-sha1-96"
-)
-
-// WindowsOpenSSHNamedPipe is the address of the named pipe that the
-// OpenSSH agent is on.
-const WindowsOpenSSHNamedPipe = `\\.\pipe\openssh-ssh-agent`

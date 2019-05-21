@@ -30,6 +30,7 @@ import (
 	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/utils"
 
+	"github.com/ghodss/yaml"
 	"github.com/gravitational/trace"
 )
 
@@ -76,7 +77,12 @@ func (r *roleCollection) toMarshal() interface{} {
 }
 
 func (r *roleCollection) writeYAML(w io.Writer) error {
-	return utils.WriteYAML(w, r.toMarshal())
+	data, err := yaml.Marshal(r.toMarshal())
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	_, err = w.Write(data)
+	return trace.Wrap(err)
 }
 
 type namespaceCollection struct {
@@ -109,7 +115,12 @@ func (n *namespaceCollection) toMarshal() interface{} {
 }
 
 func (n *namespaceCollection) writeYAML(w io.Writer) error {
-	return utils.WriteYAML(w, n.toMarshal())
+	data, err := yaml.Marshal(n.toMarshal())
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	_, err = w.Write(data)
+	return trace.Wrap(err)
 }
 
 func printActions(rules []services.Rule) string {
@@ -120,13 +131,13 @@ func printActions(rules []services.Rule) string {
 	return strings.Join(pairs, ",")
 }
 
-func printNodeLabels(labels services.Labels) string {
+func printNodeLabels(labels map[string]string) string {
 	pairs := []string{}
-	for key, values := range labels {
+	for key, val := range labels {
 		if key == services.Wildcard {
 			return "<all nodes>"
 		}
-		pairs = append(pairs, fmt.Sprintf("%v=%v", key, values))
+		pairs = append(pairs, fmt.Sprintf("%v=%v", key, val))
 	}
 	return strings.Join(pairs, ",")
 }
@@ -136,7 +147,7 @@ type serverCollection struct {
 }
 
 func (s *serverCollection) writeText(w io.Writer) error {
-	t := asciitable.MakeTable([]string{"Nodename", "UUID", "Address", "Labels"})
+	t := asciitable.MakeTable([]string{"Hostname", "UUID", "Address", "Labels"})
 	for _, s := range s.servers {
 		t.AddRow([]string{
 			s.GetHostname(), s.GetName(), s.GetAddr(), s.LabelsString(),
@@ -163,7 +174,12 @@ func (s *serverCollection) toMarshal() interface{} {
 }
 
 func (r *serverCollection) writeYAML(w io.Writer) error {
-	return utils.WriteYAML(w, r.toMarshal())
+	data, err := yaml.Marshal(r.toMarshal())
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	_, err = w.Write(data)
+	return trace.Wrap(err)
 }
 
 type userCollection struct {
@@ -196,7 +212,12 @@ func (s *userCollection) toMarshal() interface{} {
 }
 
 func (r *userCollection) writeYAML(w io.Writer) error {
-	return utils.WriteYAML(w, r.toMarshal())
+	data, err := yaml.Marshal(r.toMarshal())
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	_, err = w.Write(data)
+	return trace.Wrap(err)
 }
 
 type authorityCollection struct {
@@ -246,7 +267,12 @@ func (a *authorityCollection) toMarshal() interface{} {
 }
 
 func (a *authorityCollection) writeYAML(w io.Writer) error {
-	return utils.WriteYAML(w, a.toMarshal())
+	data, err := yaml.Marshal(a.toMarshal())
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	_, err = w.Write(data)
+	return trace.Wrap(err)
 }
 
 type reverseTunnelCollection struct {
@@ -281,7 +307,12 @@ func (r *reverseTunnelCollection) toMarshal() interface{} {
 }
 
 func (r *reverseTunnelCollection) writeYAML(w io.Writer) error {
-	return utils.WriteYAML(w, r.toMarshal())
+	data, err := yaml.Marshal(r.toMarshal())
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	_, err = w.Write(data)
+	return trace.Wrap(err)
 }
 
 type oidcCollection struct {
@@ -316,7 +347,12 @@ func (c *oidcCollection) toMarshal() interface{} {
 }
 
 func (c *oidcCollection) writeYAML(w io.Writer) error {
-	return utils.WriteYAML(w, c.toMarshal())
+	data, err := yaml.Marshal(c.toMarshal())
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	_, err = w.Write(data)
+	return trace.Wrap(err)
 }
 
 type samlCollection struct {
@@ -349,79 +385,12 @@ func (c *samlCollection) toMarshal() interface{} {
 }
 
 func (c *samlCollection) writeYAML(w io.Writer) error {
-	return utils.WriteYAML(w, c.toMarshal())
-}
-
-type connectorsCollection struct {
-	oidc   []services.OIDCConnector
-	saml   []services.SAMLConnector
-	github []services.GithubConnector
-}
-
-func (c *connectorsCollection) writeText(w io.Writer) error {
-	if len(c.oidc) > 0 {
-		_, err := io.WriteString(w, "\nOIDC:\n")
-		if err != nil {
-			return trace.Wrap(err)
-		}
-		oc := &oidcCollection{connectors: c.oidc}
-		err = oc.writeText(w)
-		if err != nil {
-			return trace.Wrap(err)
-		}
-	}
-
-	if len(c.saml) > 0 {
-		_, err := io.WriteString(w, "\nSAML:\n")
-		sc := &samlCollection{connectors: c.saml}
-		err = sc.writeText(w)
-		if err != nil {
-			return trace.Wrap(err)
-		}
-	}
-
-	if len(c.github) > 0 {
-		_, err := io.WriteString(w, "\nGitHub:\n")
-		if err != nil {
-			return trace.Wrap(err)
-		}
-		gc := &githubCollection{connectors: c.github}
-		err = gc.writeText(w)
-		if err != nil {
-			return trace.Wrap(err)
-		}
-	}
-
-	return nil
-}
-
-func (c *connectorsCollection) writeJSON(w io.Writer) error {
-	data, err := json.MarshalIndent(c.toMarshal(), "", "    ")
+	data, err := yaml.Marshal(c.toMarshal())
 	if err != nil {
 		return trace.Wrap(err)
 	}
 	_, err = w.Write(data)
 	return trace.Wrap(err)
-}
-
-func (c *connectorsCollection) toMarshal() interface{} {
-	var connectors []interface{}
-
-	for _, o := range c.oidc {
-		connectors = append(connectors, o)
-	}
-	for _, s := range c.saml {
-		connectors = append(connectors, s)
-	}
-	for _, g := range c.github {
-		connectors = append(connectors, g)
-	}
-
-	return connectors
-}
-
-func (c *connectorsCollection) writeYAML(w io.Writer) error {
-	return utils.WriteYAML(w, c.toMarshal())
 }
 
 type trustedClusterCollection struct {
@@ -462,7 +431,12 @@ func (c *trustedClusterCollection) toMarshal() interface{} {
 }
 
 func (c *trustedClusterCollection) writeYAML(w io.Writer) error {
-	return utils.WriteYAML(w, c.toMarshal())
+	data, err := yaml.Marshal(c.toMarshal())
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	_, err = w.Write(data)
+	return trace.Wrap(err)
 }
 
 type githubCollection struct {
@@ -496,7 +470,12 @@ func (c *githubCollection) toMarshal() interface{} {
 }
 
 func (c *githubCollection) writeYAML(w io.Writer) error {
-	return utils.WriteYAML(w, c.toMarshal())
+	data, err := yaml.Marshal(c.toMarshal())
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	_, err = w.Write(data)
+	return trace.Wrap(err)
 }
 
 func formatTeamsToLogins(mappings []services.TeamMapping) string {
@@ -546,5 +525,10 @@ func (c *remoteClusterCollection) toMarshal() interface{} {
 }
 
 func (c *remoteClusterCollection) writeYAML(w io.Writer) error {
-	return utils.WriteYAML(w, c.toMarshal())
+	data, err := yaml.Marshal(c.toMarshal())
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	_, err = w.Write(data)
+	return trace.Wrap(err)
 }

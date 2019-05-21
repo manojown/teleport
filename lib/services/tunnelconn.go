@@ -1,23 +1,9 @@
-/*
-Copyright 2015-2019 Gravitational, Inc.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package services
 
 import (
+	"encoding/json"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -94,7 +80,6 @@ func MustCreateTunnelConnection(name string, spec TunnelConnectionSpecV2) Tunnel
 func NewTunnelConnection(name string, spec TunnelConnectionSpecV2) (TunnelConnection, error) {
 	conn := &TunnelConnectionV2{
 		Kind:    KindTunnelConnection,
-		SubKind: spec.ClusterName,
 		Version: V2,
 		Metadata: Metadata{
 			Name:      name,
@@ -108,34 +93,16 @@ func NewTunnelConnection(name string, spec TunnelConnectionSpecV2) (TunnelConnec
 	return conn, nil
 }
 
-// GetVersion returns resource version
-func (r *TunnelConnectionV2) GetVersion() string {
-	return r.Version
-}
-
-// GetKind returns resource kind
-func (r *TunnelConnectionV2) GetKind() string {
-	return r.Kind
-}
-
-// GetSubKind returns resource sub kind
-func (r *TunnelConnectionV2) GetSubKind() string {
-	return r.SubKind
-}
-
-// SetSubKind sets resource subkind
-func (r *TunnelConnectionV2) SetSubKind(s string) {
-	r.SubKind = s
-}
-
-// GetResourceID returns resource ID
-func (r *TunnelConnectionV2) GetResourceID() int64 {
-	return r.Metadata.ID
-}
-
-// SetResourceID sets resource ID
-func (r *TunnelConnectionV2) SetResourceID(id int64) {
-	r.Metadata.ID = id
+// TunnelConnectionV2 is version 1 resource spec of the reverse tunnel
+type TunnelConnectionV2 struct {
+	// Kind is a resource kind
+	Kind string `json:"kind"`
+	// Version is a resource version
+	Version string `json:"version"`
+	// Metadata is Role metadata
+	Metadata Metadata `json:"metadata"`
+	// Spec contains user specification
+	Spec TunnelConnectionSpecV2 `json:"spec"`
 }
 
 // Clone returns a copy of this tunnel connection
@@ -234,6 +201,16 @@ func (r *TunnelConnectionV2) Check() error {
 	return nil
 }
 
+// TunnelConnectionSpecV2 is a specification for V2 tunnel connection
+type TunnelConnectionSpecV2 struct {
+	// ClusterName is a name of the cluster
+	ClusterName string `json:"cluster_name"`
+	// ProxyName is the name of the proxy server
+	ProxyName string `json:"proxy_name"`
+	// LastHeartbeat is a time of the last heartbeat
+	LastHeartbeat time.Time `json:"last_heartbeat,omitempty"`
+}
+
 // TunnelConnectionSpecV2Schema is JSON schema for reverse tunnel spec
 const TunnelConnectionSpecV2Schema = `{
   "type": "object",
@@ -254,16 +231,13 @@ func GetTunnelConnectionSchema() string {
 
 // UnmarshalTunnelConnection unmarshals reverse tunnel from JSON or YAML,
 // sets defaults and checks the schema
-func UnmarshalTunnelConnection(data []byte, opts ...MarshalOption) (TunnelConnection, error) {
+func UnmarshalTunnelConnection(data []byte) (TunnelConnection, error) {
 	if len(data) == 0 {
+		debug.PrintStack()
 		return nil, trace.BadParameter("missing tunnel connection data")
 	}
-	cfg, err := collectOptions(opts)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
 	var h ResourceHeader
-	err = utils.FastUnmarshal(data, &h)
+	err := json.Unmarshal(data, &h)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -271,25 +245,14 @@ func UnmarshalTunnelConnection(data []byte, opts ...MarshalOption) (TunnelConnec
 	case V2:
 		var r TunnelConnectionV2
 
-		if cfg.SkipValidation {
-			if err := utils.FastUnmarshal(data, &r); err != nil {
-				return nil, trace.BadParameter(err.Error())
-			}
-		} else {
-			if err := utils.UnmarshalWithSchema(GetTunnelConnectionSchema(), &r, data); err != nil {
-				return nil, trace.BadParameter(err.Error())
-			}
+		if err := utils.UnmarshalWithSchema(GetTunnelConnectionSchema(), &r, data); err != nil {
+			return nil, trace.BadParameter(err.Error())
 		}
 
 		if err := r.CheckAndSetDefaults(); err != nil {
 			return nil, trace.Wrap(err)
 		}
-		if cfg.ID != 0 {
-			r.SetResourceID(cfg.ID)
-		}
-		if !cfg.Expires.IsZero() {
-			r.SetExpiry(cfg.Expires)
-		}
+
 		return &r, nil
 	}
 	return nil, trace.BadParameter("reverse tunnel version %v is not supported", h.Version)
@@ -297,21 +260,5 @@ func UnmarshalTunnelConnection(data []byte, opts ...MarshalOption) (TunnelConnec
 
 // MarshalTunnelConnection marshals tunnel connection
 func MarshalTunnelConnection(rt TunnelConnection, opts ...MarshalOption) ([]byte, error) {
-	cfg, err := collectOptions(opts)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	switch resource := rt.(type) {
-	case *TunnelConnectionV2:
-		if !cfg.PreserveResourceID {
-			// avoid modifying the original object
-			// to prevent unexpected data races
-			copy := *resource
-			copy.SetResourceID(0)
-			resource = &copy
-		}
-		return utils.FastMarshal(resource)
-	default:
-		return nil, trace.BadParameter("unrecognized resource version %T", rt)
-	}
+	return json.Marshal(rt)
 }

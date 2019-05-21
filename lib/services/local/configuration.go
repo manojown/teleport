@@ -17,8 +17,6 @@ limitations under the License.
 package local
 
 import (
-	"context"
-
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/services"
 
@@ -38,63 +36,27 @@ func NewClusterConfigurationService(backend backend.Backend) *ClusterConfigurati
 }
 
 // GetClusterName gets the name of the cluster from the backend.
-func (s *ClusterConfigurationService) GetClusterName(opts ...services.MarshalOption) (services.ClusterName, error) {
-	item, err := s.Get(context.TODO(), backend.Key(clusterConfigPrefix, namePrefix))
+func (s *ClusterConfigurationService) GetClusterName() (services.ClusterName, error) {
+	data, err := s.GetVal([]string{"cluster_configuration"}, "name")
 	if err != nil {
 		if trace.IsNotFound(err) {
 			return nil, trace.NotFound("cluster name not found")
 		}
 		return nil, trace.Wrap(err)
 	}
-	return services.GetClusterNameMarshaler().Unmarshal(item.Value,
-		services.AddOptions(opts, services.WithResourceID(item.ID))...)
-}
 
-// DeleteClusterName deletes services.ClusterName from the backend.
-func (s *ClusterConfigurationService) DeleteClusterName() error {
-	err := s.Delete(context.TODO(), backend.Key(clusterConfigPrefix, namePrefix))
-	if err != nil {
-		if trace.IsNotFound(err) {
-			return trace.NotFound("cluster configuration not found")
-		}
-		return trace.Wrap(err)
-	}
-	return nil
+	return services.GetClusterNameMarshaler().Unmarshal(data)
 }
 
 // SetClusterName sets the name of the cluster in the backend. SetClusterName
 // can only be called once on a cluster after which it will return trace.AlreadyExists.
 func (s *ClusterConfigurationService) SetClusterName(c services.ClusterName) error {
-	value, err := services.GetClusterNameMarshaler().Marshal(c)
+	data, err := services.GetClusterNameMarshaler().Marshal(c)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 
-	_, err = s.Create(context.TODO(), backend.Item{
-		Key:     backend.Key(clusterConfigPrefix, namePrefix),
-		Value:   value,
-		Expires: c.Expiry(),
-	})
-	if err != nil {
-		return trace.Wrap(err)
-	}
-
-	return nil
-}
-
-// UpsertClusterName sets the name of the cluster in the backend.
-func (s *ClusterConfigurationService) UpsertClusterName(c services.ClusterName) error {
-	value, err := services.GetClusterNameMarshaler().Marshal(c)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-
-	_, err = s.Put(context.TODO(), backend.Item{
-		Key:     backend.Key(clusterConfigPrefix, namePrefix),
-		Value:   value,
-		Expires: c.Expiry(),
-		ID:      c.GetResourceID(),
-	})
+	err = s.CreateVal([]string{"cluster_configuration"}, "name", []byte(data), backend.Forever)
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -104,77 +66,55 @@ func (s *ClusterConfigurationService) UpsertClusterName(c services.ClusterName) 
 
 // GetStaticTokens gets the list of static tokens used to provision nodes.
 func (s *ClusterConfigurationService) GetStaticTokens() (services.StaticTokens, error) {
-	item, err := s.Get(context.TODO(), backend.Key(clusterConfigPrefix, staticTokensPrefix))
+	data, err := s.GetVal([]string{"cluster_configuration"}, "static_tokens")
 	if err != nil {
 		if trace.IsNotFound(err) {
 			return nil, trace.NotFound("static tokens not found")
 		}
 		return nil, trace.Wrap(err)
 	}
-	return services.GetStaticTokensMarshaler().Unmarshal(item.Value,
-		services.WithResourceID(item.ID), services.WithExpires(item.Expires))
+
+	return services.GetStaticTokensMarshaler().Unmarshal(data)
 }
 
 // SetStaticTokens sets the list of static tokens used to provision nodes.
 func (s *ClusterConfigurationService) SetStaticTokens(c services.StaticTokens) error {
-	value, err := services.GetStaticTokensMarshaler().Marshal(c)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-	_, err = s.Put(context.TODO(), backend.Item{
-		Key:     backend.Key(clusterConfigPrefix, staticTokensPrefix),
-		Value:   value,
-		Expires: c.Expiry(),
-		ID:      c.GetResourceID(),
-	})
+	data, err := services.GetStaticTokensMarshaler().Marshal(c)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 
-	return nil
-}
-
-// DeleteStaticTokens deletes static tokens
-func (s *ClusterConfigurationService) DeleteStaticTokens() error {
-	err := s.Delete(context.TODO(), backend.Key(clusterConfigPrefix, staticTokensPrefix))
+	err = s.UpsertVal([]string{"cluster_configuration"}, "static_tokens", []byte(data), backend.Forever)
 	if err != nil {
-		if trace.IsNotFound(err) {
-			return trace.NotFound("static tokens are not found")
-		}
 		return trace.Wrap(err)
 	}
+
 	return nil
 }
 
 // GetAuthPreference fetches the cluster authentication preferences
 // from the backend and return them.
 func (s *ClusterConfigurationService) GetAuthPreference() (services.AuthPreference, error) {
-	item, err := s.Get(context.TODO(), backend.Key(authPrefix, preferencePrefix, generalPrefix))
+	data, err := s.GetVal([]string{"authentication", "preference"}, "general")
 	if err != nil {
 		if trace.IsNotFound(err) {
 			return nil, trace.NotFound("authentication preference not found")
 		}
 		return nil, trace.Wrap(err)
 	}
-	return services.GetAuthPreferenceMarshaler().Unmarshal(item.Value,
-		services.WithResourceID(item.ID), services.WithExpires(item.Expires))
+
+	return services.GetAuthPreferenceMarshaler().Unmarshal(data)
 }
 
 // SetAuthPreference sets the cluster authentication preferences
 // on the backend.
 func (s *ClusterConfigurationService) SetAuthPreference(preferences services.AuthPreference) error {
-	value, err := services.GetAuthPreferenceMarshaler().Marshal(preferences)
+	data, err := services.GetAuthPreferenceMarshaler().Marshal(preferences)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 
-	item := backend.Item{
-		Key:   backend.Key(authPrefix, preferencePrefix, generalPrefix),
-		Value: value,
-		ID:    preferences.GetResourceID(),
-	}
-
-	_, err = s.Put(context.TODO(), item)
+	err = s.UpsertVal([]string{"authentication", "preference"}, "general", []byte(data), backend.Forever)
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -183,57 +123,29 @@ func (s *ClusterConfigurationService) SetAuthPreference(preferences services.Aut
 }
 
 // GetClusterConfig gets services.ClusterConfig from the backend.
-func (s *ClusterConfigurationService) GetClusterConfig(opts ...services.MarshalOption) (services.ClusterConfig, error) {
-	item, err := s.Get(context.TODO(), backend.Key(clusterConfigPrefix, generalPrefix))
+func (s *ClusterConfigurationService) GetClusterConfig() (services.ClusterConfig, error) {
+	data, err := s.GetVal([]string{"cluster_configuration"}, "general")
 	if err != nil {
 		if trace.IsNotFound(err) {
 			return nil, trace.NotFound("cluster configuration not found")
 		}
 		return nil, trace.Wrap(err)
 	}
-	return services.GetClusterConfigMarshaler().Unmarshal(item.Value,
-		services.AddOptions(opts, services.WithResourceID(item.ID),
-			services.WithExpires(item.Expires))...)
-}
 
-// DeleteClusterConfig deletes services.ClusterConfig from the backend.
-func (s *ClusterConfigurationService) DeleteClusterConfig() error {
-	err := s.Delete(context.TODO(), backend.Key(clusterConfigPrefix, generalPrefix))
-	if err != nil {
-		if trace.IsNotFound(err) {
-			return trace.NotFound("cluster configuration not found")
-		}
-		return trace.Wrap(err)
-	}
-	return nil
+	return services.GetClusterConfigMarshaler().Unmarshal(data)
 }
 
 // SetClusterConfig sets services.ClusterConfig on the backend.
 func (s *ClusterConfigurationService) SetClusterConfig(c services.ClusterConfig) error {
-	value, err := services.GetClusterConfigMarshaler().Marshal(c)
+	data, err := services.GetClusterConfigMarshaler().Marshal(c)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 
-	item := backend.Item{
-		Key:   backend.Key(clusterConfigPrefix, generalPrefix),
-		Value: value,
-		ID:    c.GetResourceID(),
-	}
-
-	_, err = s.Put(context.TODO(), item)
+	err = s.UpsertVal([]string{"cluster_configuration"}, "general", []byte(data), backend.Forever)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 
 	return nil
 }
-
-const (
-	clusterConfigPrefix = "cluster_configuration"
-	namePrefix          = "name"
-	staticTokensPrefix  = "static_tokens"
-	authPrefix          = "authentication"
-	preferencePrefix    = "preference"
-	generalPrefix       = "general"
-)

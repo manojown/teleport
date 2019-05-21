@@ -11,32 +11,27 @@ import (
 
 // ExpectNotFound expects not found error
 func ExpectNotFound(c *check.C, err error) {
-	c.Assert(trace.IsNotFound(err), check.Equals, true, check.Commentf("expected NotFound, got %T %v at %v", trace.Unwrap(err), err, string(debug.Stack())))
+	c.Assert(trace.IsNotFound(err), check.Equals, true, check.Commentf("expected NotFound, got %T %#v at %v", err, err, string(debug.Stack())))
 }
 
 // ExpectBadParameter expects bad parameter error
 func ExpectBadParameter(c *check.C, err error) {
-	c.Assert(trace.IsBadParameter(err), check.Equals, true, check.Commentf("expected BadParameter, got %T %v at %v", trace.Unwrap(err), err, string(debug.Stack())))
+	c.Assert(trace.IsBadParameter(err), check.Equals, true, check.Commentf("expected BadParameter, got %T %#v at %v", err, err, string(debug.Stack())))
 }
 
 // ExpectCompareFailed expects compare failed error
 func ExpectCompareFailed(c *check.C, err error) {
-	c.Assert(trace.IsCompareFailed(err), check.Equals, true, check.Commentf("expected CompareFailed, got %T %v at %v", trace.Unwrap(err), err, string(debug.Stack())))
+	c.Assert(trace.IsCompareFailed(err), check.Equals, true, check.Commentf("expected CompareFailed, got %T %#v at %v", err, err, string(debug.Stack())))
 }
 
 // ExpectAccessDenied expects error to be access denied
 func ExpectAccessDenied(c *check.C, err error) {
-	c.Assert(trace.IsAccessDenied(err), check.Equals, true, check.Commentf("expected AccessDenied, got %T %v at %v", trace.Unwrap(err), err, string(debug.Stack())))
+	c.Assert(trace.IsAccessDenied(err), check.Equals, true, check.Commentf("expected AccessDenied, got %T %#v at %v", err, err, string(debug.Stack())))
 }
 
 // ExpectAlreadyExists expects already exists error
 func ExpectAlreadyExists(c *check.C, err error) {
-	c.Assert(trace.IsAlreadyExists(err), check.Equals, true, check.Commentf("expected AlreadyExists, got %T %v at %v", trace.Unwrap(err), err, string(debug.Stack())))
-}
-
-// ExpectConnectionProblem expects connection problem error
-func ExpectConnectionProblem(c *check.C, err error) {
-	c.Assert(trace.IsConnectionProblem(err), check.Equals, true, check.Commentf("expected ConnectionProblem, got %T %v at %v", trace.Unwrap(err), err, string(debug.Stack())))
+	c.Assert(trace.IsAlreadyExists(err), check.Equals, true, check.Commentf("expected AlreadyExists, got %T %#v at %v", err, err, string(debug.Stack())))
 }
 
 // DeepCompare uses gocheck DeepEquals but provides nice diff if things are not equal
@@ -178,6 +173,3 @@ k+vHAoGBAJyA+RtBF5m64/TqhZFcesTtnpWaRhQ50xXnNVF3W1eKGPtdTDKOaENA
 LJxgC1GdoEz2ilXW802H9QrdKf9GPqxwi2TVzfO6pzWkdZcmbItu+QCCFz+co+r8
 +ki49FmlfbR5YVPN+8X40aLQB4xDkCHwRwTkrigzWQhIOv8NAhDA
 -----END RSA PRIVATE KEY-----`
-
-// UUID is the unique identifier used in tests
-const UUID = "11111111-1111-1111-1111-111111111111"

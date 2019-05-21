@@ -19,7 +19,6 @@ package services
 import (
 	"fmt"
 
-	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
@@ -129,63 +128,6 @@ func (s *RoleMapSuite) TestRoleMap(c *check.C) {
 				{Remote: Wildcard, Local: []string{"local-logs"}},
 			},
 		},
-		{
-			name:   "glob capture match",
-			remote: []string{"remote-devs"},
-			local:  []string{"local-devs"},
-			roleMap: RoleMap{
-				{Remote: "remote-*", Local: []string{"local-$1"}},
-			},
-		},
-		{
-			name:   "passthrough match",
-			remote: []string{"remote-devs"},
-			local:  []string{"remote-devs"},
-			roleMap: RoleMap{
-				{Remote: "^(.*)$", Local: []string{"$1"}},
-			},
-		},
-		{
-			name:   "passthrough match ignores implicit role",
-			remote: []string{"remote-devs", teleport.DefaultImplicitRole},
-			local:  []string{"remote-devs"},
-			roleMap: RoleMap{
-				{Remote: "^(.*)$", Local: []string{"$1"}},
-			},
-		},
-		{
-			name:   "partial match",
-			remote: []string{"remote-devs", "something-else"},
-			local:  []string{"remote-devs"},
-			roleMap: RoleMap{
-				{Remote: "^(remote-.*)$", Local: []string{"$1"}},
-			},
-		},
-		{
-			name:   "partial empty expand section is removed",
-			remote: []string{"remote-devs"},
-			local:  []string{"remote-devs", "remote-"},
-			roleMap: RoleMap{
-				{Remote: "^(remote-.*)$", Local: []string{"$1", "remote-$2", "$2"}},
-			},
-		},
-		{
-			name:   "multiple matches yield different results",
-			remote: []string{"remote-devs"},
-			local:  []string{"remote-devs", "test"},
-			roleMap: RoleMap{
-				{Remote: "^(remote-.*)$", Local: []string{"$1"}},
-				{Remote: `^\Aremote-.*$`, Local: []string{"test"}},
-			},
-		},
-		{
-			name:   "different expand groups can be referred",
-			remote: []string{"remote-devs"},
-			local:  []string{"remote-devs", "devs"},
-			roleMap: RoleMap{
-				{Remote: "^(remote-(.*))$", Local: []string{"$1", "$2"}},
-			},
-		},
 	}
 
 	for _, tc := range testCases {
@@ -195,8 +137,8 @@ func (s *RoleMapSuite) TestRoleMap(c *check.C) {
 			c.Assert(err, check.NotNil, comment)
 			c.Assert(err, check.FitsTypeOf, tc.err)
 		} else {
-			c.Assert(err, check.IsNil, comment)
-			c.Assert(local, check.DeepEquals, tc.local, comment)
+			c.Assert(err, check.IsNil)
+			c.Assert(local, check.DeepEquals, tc.local)
 		}
 	}
 }

@@ -30,8 +30,19 @@ import (
 
 	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
+	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/ssh"
+)
+
+var (
+	tunnelStats = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "tunnels",
+			Help: "Number of tunnels per state",
+		},
+		[]string{"cluster", "state"},
+	)
 )
 
 // AgentPool manages the pool of outbound reverse tunnel agents.
@@ -68,8 +79,6 @@ type AgentPoolConfig struct {
 	// Clock is a clock used to get time, if not set,
 	// system clock is used
 	Clock clockwork.Clock
-	// KubeDialAddr is an address of a kubernetes proxy
-	KubeDialAddr utils.NetAddr
 }
 
 // CheckAndSetDefaults checks and sets defaults
@@ -298,7 +307,6 @@ func (m *AgentPool) addAgent(key agentKey, discoverProxies []services.Server) er
 		Context:         m.ctx,
 		DiscoveryC:      m.discoveryC,
 		DiscoverProxies: discoverProxies,
-		KubeDialAddr:    m.cfg.KubeDialAddr,
 	})
 	if err != nil {
 		return trace.Wrap(err)
@@ -313,45 +321,22 @@ func (m *AgentPool) addAgent(key agentKey, discoverProxies []services.Server) er
 	return nil
 }
 
-// Counts returns a count of the number of proxies a outbound tunnel is
-// connected to. Used in tests to determine if a proxy has been found and/or
-// removed.
-func (m *AgentPool) Counts() map[string]int {
-	out := make(map[string]int)
-
-	for key, agents := range m.agents {
-		out[key.domainName] += len(agents)
-	}
-
-	return out
-}
-
-// reportStats submits report about agents state once in a while at info
-// level. Always logs more detailed information at debug level.
+// reportStats submits report about agents state once in a while
 func (m *AgentPool) reportStats() {
 	var logReport bool
 	if m.cfg.Clock.Now().Sub(m.lastReport) > defaults.ReportingPeriod {
 		m.lastReport = m.cfg.Clock.Now()
 		logReport = true
 	}
-
 	for key, agents := range m.agents {
-		m.Debugf("Outbound tunnel for %v connected to %v proxies.", key.domainName, len(agents))
-
-		countPerState := map[string]int{
-			agentStateConnecting:   0,
-			agentStateDiscovering:  0,
-			agentStateConnected:    0,
-			agentStateDiscovered:   0,
-			agentStateDisconnected: 0,
-		}
+		countPerState := make(map[string]int)
 		for _, a := range agents {
-			countPerState[a.getState()]++
+			countPerState[a.getState()] += 1
 		}
 		for state, count := range countPerState {
-			gauge, err := trustedClustersStats.GetMetricWithLabelValues(key.domainName, state)
+			gauge, err := tunnelStats.GetMetricWithLabelValues(key.domainName, state)
 			if err != nil {
-				m.Warningf("Failed to get gauge: %v.", err)
+				m.Warningf("%v", err)
 				continue
 			}
 			gauge.Set(float64(count))
@@ -370,7 +355,6 @@ func (m *AgentPool) syncAgents(tunnels []services.ReverseTunnel) error {
 	if err != nil {
 		return trace.Wrap(err)
 	}
-
 	agentsToAdd, agentsToRemove := diffTunnels(m.agents, keys)
 	// remove agents from deleted reverse tunnels
 	for _, key := range agentsToRemove {
@@ -383,34 +367,8 @@ func (m *AgentPool) syncAgents(tunnels []services.ReverseTunnel) error {
 		}
 	}
 
-	// Remove disconnected agents from the list of agents.
-	m.removeDisconnected()
-
-	// Report tunnel statistics.
 	m.reportStats()
-
 	return nil
-}
-
-// removeDisconnected removes disconnected agents from the list of agents.
-// This function should be called under a lock.
-func (m *AgentPool) removeDisconnected() {
-	for agentKey, agentSlice := range m.agents {
-		// Filter and close all disconnected agents.
-		validAgents := filterAndClose(agentSlice, func(agent *Agent) bool {
-			if agent.getState() == agentStateDisconnected {
-				return true
-			}
-			return false
-		})
-
-		// Update (or delete) agent key with filter applied.
-		if len(validAgents) > 0 {
-			m.agents[agentKey] = validAgents
-		} else {
-			delete(m.agents, agentKey)
-		}
-	}
 }
 
 func tunnelsToAgentKeys(tunnels []services.ReverseTunnel) (map[agentKey]bool, error) {

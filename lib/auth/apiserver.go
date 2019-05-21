@@ -1,5 +1,5 @@
 /*
-Copyright 2015-2019 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,13 +26,13 @@ import (
 	"time"
 
 	"github.com/gravitational/teleport"
+	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/httplib"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/utils"
 
-	"github.com/gravitational/form"
 	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
 	"github.com/julienschmidt/httprouter"
@@ -61,23 +61,22 @@ func NewAPIServer(config *APIConfig) http.Handler {
 	}
 	srv.Router = *httprouter.New()
 
-	// Kubernetes extensions
-	srv.POST("/:version/kube/csr", srv.withAuth(srv.processKubeCSR))
-
 	// Operations on certificate authorities
 	srv.GET("/:version/domain", srv.withAuth(srv.getDomainName))
-	srv.GET("/:version/cacert", srv.withAuth(srv.getClusterCACert))
-
 	srv.POST("/:version/authorities/:type", srv.withAuth(srv.upsertCertAuthority))
-	srv.POST("/:version/authorities/:type/rotate", srv.withAuth(srv.rotateCertAuthority))
-	srv.POST("/:version/authorities/:type/rotate/external", srv.withAuth(srv.rotateExternalCertAuthority))
 	srv.DELETE("/:version/authorities/:type/:domain", srv.withAuth(srv.deleteCertAuthority))
 	srv.GET("/:version/authorities/:type/:domain", srv.withAuth(srv.getCertAuthority))
 	srv.GET("/:version/authorities/:type", srv.withAuth(srv.getCertAuthorities))
 
+	// DELETE IN: 2.6.0
+	// Certificate exchange for cluster upgrades used to upgrade from 2.4.0
+	// to 2.5.0 clusters.
+	srv.POST("/:version/exchangecerts", srv.withAuth(srv.exchangeCerts))
+
 	// Generating certificates for user and host authorities
 	srv.POST("/:version/ca/host/certs", srv.withAuth(srv.generateHostCert))
 	srv.POST("/:version/ca/user/certs", srv.withAuth(srv.generateUserCert))
+	srv.POST("/:version/ca/user/certs/bundle", srv.withAuth(srv.generateUserCertBundle))
 
 	// Operations on users
 	srv.GET("/:version/users", srv.withAuth(srv.getUsers))
@@ -92,6 +91,8 @@ func NewAPIServer(config *APIConfig) http.Handler {
 	srv.PUT("/:version/users/:user/web/password", srv.withAuth(srv.changePassword))
 	srv.POST("/:version/users/:user/web/password", srv.withAuth(srv.upsertPassword))
 	srv.POST("/:version/users/:user/web/password/check", srv.withAuth(srv.checkPassword))
+	srv.POST("/:version/users/:user/web/signin", srv.withAuth(srv.signIn))
+	srv.GET("/:version/users/:user/web/signin/preauth", srv.withAuth(srv.preAuthenticatedSignIn))
 	srv.POST("/:version/users/:user/web/sessions", srv.withAuth(srv.createWebSession))
 	srv.POST("/:version/users/:user/web/authenticate", srv.withAuth(srv.authenticateWebUser))
 	srv.POST("/:version/users/:user/ssh/authenticate", srv.withAuth(srv.authenticateSSHUser))
@@ -103,17 +104,11 @@ func NewAPIServer(config *APIConfig) http.Handler {
 
 	// Servers and presence heartbeat
 	srv.POST("/:version/namespaces/:namespace/nodes", srv.withAuth(srv.upsertNode))
-	srv.POST("/:version/namespaces/:namespace/nodes/keepalive", srv.withAuth(srv.keepAliveNode))
-	srv.PUT("/:version/namespaces/:namespace/nodes", srv.withAuth(srv.upsertNodes))
 	srv.GET("/:version/namespaces/:namespace/nodes", srv.withAuth(srv.getNodes))
-	srv.DELETE("/:version/namespaces/:namespace/nodes", srv.withAuth(srv.deleteAllNodes))
-	srv.DELETE("/:version/namespaces/:namespace/nodes/:name", srv.withAuth(srv.deleteNode))
 	srv.POST("/:version/authservers", srv.withAuth(srv.upsertAuthServer))
 	srv.GET("/:version/authservers", srv.withAuth(srv.getAuthServers))
 	srv.POST("/:version/proxies", srv.withAuth(srv.upsertProxy))
 	srv.GET("/:version/proxies", srv.withAuth(srv.getProxies))
-	srv.DELETE("/:version/proxies", srv.withAuth(srv.deleteAllProxies))
-	srv.DELETE("/:version/proxies/:name", srv.withAuth(srv.deleteProxy))
 	srv.POST("/:version/tunnelconnections", srv.withAuth(srv.upsertTunnelConnection))
 	srv.GET("/:version/tunnelconnections/:cluster", srv.withAuth(srv.getTunnelConnections))
 	srv.GET("/:version/tunnelconnections", srv.withAuth(srv.getAllTunnelConnections))
@@ -153,7 +148,7 @@ func NewAPIServer(config *APIConfig) http.Handler {
 	srv.GET("/:version/namespaces/:namespace/sessions", srv.withAuth(srv.getSessions))
 	srv.GET("/:version/namespaces/:namespace/sessions/:id", srv.withAuth(srv.getSession))
 	srv.POST("/:version/namespaces/:namespace/sessions/:id/slice", srv.withAuth(srv.postSessionSlice))
-	srv.POST("/:version/namespaces/:namespace/sessions/:id/recording", srv.withAuth(srv.uploadSessionRecording))
+	srv.POST("/:version/namespaces/:namespace/sessions/:id/stream", srv.withAuth(srv.postSessionChunk))
 	srv.GET("/:version/namespaces/:namespace/sessions/:id/stream", srv.withAuth(srv.getSessionChunk))
 	srv.GET("/:version/namespaces/:namespace/sessions/:id/events", srv.withAuth(srv.getSessionEvents))
 
@@ -175,7 +170,6 @@ func NewAPIServer(config *APIConfig) http.Handler {
 	srv.GET("/:version/configuration/name", srv.withAuth(srv.getClusterName))
 	srv.POST("/:version/configuration/name", srv.withAuth(srv.setClusterName))
 	srv.GET("/:version/configuration/static_tokens", srv.withAuth(srv.getStaticTokens))
-	srv.DELETE("/:version/configuration/static_tokens", srv.withAuth(srv.deleteStaticTokens))
 	srv.POST("/:version/configuration/static_tokens", srv.withAuth(srv.setStaticTokens))
 	srv.GET("/:version/authentication/preference", srv.withAuth(srv.getClusterAuthPreference))
 	srv.POST("/:version/authentication/preference", srv.withAuth(srv.setClusterAuthPreference))
@@ -239,7 +233,8 @@ type HandlerWithAuthFunc func(auth ClientI, w http.ResponseWriter, r *http.Reque
 func (s *APIServer) withAuth(handler HandlerWithAuthFunc) httprouter.Handle {
 	const accessDeniedMsg = "auth API: access denied "
 	return httplib.MakeHandler(func(w http.ResponseWriter, r *http.Request, p httprouter.Params) (interface{}, error) {
-		// HTTPS server expects auth  context to be set by the auth middleware
+		// SSH-to-HTTP gateway (tun server) expects the auth
+		// context to be set by SSH server
 		authContext, err := s.Authorizer.Authorize(r.Context())
 		if err != nil {
 			// propagate connection problem error so we can differentiate
@@ -307,11 +302,9 @@ func (s *APIServer) upsertServer(auth ClientI, role teleport.Role, w http.Respon
 			return nil, trace.BadParameter("invalid namespace %q", namespace)
 		}
 		server.SetNamespace(namespace)
-		handle, err := auth.UpsertNode(server)
-		if err != nil {
+		if err := auth.UpsertNode(server); err != nil {
 			return nil, trace.Wrap(err)
 		}
-		return handle, nil
 	case teleport.RoleAuth:
 		if err := auth.UpsertAuthServer(server); err != nil {
 			return nil, trace.Wrap(err)
@@ -321,46 +314,6 @@ func (s *APIServer) upsertServer(auth ClientI, role teleport.Role, w http.Respon
 			return nil, trace.Wrap(err)
 		}
 	}
-	return message("ok"), nil
-}
-
-// keepAliveNode updates node TTL in the backend
-func (s *APIServer) keepAliveNode(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
-	var handle services.KeepAlive
-	if err := httplib.ReadJSON(r, &handle); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	if err := auth.KeepAliveNode(r.Context(), handle); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return message("ok"), nil
-}
-
-type upsertNodesReq struct {
-	Nodes     json.RawMessage `json:"nodes"`
-	Namespace string          `json:"namespace"`
-}
-
-// upsertNodes is used to bulk insert nodes into the backend.
-func (s *APIServer) upsertNodes(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
-	var req upsertNodesReq
-	if err := httplib.ReadJSON(r, &req); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	if !services.IsValidNamespace(req.Namespace) {
-		return nil, trace.BadParameter("invalid namespace %q", req.Namespace)
-	}
-
-	nodes, err := services.GetServerMarshaler().UnmarshalServers(req.Nodes)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	err = auth.UpsertNodes(req.Namespace, nodes)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
 	return message("ok"), nil
 }
 
@@ -375,50 +328,11 @@ func (s *APIServer) getNodes(auth ClientI, w http.ResponseWriter, r *http.Reques
 	if !services.IsValidNamespace(namespace) {
 		return nil, trace.BadParameter("invalid namespace %q", namespace)
 	}
-	skipValidation, _, err := httplib.ParseBool(r.URL.Query(), "skip_validation")
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	var opts []services.MarshalOption
-	if skipValidation {
-		opts = append(opts, services.SkipValidation())
-	}
-
-	servers, err := auth.GetNodes(namespace, opts...)
+	servers, err := auth.GetNodes(namespace)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 	return marshalServers(servers, version)
-}
-
-// deleteAllNodes deletes all nodes
-func (s *APIServer) deleteAllNodes(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
-	namespace := p.ByName("namespace")
-	if !services.IsValidNamespace(namespace) {
-		return nil, trace.BadParameter("invalid namespace %q", namespace)
-	}
-	err := auth.DeleteAllNodes(namespace)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return message("ok"), nil
-}
-
-// deleteNode deletes node
-func (s *APIServer) deleteNode(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
-	namespace := p.ByName("namespace")
-	if !services.IsValidNamespace(namespace) {
-		return nil, trace.BadParameter("invalid namespace %q", namespace)
-	}
-	name := p.ByName("name")
-	if name == "" {
-		return nil, trace.BadParameter("missing node name")
-	}
-	err := auth.DeleteNode(namespace, name)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return message("ok"), nil
 }
 
 // upsertProxy is called by remote SSH nodes when they ping back into the auth service
@@ -433,28 +347,6 @@ func (s *APIServer) getProxies(auth ClientI, w http.ResponseWriter, r *http.Requ
 		return nil, trace.Wrap(err)
 	}
 	return marshalServers(servers, version)
-}
-
-// deleteAllProxies deletes all proxies
-func (s *APIServer) deleteAllProxies(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
-	err := auth.DeleteAllProxies()
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return message("ok"), nil
-}
-
-// deleteProxy deletes proxy
-func (s *APIServer) deleteProxy(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
-	name := p.ByName("name")
-	if name == "" {
-		return nil, trace.BadParameter("missing proxy name")
-	}
-	err := auth.DeleteProxy(name)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return message("ok"), nil
 }
 
 // upsertAuthServer is called by remote Auth servers when they ping back into the auth service
@@ -474,7 +366,7 @@ func (s *APIServer) getAuthServers(auth ClientI, w http.ResponseWriter, r *http.
 func marshalServers(servers []services.Server, version string) (interface{}, error) {
 	items := make([]json.RawMessage, len(servers))
 	for i, server := range servers {
-		data, err := services.GetServerMarshaler().MarshalServer(server, services.WithVersion(version), services.PreserveResourceID())
+		data, err := services.GetServerMarshaler().MarshalServer(server, services.WithVersion(version))
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -515,7 +407,7 @@ func (s *APIServer) getReverseTunnels(auth ClientI, w http.ResponseWriter, r *ht
 	}
 	items := make([]json.RawMessage, len(reverseTunnels))
 	for i, tunnel := range reverseTunnels {
-		data, err := services.GetReverseTunnelMarshaler().MarshalReverseTunnel(tunnel, services.WithVersion(version), services.PreserveResourceID())
+		data, err := services.GetReverseTunnelMarshaler().MarshalReverseTunnel(tunnel, services.WithVersion(version))
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -553,7 +445,7 @@ func (s *APIServer) upsertTrustedCluster(auth ClientI, w http.ResponseWriter, r 
 		return nil, trace.Wrap(err)
 	}
 
-	return rawMessage(services.GetTrustedClusterMarshaler().Marshal(out, services.WithVersion(version), services.PreserveResourceID()))
+	return rawMessage(services.GetTrustedClusterMarshaler().Marshal(out, services.WithVersion(version)))
 }
 
 func (s *APIServer) validateTrustedCluster(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
@@ -603,7 +495,7 @@ func (s *APIServer) getTokens(auth ClientI, w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	return services.ProvisionTokensToV1(tokens), nil
+	return tokens, nil
 }
 
 // getTokens returns provisioning token by name
@@ -666,31 +558,31 @@ func (s *APIServer) getWebSession(auth ClientI, w http.ResponseWriter, r *http.R
 	return rawMessage(services.GetWebSessionMarshaler().MarshalWebSession(sess, services.WithVersion(version)))
 }
 
-type generateUserCertReq struct {
-	Key           []byte        `json:"key"`
-	User          string        `json:"user"`
-	TTL           time.Duration `json:"ttl"`
-	Compatibility string        `json:"compatibility,omitempty"`
+type signInReq struct {
+	Password string `json:"password"`
 }
 
-func (s *APIServer) generateUserCert(auth ClientI, w http.ResponseWriter, r *http.Request, _ httprouter.Params, version string) (interface{}, error) {
-	var req *generateUserCertReq
+func (s *APIServer) signIn(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
+	var req *signInReq
 	if err := httplib.ReadJSON(r, &req); err != nil {
 		return nil, trace.Wrap(err)
 	}
-	certificateFormat, err := utils.CheckCertificateFormatFlag(req.Compatibility)
+
+	user := p.ByName("user")
+	sess, err := auth.SignIn(user, []byte(req.Password))
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	cert, err := auth.GenerateUserCert(req.Key, req.User, req.TTL, certificateFormat)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return string(cert), nil
+	return rawMessage(services.GetWebSessionMarshaler().MarshalWebSession(sess, services.WithVersion(version)))
 }
 
-type signInReq struct {
-	Password string `json:"password"`
+func (s *APIServer) preAuthenticatedSignIn(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
+	user := p.ByName("user")
+	sess, err := auth.PreAuthenticatedSignIn(user)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	return rawMessage(services.GetWebSessionMarshaler().MarshalWebSession(sess, services.WithVersion(version)))
 }
 
 func (s *APIServer) u2fSignRequest(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
@@ -751,6 +643,14 @@ func (s *APIServer) authenticateSSHUser(auth ClientI, w http.ResponseWriter, r *
 	}
 	req.Username = p.ByName("user")
 	return auth.AuthenticateSSHUser(req)
+}
+
+func (s *APIServer) exchangeCerts(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
+	var req ExchangeCertsRequest
+	if err := httplib.ReadJSON(r, &req); err != nil {
+		return nil, trace.Wrap(err)
+	}
+	return auth.ExchangeCerts(req)
 }
 
 func (s *APIServer) changePassword(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
@@ -831,7 +731,7 @@ func (s *APIServer) getUser(auth ClientI, w http.ResponseWriter, r *http.Request
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	return rawMessage(services.GetUserMarshaler().MarshalUser(user, services.WithVersion(version), services.PreserveResourceID()))
+	return rawMessage(services.GetUserMarshaler().MarshalUser(user, services.WithVersion(version)))
 }
 
 func rawMessage(data []byte, err error) (interface{}, error) {
@@ -849,7 +749,7 @@ func (s *APIServer) getUsers(auth ClientI, w http.ResponseWriter, r *http.Reques
 	}
 	out := make([]json.RawMessage, len(users))
 	for i, user := range users {
-		data, err := services.GetUserMarshaler().MarshalUser(user, services.WithVersion(version), services.PreserveResourceID())
+		data, err := services.GetUserMarshaler().MarshalUser(user, services.WithVersion(version))
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -912,6 +812,69 @@ func (s *APIServer) generateHostCert(auth ClientI, w http.ResponseWriter, r *htt
 	return string(cert), nil
 }
 
+type generateUserCertReq struct {
+	Key           []byte        `json:"key"`
+	User          string        `json:"user"`
+	TTL           time.Duration `json:"ttl"`
+	Compatibility string        `json:"compatibility,omitempty"`
+}
+
+func (s *APIServer) generateUserCert(auth ClientI, w http.ResponseWriter, r *http.Request, _ httprouter.Params, version string) (interface{}, error) {
+	var req *generateUserCertReq
+	if err := httplib.ReadJSON(r, &req); err != nil {
+		return nil, trace.Wrap(err)
+	}
+	certificateFormat, err := utils.CheckCertificateFormatFlag(req.Compatibility)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	cert, err := auth.GenerateUserCert(req.Key, req.User, req.TTL, certificateFormat)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	return string(cert), nil
+}
+
+type sshUserCertBundleResponse struct {
+	Username    string                     `json:"username"`
+	Cert        []byte                     `json:"cert"`
+	HostSigners []services.CertAuthorityV1 `json:"host_signers"`
+}
+
+func (s *APIServer) generateUserCertBundle(auth ClientI, w http.ResponseWriter, r *http.Request, _ httprouter.Params, version string) (interface{}, error) {
+	var req *generateUserCertReq
+
+	if err := httplib.ReadJSON(r, &req); err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	// create the user certificate
+	certificateFormat, err := utils.CheckCertificateFormatFlag(req.Compatibility)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	cert, err := auth.GenerateUserCert(req.Key, req.User, req.TTL, certificateFormat)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	// get the host ca
+	hostSigners, err := auth.GetCertAuthorities(services.HostCA, false)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	signers, err := services.CertAuthoritiesToV1(hostSigners)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	return &sshUserCertBundleResponse{
+		Username:    req.User,
+		Cert:        cert,
+		HostSigners: signers,
+	}, nil
+}
+
 func (s *APIServer) generateToken(auth ClientI, w http.ResponseWriter, r *http.Request, _ httprouter.Params, version string) (interface{}, error) {
 	var req GenerateTokenRequest
 	if err := httplib.ReadJSON(r, &req); err != nil {
@@ -929,10 +892,6 @@ func (s *APIServer) registerUsingToken(auth ClientI, w http.ResponseWriter, r *h
 	if err := httplib.ReadJSON(r, &req); err != nil {
 		return nil, trace.Wrap(err)
 	}
-
-	// Pass along the remote address the request came from to the registration function.
-	req.RemoteAddr = r.RemoteAddr
-
 	keys, err := auth.RegisterUsingToken(req)
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -962,26 +921,12 @@ func (s *APIServer) generateServerKeys(auth ClientI, w http.ResponseWriter, r *h
 		return nil, trace.Wrap(err)
 	}
 
-	// Pass along the remote address the request came from to the registration function.
-	req.RemoteAddr = r.RemoteAddr
-
 	keys, err := auth.GenerateServerKeys(req)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 
 	return keys, nil
-}
-
-func (s *APIServer) rotateCertAuthority(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
-	var req RotateRequest
-	if err := httplib.ReadJSON(r, &req); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	if err := auth.RotateCertAuthority(req); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return message("ok"), nil
 }
 
 type upsertCertAuthorityRawReq struct {
@@ -1007,25 +952,6 @@ func (s *APIServer) upsertCertAuthority(auth ClientI, w http.ResponseWriter, r *
 	return message("ok"), nil
 }
 
-type rotateExternalCertAuthorityRawReq struct {
-	CA json.RawMessage `json:"ca"`
-}
-
-func (s *APIServer) rotateExternalCertAuthority(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
-	var req rotateExternalCertAuthorityRawReq
-	if err := httplib.ReadJSON(r, &req); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	ca, err := services.GetCertAuthorityMarshaler().UnmarshalCertAuthority(req.CA)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	if err := auth.RotateExternalCertAuthority(ca); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return message("ok"), nil
-}
-
 func (s *APIServer) getCertAuthorities(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
 	loadKeys, _, err := httplib.ParseBool(r.URL.Query(), "load_keys")
 	if err != nil {
@@ -1038,7 +964,7 @@ func (s *APIServer) getCertAuthorities(auth ClientI, w http.ResponseWriter, r *h
 	}
 	items := make([]json.RawMessage, len(certs))
 	for i, cert := range certs {
-		data, err := services.GetCertAuthorityMarshaler().MarshalCertAuthority(cert, services.WithVersion(version), services.PreserveResourceID())
+		data, err := services.GetCertAuthorityMarshaler().MarshalCertAuthority(cert, services.WithVersion(version))
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -1060,7 +986,7 @@ func (s *APIServer) getCertAuthority(auth ClientI, w http.ResponseWriter, r *htt
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	return rawMessage(services.GetCertAuthorityMarshaler().MarshalCertAuthority(ca, services.WithVersion(version), services.PreserveResourceID()))
+	return rawMessage(services.GetCertAuthorityMarshaler().MarshalCertAuthority(ca, services.WithVersion(version)))
 }
 
 func (s *APIServer) getDomainName(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
@@ -1069,16 +995,6 @@ func (s *APIServer) getDomainName(auth ClientI, w http.ResponseWriter, r *http.R
 		return nil, trace.Wrap(err)
 	}
 	return domain, nil
-}
-
-// getClusterCACert returns the CAs for the local cluster without signing keys.
-func (s *APIServer) getClusterCACert(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
-	localCA, err := auth.GetClusterCACert()
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	return localCA, nil
 }
 
 // getU2FAppID returns the U2F AppID in the auth configuration
@@ -1645,7 +1561,7 @@ func (s *APIServer) getGithubConnectors(auth ClientI, w http.ResponseWriter, r *
 	}
 	items := make([]json.RawMessage, len(connectors))
 	for i, connector := range connectors {
-		bytes, err := services.GetGithubConnectorMarshaler().Marshal(connector, services.PreserveResourceID())
+		bytes, err := services.GetGithubConnectorMarshaler().Marshal(connector)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -1669,7 +1585,7 @@ func (s *APIServer) getGithubConnector(auth ClientI, w http.ResponseWriter, r *h
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	return rawMessage(services.GetGithubConnectorMarshaler().Marshal(connector, services.PreserveResourceID()))
+	return rawMessage(services.GetGithubConnectorMarshaler().Marshal(connector))
 }
 
 /* deleteGithubConnector deletes the specified Github connector
@@ -1759,7 +1675,7 @@ func (s *APIServer) validateGithubAuthCallback(auth ClientI, w http.ResponseWrit
 	}
 	if response.Session != nil {
 		rawSession, err := services.GetWebSessionMarshaler().MarshalWebSession(
-			response.Session, services.WithVersion(version), services.PreserveResourceID())
+			response.Session, services.WithVersion(version))
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -1768,7 +1684,7 @@ func (s *APIServer) validateGithubAuthCallback(auth ClientI, w http.ResponseWrit
 	raw.HostSigners = make([]json.RawMessage, len(response.HostSigners))
 	for i, ca := range response.HostSigners {
 		data, err := services.GetCertAuthorityMarshaler().MarshalCertAuthority(
-			ca, services.WithVersion(version), services.PreserveResourceID())
+			ca, services.WithVersion(version))
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -1865,31 +1781,17 @@ func (s *APIServer) searchSessionEvents(auth ClientI, w http.ResponseWriter, r *
 }
 
 type auditEventReq struct {
-	// Event is the event that's being emitted.
-	Event events.Event `json:"event"`
-	// Fields is the additional event fields.
+	Type   string             `json:"type"`
 	Fields events.EventFields `json:"fields"`
-	// Type is the event type.
-	//
-	// This field is obsolete and kept for backwards compatibility.
-	Type string `json:"type"`
 }
 
 // HTTP	POST /:version/events
 func (s *APIServer) emitAuditEvent(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
 	var req auditEventReq
-	err := httplib.ReadJSON(r, &req)
-	if err != nil {
+	if err := httplib.ReadJSON(r, &req); err != nil {
 		return nil, trace.Wrap(err)
 	}
-	// For backwards compatibility, check if the full event struct has
-	// been sent in the request or just the event type.
-	if req.Event.Name != "" {
-		err = auth.EmitAuditEvent(req.Event, req.Fields)
-	} else {
-		err = auth.EmitAuditEvent(events.Event{Name: req.Type}, req.Fields)
-	}
-	if err != nil {
+	if err := auth.EmitAuditEvent(req.Type, req.Fields); err != nil {
 		return nil, trace.Wrap(err)
 	}
 	return message("ok"), nil
@@ -1911,34 +1813,17 @@ func (s *APIServer) postSessionSlice(auth ClientI, w http.ResponseWriter, r *htt
 	return message("ok"), nil
 }
 
-// HTTP POST /:version/sessions/:id/recording
-func (s *APIServer) uploadSessionRecording(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
-	var files form.Files
-	var namespace, sid string
-
-	err := form.Parse(r,
-		form.FileSlice("recording", &files),
-		form.String("namespace", &namespace, form.Required()),
-		form.String("sid", &sid, form.Required()),
-	)
+// HTTP POST /:version/sessions/:id/stream
+func (s *APIServer) postSessionChunk(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
+	sid, err := session.ParseID(p.ByName("id"))
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	if r.MultipartForm != nil {
-		defer r.MultipartForm.RemoveAll()
-	}
+	namespace := p.ByName("namespace")
 	if !services.IsValidNamespace(namespace) {
 		return nil, trace.BadParameter("invalid namespace %q", namespace)
 	}
-	if len(files) != 1 {
-		return nil, trace.BadParameter("expected a single file parameter but got %d", len(files))
-	}
-	defer files[0].Close()
-	if err = auth.UploadSessionRecording(events.SessionRecording{
-		SessionID: session.ID(sid),
-		Namespace: namespace,
-		Recording: files[0],
-	}); err != nil {
+	if err = auth.PostSessionChunk(namespace, *sid, r.Body); err != nil {
 		return nil, trace.Wrap(err)
 	}
 	return message("ok"), nil
@@ -1998,12 +1883,7 @@ func (s *APIServer) getSessionEvents(auth ClientI, w http.ResponseWriter, r *htt
 	if err != nil {
 		afterN = 0
 	}
-	includePrintEvents, err := strconv.ParseBool(r.URL.Query().Get("print"))
-	if err != nil {
-		includePrintEvents = false
-	}
-
-	return auth.GetSessionEvents(namespace, *sid, afterN, includePrintEvents)
+	return auth.GetSessionEvents(namespace, *sid, afterN)
 }
 
 type upsertNamespaceReq struct {
@@ -2068,7 +1948,7 @@ func (s *APIServer) upsertRole(auth ClientI, w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	err = auth.UpsertRole(role)
+	err = auth.UpsertRole(role, backend.Forever)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -2080,7 +1960,7 @@ func (s *APIServer) getRole(auth ClientI, w http.ResponseWriter, r *http.Request
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	return rawMessage(services.GetRoleMarshaler().MarshalRole(role, services.WithVersion(version), services.PreserveResourceID()))
+	return rawMessage(services.GetRoleMarshaler().MarshalRole(role, services.WithVersion(version)))
 }
 
 func (s *APIServer) getRoles(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
@@ -2090,7 +1970,7 @@ func (s *APIServer) getRoles(auth ClientI, w http.ResponseWriter, r *http.Reques
 	}
 	out := make([]json.RawMessage, len(roles))
 	for i, role := range roles {
-		raw, err := services.GetRoleMarshaler().MarshalRole(role, services.WithVersion(version), services.PreserveResourceID())
+		raw, err := services.GetRoleMarshaler().MarshalRole(role, services.WithVersion(version))
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -2113,7 +1993,7 @@ func (s *APIServer) getClusterConfig(auth ClientI, w http.ResponseWriter, r *htt
 		return nil, trace.Wrap(err)
 	}
 
-	return rawMessage(services.GetClusterConfigMarshaler().Marshal(cc, services.WithVersion(version), services.PreserveResourceID()))
+	return rawMessage(services.GetClusterConfigMarshaler().Marshal(cc, services.WithVersion(version)))
 }
 
 type setClusterConfigReq struct {
@@ -2138,7 +2018,7 @@ func (s *APIServer) setClusterConfig(auth ClientI, w http.ResponseWriter, r *htt
 		return nil, trace.Wrap(err)
 	}
 
-	return message("cluster config set"), nil
+	return message(fmt.Sprintf("cluster config set: %+v", cc)), nil
 }
 
 func (s *APIServer) getClusterName(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
@@ -2147,7 +2027,7 @@ func (s *APIServer) getClusterName(auth ClientI, w http.ResponseWriter, r *http.
 		return nil, trace.Wrap(err)
 	}
 
-	return rawMessage(services.GetClusterNameMarshaler().Marshal(cn, services.WithVersion(version), services.PreserveResourceID()))
+	return rawMessage(services.GetClusterNameMarshaler().Marshal(cn, services.WithVersion(version)))
 }
 
 type setClusterNameReq struct {
@@ -2181,15 +2061,7 @@ func (s *APIServer) getStaticTokens(auth ClientI, w http.ResponseWriter, r *http
 		return nil, trace.Wrap(err)
 	}
 
-	return rawMessage(services.GetStaticTokensMarshaler().Marshal(st, services.WithVersion(version), services.PreserveResourceID()))
-}
-
-func (s *APIServer) deleteStaticTokens(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
-	err := auth.DeleteStaticTokens()
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return message("ok"), nil
+	return rawMessage(services.GetStaticTokensMarshaler().Marshal(st, services.WithVersion(version)))
 }
 
 type setStaticTokensReq struct {
@@ -2223,7 +2095,7 @@ func (s *APIServer) getClusterAuthPreference(auth ClientI, w http.ResponseWriter
 		return nil, trace.Wrap(err)
 	}
 
-	return rawMessage(services.GetAuthPreferenceMarshaler().Marshal(cap, services.WithVersion(version), services.PreserveResourceID()))
+	return rawMessage(services.GetAuthPreferenceMarshaler().Marshal(cap, services.WithVersion(version)))
 }
 
 type setClusterAuthPreferenceReq struct {
@@ -2279,7 +2151,7 @@ func (s *APIServer) getTunnelConnections(auth ClientI, w http.ResponseWriter, r 
 	}
 	items := make([]json.RawMessage, len(conns))
 	for i, conn := range conns {
-		data, err := services.MarshalTunnelConnection(conn, services.WithVersion(version), services.PreserveResourceID())
+		data, err := services.MarshalTunnelConnection(conn, services.WithVersion(version))
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -2296,7 +2168,7 @@ func (s *APIServer) getAllTunnelConnections(auth ClientI, w http.ResponseWriter,
 	}
 	items := make([]json.RawMessage, len(conns))
 	for i, conn := range conns {
-		data, err := services.MarshalTunnelConnection(conn, services.WithVersion(version), services.PreserveResourceID())
+		data, err := services.MarshalTunnelConnection(conn, services.WithVersion(version))
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -2361,7 +2233,7 @@ func (s *APIServer) getRemoteClusters(auth ClientI, w http.ResponseWriter, r *ht
 	}
 	items := make([]json.RawMessage, len(clusters))
 	for i, cluster := range clusters {
-		data, err := services.MarshalRemoteCluster(cluster, services.WithVersion(version), services.PreserveResourceID())
+		data, err := services.MarshalRemoteCluster(cluster, services.WithVersion(version))
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -2376,7 +2248,7 @@ func (s *APIServer) getRemoteCluster(auth ClientI, w http.ResponseWriter, r *htt
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	return rawMessage(services.MarshalRemoteCluster(cluster, services.WithVersion(version), services.PreserveResourceID()))
+	return rawMessage(services.MarshalRemoteCluster(cluster, services.WithVersion(version)))
 }
 
 // deleteRemoteCluster deletes remote cluster by name
@@ -2395,21 +2267,6 @@ func (s *APIServer) deleteAllRemoteClusters(auth ClientI, w http.ResponseWriter,
 		return nil, trace.Wrap(err)
 	}
 	return message("ok"), nil
-}
-
-func (s *APIServer) processKubeCSR(auth ClientI, w http.ResponseWriter, r *http.Request, p httprouter.Params, version string) (interface{}, error) {
-	var req KubeCSR
-
-	if err := httplib.ReadJSON(r, &req); err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	re, err := auth.ProcessKubeCSR(req)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	return re, nil
 }
 
 func message(msg string) map[string]interface{} {

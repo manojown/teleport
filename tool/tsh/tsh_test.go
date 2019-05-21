@@ -24,13 +24,13 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/gravitational/teleport/lib/client"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/utils"
 
 	"gopkg.in/check.v1"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // bootstrap check
@@ -40,7 +40,8 @@ func TestTshMain(t *testing.T) {
 }
 
 // register test suite
-type MainTestSuite struct{}
+type MainTestSuite struct {
+}
 
 var _ = check.Suite(&MainTestSuite{})
 
@@ -63,8 +64,8 @@ func (s *MainTestSuite) TestMakeClient(c *check.C) {
 	tc, err = makeClient(&conf, true)
 	c.Assert(err, check.IsNil)
 	c.Assert(tc, check.NotNil)
-	c.Assert(tc.Config.SSHProxyAddr, check.Equals, "proxy:3023")
-	c.Assert(tc.Config.WebProxyAddr, check.Equals, "proxy:3080")
+	c.Assert(tc.Config.ProxySSHHostPort(), check.Equals, "proxy:3023")
+	c.Assert(tc.Config.ProxyWebHostPort(), check.Equals, "proxy:3080")
 	localUser, err := client.Username()
 	c.Assert(err, check.IsNil)
 	c.Assert(tc.Config.HostLogin, check.Equals, localUser)
@@ -75,7 +76,6 @@ func (s *MainTestSuite) TestMakeClient(c *check.C) {
 	conf.UserHost = "root@localhost"
 	conf.NodePort = 46528
 	conf.LocalForwardPorts = []string{"80:remote:180"}
-	conf.DynamicForwardedPorts = []string{":8080"}
 	tc, err = makeClient(&conf, true)
 	c.Assert(tc.Config.KeyTTL, check.Equals, time.Minute*time.Duration(conf.MinsToLive))
 	c.Assert(tc.Config.HostLogin, check.Equals, "root")
@@ -85,12 +85,6 @@ func (s *MainTestSuite) TestMakeClient(c *check.C) {
 			SrcPort:  80,
 			DestHost: "remote",
 			DestPort: 180,
-		},
-	})
-	c.Assert(tc.Config.DynamicForwardedPorts, check.DeepEquals, client.DynamicForwardedPorts{
-		{
-			SrcIP:   "127.0.0.1",
-			SrcPort: 8080,
 		},
 	})
 }
@@ -132,78 +126,4 @@ func (s *MainTestSuite) TestIdentityRead(c *check.C) {
 	// host auth callback must succeed
 	err = hostAuthCallback(hosts[0], a, cert)
 	c.Assert(err, check.IsNil)
-}
-
-func (s *MainTestSuite) TestOptions(c *check.C) {
-	tests := []struct {
-		inOptions  []string
-		outError   bool
-		outOptions Options
-	}{
-		// Valid
-		{
-			inOptions: []string{
-				"AddKeysToAgent yes",
-			},
-			outError: false,
-			outOptions: Options{
-				AddKeysToAgent:        true,
-				ForwardAgent:          false,
-				RequestTTY:            false,
-				StrictHostKeyChecking: true,
-			},
-		},
-		// Valid
-		{
-			inOptions: []string{
-				"AddKeysToAgent=yes",
-			},
-			outError: false,
-			outOptions: Options{
-				AddKeysToAgent:        true,
-				ForwardAgent:          false,
-				RequestTTY:            false,
-				StrictHostKeyChecking: true,
-			},
-		},
-		// Invalid value.
-		{
-			inOptions: []string{
-				"AddKeysToAgent foo",
-			},
-			outError:   true,
-			outOptions: Options{},
-		},
-		// Invalid key.
-		{
-			inOptions: []string{
-				"foo foo",
-			},
-			outError:   true,
-			outOptions: Options{},
-		},
-		// Incomplete option.
-		{
-			inOptions: []string{
-				"AddKeysToAgent",
-			},
-			outError:   true,
-			outOptions: Options{},
-		},
-	}
-
-	for _, tt := range tests {
-		options, err := parseOptions(tt.inOptions)
-		if tt.outError {
-			c.Assert(err, check.NotNil)
-			continue
-		} else {
-			c.Assert(err, check.IsNil)
-		}
-
-		c.Assert(options.AddKeysToAgent, check.Equals, tt.outOptions.AddKeysToAgent)
-		c.Assert(options.ForwardAgent, check.Equals, tt.outOptions.ForwardAgent)
-		c.Assert(options.RequestTTY, check.Equals, tt.outOptions.RequestTTY)
-		c.Assert(options.StrictHostKeyChecking, check.Equals, tt.outOptions.StrictHostKeyChecking)
-	}
 }

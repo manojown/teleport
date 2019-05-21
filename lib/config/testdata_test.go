@@ -13,7 +13,6 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-
 package config
 
 const StaticConfigString = `
@@ -22,7 +21,7 @@ const StaticConfigString = `
 #
 teleport:
   nodename: edsger.example.com
-  advertise_ip: 10.10.10.1:3022
+  advertise_ip: 10.10.10.1
   pid_file: /var/run/teleport.pid
   auth_servers:
     - auth0.server.example.org:3024
@@ -78,9 +77,6 @@ auth_service:
         addresses: ["com-1", "com-2"]
       - domain_name: tunnel.example.org
         addresses: ["org-1"]
-  public_addr: ["auth.default.svc.cluster.local:3080"]
-  disconnect_expired_cert: yes
-  client_idle_timeout: 17s
 
 ssh_service:
   enabled: no
@@ -95,7 +91,6 @@ ssh_service:
   - name: date
     command: [/bin/date]
     period: 20ms
-  public_addr: "luna3:22"
 `
 
 const SmallConfigString = `
@@ -134,27 +129,6 @@ proxy_service:
   enabled: yes
   web_listen_addr: webhost
   tunnel_listen_addr: tunnelhost:1001
-  public_addr: web3:443
-`
-
-// NoServicesConfigString is a configuration file with no services enabled
-// but with values for all services set.
-const NoServicesConfigString = `
-teleport:
-  nodename: node.example.com
-
-auth_service:
-  enabled: no
-  cluster_name: "example.com"
-  public_addr: "auth.example.com"
-
-ssh_service:
-  enabled: no
-  public_addr: "ssh.example.com"
-
-proxy_service:
-  enabled: no
-  public_addr: "proxy.example.com"
 `
 
 // LegacyAuthenticationSection is the deprecated format for authentication method. We still

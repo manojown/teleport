@@ -38,13 +38,13 @@ import (
 	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
-	"github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 // proxySubsys implements an SSH subsystem for proxying listening sockets from
 // remote hosts to a proxy client (AKA port mapping)
 type proxySubsys struct {
-	log          *logrus.Entry
+	log          *log.Entry
 	srv          *Server
 	host         string
 	port         string
@@ -117,7 +117,7 @@ func parseProxySubsys(request string, srv *Server, ctx *srv.ServerContext) (*pro
 	}
 
 	return &proxySubsys{
-		log: logrus.WithFields(logrus.Fields{
+		log: log.WithFields(log.Fields{
 			trace.Component:       teleport.ComponentSubsystemProxy,
 			trace.ComponentFields: map[string]string{},
 		}),
@@ -141,7 +141,7 @@ func (t *proxySubsys) String() string {
 // a mapping connection between a client & remote node we're proxying to)
 func (t *proxySubsys) Start(sconn *ssh.ServerConn, ch ssh.Channel, req *ssh.Request, ctx *srv.ServerContext) error {
 	// once we start the connection, update logger to include component fields
-	t.log = logrus.WithFields(logrus.Fields{
+	t.log = log.WithFields(log.Fields{
 		trace.Component: teleport.ComponentSubsystemProxy,
 		trace.ComponentFields: map[string]string{
 			"src": sconn.RemoteAddr().String(),
@@ -187,16 +187,16 @@ func (t *proxySubsys) Start(sconn *ssh.ServerConn, ch ssh.Channel, req *ssh.Requ
 			site = sites[0]
 			t.log.Debugf("Cluster not specified. connecting to default='%s'", site.GetName())
 		}
-		return t.proxyToHost(ctx, site, clientAddr, ch)
+		return t.proxyToHost(site, clientAddr, ch)
 	}
 	// connect to a site's auth server:
-	return t.proxyToSite(ctx, site, clientAddr, ch)
+	return t.proxyToSite(site, clientAddr, ch)
 }
 
 // proxyToSite establishes a proxy connection from the connected SSH client to the
 // auth server of the requested remote site
 func (t *proxySubsys) proxyToSite(
-	ctx *srv.ServerContext, site reversetunnel.RemoteSite, remoteAddr net.Addr, ch ssh.Channel) error {
+	site reversetunnel.RemoteSite, remoteAddr net.Addr, ch ssh.Channel) error {
 
 	conn, err := site.DialAuthServer()
 	if err != nil {
@@ -218,7 +218,7 @@ func (t *proxySubsys) proxyToSite(
 			t.close(err)
 		}()
 		defer conn.Close()
-		_, err = io.Copy(conn, srv.NewTrackingReader(ctx, ch))
+		_, err = io.Copy(conn, ch)
 
 	}()
 
@@ -228,7 +228,7 @@ func (t *proxySubsys) proxyToSite(
 // proxyToHost establishes a proxy connection from the connected SSH client to the
 // requested remote node (t.host:t.port) via the given site
 func (t *proxySubsys) proxyToHost(
-	ctx *srv.ServerContext, site reversetunnel.RemoteSite, remoteAddr net.Addr, ch ssh.Channel) error {
+	site reversetunnel.RemoteSite, remoteAddr net.Addr, ch ssh.Channel) error {
 	//
 	// first, lets fetch a list of servers at the given site. this allows us to
 	// match the given "host name" against node configuration (their 'nodename' setting)
@@ -240,11 +240,11 @@ func (t *proxySubsys) proxyToHost(
 		servers []services.Server
 		err     error
 	)
-	localCluster, _ := t.srv.authService.GetClusterName()
+	localDomain, _ := t.srv.authService.GetDomainName()
 	// going to "local" CA? lets use the caching 'auth service' directly and avoid
 	// hitting the reverse tunnel link (it can be offline if the CA is down)
-	if site.GetName() == localCluster.GetName() {
-		servers, err = t.srv.authService.GetNodes(t.namespace, services.SkipValidation())
+	if site.GetName() == localDomain {
+		servers, err = t.srv.authService.GetNodes(t.namespace)
 		if err != nil {
 			t.log.Warn(err)
 		}
@@ -254,7 +254,7 @@ func (t *proxySubsys) proxyToHost(
 		if err != nil {
 			t.log.Warn(err)
 		} else {
-			servers, err = siteClient.GetNodes(t.namespace, services.SkipValidation())
+			servers, err = siteClient.GetNodes(t.namespace)
 			if err != nil {
 				t.log.Warn(err)
 			}
@@ -284,8 +284,6 @@ func (t *proxySubsys) proxyToHost(
 		}
 	}
 
-	// Resolve the IP address to dial to because the hostname may not be
-	// DNS resolvable.
 	var serverAddr string
 	if server != nil {
 		serverAddr = server.GetAddr()
@@ -297,20 +295,13 @@ func (t *proxySubsys) proxyToHost(
 		t.log.Warnf("server lookup failed: using default=%v", serverAddr)
 	}
 
-	// Pass the agent along to the site. If the proxy is in recording mode, this
-	// agent is used to perform user authentication. Pass the DNS name to the
-	// dialer as well so the forwarding proxy can generate a host certificate
-	// with the correct hostname).
-	toAddr := &utils.NetAddr{
-		AddrNetwork: "tcp",
-		Addr:        serverAddr,
-	}
-	conn, err := site.Dial(reversetunnel.DialParams{
-		From:      remoteAddr,
-		To:        toAddr,
-		UserAgent: t.agent,
-		Address:   t.host,
-	})
+	// dial by IP address because the hostname may not be DNS resolvable
+	// pass the agent along to the site (if the proxy is in recording mode, this
+	// agent will be used for user auth)
+	conn, err := site.Dial(
+		remoteAddr,
+		&utils.NetAddr{Addr: serverAddr, AddrNetwork: "tcp"},
+		t.agent)
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -333,7 +324,7 @@ func (t *proxySubsys) proxyToHost(
 			t.close(err)
 		}()
 		defer conn.Close()
-		_, err = io.Copy(conn, srv.NewTrackingReader(ctx, ch))
+		_, err = io.Copy(conn, ch)
 	}()
 
 	return nil

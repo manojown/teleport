@@ -17,7 +17,6 @@ limitations under the License.
 package ui
 
 import (
-	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/utils"
@@ -58,8 +57,6 @@ type userContext struct {
 	Name string `json:"userName"`
 	// ACL contains user access control list
 	ACL userACL `json:"userAcl"`
-	// Version is the version of Teleport that is running.
-	Version string `json:"version"`
 }
 
 func getLogins(roleSet services.RoleSet) []string {
@@ -74,8 +71,7 @@ func getLogins(roleSet services.RoleSet) []string {
 	denied = utils.Deduplicate(denied)
 	userLogins := []string{}
 	for _, login := range allowed {
-		loginMatch, _ := services.MatchLogin(denied, login)
-		if loginMatch == false {
+		if services.MatchLogin(denied, login) == false {
 			userLogins = append(userLogins, login)
 		}
 	}
@@ -85,9 +81,7 @@ func getLogins(roleSet services.RoleSet) []string {
 
 func hasAccess(roleSet services.RoleSet, ctx *services.Context, kind string, verbs ...string) bool {
 	for _, verb := range verbs {
-		// Since this check occurs often and it does not imply the caller is trying
-		// to access any resource, silence any logging done on the proxy.
-		err := roleSet.CheckAccessToRule(ctx, defaults.Namespace, kind, verb, true)
+		err := roleSet.CheckAccessToRule(ctx, defaults.Namespace, kind, verb)
 		if err != nil {
 			return false
 		}
@@ -140,6 +134,5 @@ func NewUserContext(user services.User, userRoles services.RoleSet) (*userContex
 		Name:     user.GetName(),
 		ACL:      acl,
 		AuthType: authType,
-		Version:  teleport.Version,
 	}, nil
 }

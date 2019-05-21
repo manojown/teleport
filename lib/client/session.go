@@ -1,5 +1,3 @@
-// +build !windows
-
 /*
 Copyright 2016 Gravitational, Inc.
 
@@ -32,20 +30,20 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
-	"github.com/docker/docker/pkg/term"
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/defaults"
-	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/sshutils"
 	"github.com/gravitational/teleport/lib/utils"
 	"github.com/gravitational/trace"
+	"github.com/moby/moby/pkg/term"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type NodeSession struct {
 	// namespace is a session this namespace belongs to
 	namespace string
-
 	// id is the Teleport session ID
 	id session.ID
 
@@ -283,102 +281,81 @@ func (ns *NodeSession) allocateTerminal(termType string, s *ssh.Session) (io.Rea
 }
 
 func (ns *NodeSession) updateTerminalSize(s *ssh.Session) {
-	// SIGWINCH is sent to the process when the window size of the terminal has
-	// changed.
-	sigwinchCh := make(chan os.Signal, 1)
-	signal.Notify(sigwinchCh, syscall.SIGWINCH)
+	// sibscribe for "terminal resized" signal:
+	sigC := make(chan os.Signal, 1)
+	signal.Notify(sigC, syscall.SIGWINCH)
+	currentSize, _ := term.GetWinsize(0)
 
-	lastSize, err := term.GetWinsize(0)
+	// start the timer which asks for server-side window size changes:
+	siteClient, err := ns.nodeClient.Proxy.ConnectToSite(context.TODO(), true)
 	if err != nil {
-		log.Errorf("Unable to get window size: %v", err)
+		log.Error(err)
 		return
 	}
+	tick := time.NewTicker(defaults.SessionRefreshPeriod)
+	defer tick.Stop()
 
-	// Sync the local terminal with size received from the remote server every
-	// two seconds. If we try and do it live, synchronization jitters occur.
-	tickerCh := time.NewTicker(defaults.TerminalResizePeriod)
-	defer tickerCh.Stop()
-
+	var prevSess *session.Session
 	for {
 		select {
-		// The client updated the size of the local PTY. This change needs to occur
-		// on the server side PTY as well.
-		case sigwinch := <-sigwinchCh:
-			if sigwinch == nil {
+		// our own terminal window got resized:
+		case sig := <-sigC:
+			if sig == nil {
 				return
 			}
-
-			currSize, err := term.GetWinsize(0)
+			// get the size:
+			winSize, err := term.GetWinsize(0)
 			if err != nil {
-				log.Warnf("Unable to get window size: %v.", err)
+				log.Warnf("[CLIENT] Error getting size: %s", err)
+				break
+			}
+			// it's the result of our own size change (see below)
+			if winSize.Height == currentSize.Height && winSize.Width == currentSize.Width {
 				continue
 			}
-
-			// Terminal size has not changed, don't do anything.
-			if currSize.Height == lastSize.Height && currSize.Width == lastSize.Width {
-				continue
-			}
-
-			// Send the "window-change" request over the channel.
+			// send the new window size to the server
 			_, err = s.SendRequest(
-				sshutils.WindowChangeRequest,
-				false,
+				sshutils.WindowChangeRequest, false,
 				ssh.Marshal(sshutils.WinChangeReqParams{
-					W: uint32(currSize.Width),
-					H: uint32(currSize.Height),
+					W: uint32(winSize.Width),
+					H: uint32(winSize.Height),
 				}))
 			if err != nil {
-				log.Warnf("Unable to send %v reqest: %v.", sshutils.WindowChangeRequest, err)
-				continue
+				log.Warnf("[CLIENT] failed to send window change reqest: %v", err)
 			}
-
-			log.Debugf("Updated window size from %v to %v due to SIGWINCH.", lastSize, currSize)
-
-			lastSize = currSize
-
-		// Extract "resize" events in the stream and store the last window size.
-		case event := <-ns.nodeClient.TC.EventsChannel():
-			// Only "resize" events are important to tsh, all others can be ignored.
-			if event.GetType() != events.ResizeEvent {
-				continue
-			}
-
-			terminalParams, err := session.UnmarshalTerminalParams(event.GetString(events.TerminalSize))
+		case <-tick.C:
+			sess, err := siteClient.GetSession(ns.namespace, ns.id)
 			if err != nil {
-				log.Warnf("Unable to unmarshal terminal parameters: %v.", err)
+				if !trace.IsNotFound(err) {
+					log.Error(trace.DebugReport(err))
+				}
 				continue
 			}
+			// no previous session
+			if prevSess == nil || sess == nil {
+				prevSess = sess
+				continue
+			}
+			// nothing changed
+			if prevSess.TerminalParams.W == sess.TerminalParams.W && prevSess.TerminalParams.H == sess.TerminalParams.H {
+				continue
+			}
+			log.Infof("[CLIENT] updating the session %v with %d parties", sess.ID, len(sess.Parties))
 
-			lastSize = terminalParams.Winsize()
-			log.Debugf("Recevied window size %v from node in session %v.", lastSize, event.GetString(events.SessionEventID))
-
-		// Update size of local terminal with the last size received from remote server.
-		case <-tickerCh.C:
-			// Get the current size of the terminal and the last size report that was
-			// received.
-			currSize, err := term.GetWinsize(0)
+			newSize := sess.TerminalParams.Winsize()
+			currentSize, err = term.GetWinsize(0)
 			if err != nil {
-				log.Warnf("Unable to get current terminal size: %v.", err)
-				continue
+				log.Error(err)
 			}
-
-			// Terminal size has not changed, don't do anything.
-			if currSize.Width == lastSize.Width && currSize.Height == lastSize.Height {
-				continue
+			if currentSize.Width != newSize.Width || currentSize.Height != newSize.Height {
+				// ok, something have changed, let's resize to the new parameters
+				err = term.SetWinsize(0, newSize)
+				if err != nil {
+					log.Error(err)
+				}
+				os.Stdout.Write([]byte(fmt.Sprintf("\x1b[8;%d;%dt", newSize.Height, newSize.Width)))
 			}
-
-			// This changes the size of the local PTY. This will re-draw what's within
-			// the window.
-			err = term.SetWinsize(0, lastSize)
-			if err != nil {
-				log.Warnf("Unable to update terminal size: %v.", err)
-				continue
-			}
-
-			// This is what we use to resize the physical terminal window itself.
-			os.Stdout.Write([]byte(fmt.Sprintf("\x1b[8;%d;%dt", lastSize.Height, lastSize.Width)))
-
-			log.Debugf("Updated window size from %v to %v due to remote window change.", currSize, lastSize)
+			prevSess = sess
 		case <-ns.closer.C:
 			return
 		}
@@ -411,21 +388,17 @@ func (ns *NodeSession) runShell(callback ShellCreatedCallback) error {
 	})
 }
 
-// runCommand executes a "exec" request either in interactive mode (with a
-// TTY attached) or non-intractive mode (no TTY).
-func (ns *NodeSession) runCommand(ctx context.Context, cmd []string, callback ShellCreatedCallback, interactive bool) error {
-	// If stdin is not a terminal, refuse to allocate terminal on the server and
-	// fallback to non-interactive mode
+// runCommand executes a given command either in interactive (with terminal attached)
+// or non-intractive mode
+func (ns *NodeSession) runCommand(cmd []string, callback ShellCreatedCallback, interactive bool) error {
+	// stdin is not a terminal? refuse to allocate terminal on the server and go back
+	// to "non-interactive":
 	if interactive && ns.stdin == os.Stdin && !term.IsTerminal(os.Stdin.Fd()) {
 		interactive = false
 		fmt.Fprintf(os.Stderr, "TTY will not be allocated on the server because stdin is not a terminal\n")
 	}
 
-	// Start a interactive session ("exec" request with a TTY).
-	//
-	// Note that because a TTY was allocated, the terminal is in raw mode and any
-	// keyboard based signals will be propogated to the TTY on the server which is
-	// where all signal handling will occur.
+	// interactive session:
 	if interactive {
 		return ns.interactiveSession(func(s *ssh.Session, term io.ReadWriteCloser) error {
 			err := s.Start(strings.Join(cmd, " "))
@@ -441,45 +414,9 @@ func (ns *NodeSession) runCommand(ctx context.Context, cmd []string, callback Sh
 			return nil
 		})
 	}
-
-	// Start a non-interactive session ("exec" request without TTY).
-	//
-	// Note that for non-interactive sessions upon receipt of SIGINT the client
-	// should send a SSH_MSG_DISCONNECT and shut itself down as gracefully as
-	// possible. This is what the RFC recommends and what OpenSSH does:
-	//
-	//  * https://tools.ietf.org/html/rfc4253#section-11.1
-	//  * https://github.com/openssh/openssh-portable/blob/05046d907c211cb9b4cd21b8eff9e7a46cd6c5ab/clientloop.c#L1195-L1444
-	//
-	// Unfortunately at the moment the Go SSH library Teleport uses does not
-	// support sending SSH_MSG_DISCONNECT. Instead we close the SSH channel and
-	// SSH client, and try and exit as gracefully as possible.
+	// non-interactive session:
 	return ns.regularSession(func(s *ssh.Session) error {
-		var err error
-
-		runContext, cancel := context.WithCancel(context.Background())
-		go func() {
-			defer cancel()
-			err = s.Run(strings.Join(cmd, " "))
-		}()
-
-		select {
-		// Run returned a result, return that back to the caller.
-		case <-runContext.Done():
-			return trace.Wrap(err)
-		// The passed in context timed out. This is often due to the user hitting
-		// Ctrl-C.
-		case <-ctx.Done():
-			err = s.Close()
-			if err != nil {
-				log.Debugf("Unable to close SSH channel: %v", err)
-			}
-			err = ns.NodeClient().Client.Close()
-			if err != nil {
-				log.Debugf("Unable to close SSH client: %v", err)
-			}
-			return trace.ConnectionProblem(ctx.Err(), "connection canceled")
-		}
+		return s.Run(strings.Join(cmd, " "))
 	})
 }
 

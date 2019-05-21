@@ -1,7 +1,7 @@
 // +build dynamodb
 
 /*
-Copyright 2015-2018 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,18 +20,15 @@ limitations under the License.
 package dynamo
 
 import (
-	"context"
 	"testing"
-	"time"
 
-	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/backend/test"
 	"github.com/gravitational/teleport/lib/utils"
 
-	"gopkg.in/check.v1"
+	. "gopkg.in/check.v1"
 )
 
-func TestDynamoDB(t *testing.T) { check.TestingT(t) }
+func TestDynamoDB(t *testing.T) { TestingT(t) }
 
 type DynamoDBSuite struct {
 	bk        *DynamoDBBackend
@@ -39,65 +36,52 @@ type DynamoDBSuite struct {
 	tableName string
 }
 
-var _ = check.Suite(&DynamoDBSuite{})
+var _ = Suite(&DynamoDBSuite{})
 
-func (s *DynamoDBSuite) SetUpSuite(c *check.C) {
-	utils.InitLoggerForTests(testing.Verbose())
+func (s *DynamoDBSuite) SetUpSuite(c *C) {
+	utils.InitLoggerForTests()
+
 	var err error
-
 	s.tableName = "teleport.dynamo.test"
-	newBackend := func() (backend.Backend, error) {
-		return New(context.Background(), map[string]interface{}{
-			"table_name":         s.tableName,
-			"poll_stream_period": 300 * time.Millisecond,
-		})
-	}
-	bk, err := newBackend()
-	c.Assert(err, check.IsNil)
+	bk, err := New(map[string]interface{}{
+		"table_name": s.tableName,
+	})
+	c.Assert(err, IsNil)
 	s.bk = bk.(*DynamoDBBackend)
+	c.Assert(err, IsNil)
 	s.suite.B = s.bk
-	s.suite.NewBackend = newBackend
 }
 
-func (s *DynamoDBSuite) TearDownSuite(c *check.C) {
+func (s *DynamoDBSuite) TearDownSuite(c *C) {
 	if s.bk != nil && s.bk.svc != nil {
-		//		s.bk.deleteTable(context.Background(), s.tableName, false)
-		c.Assert(s.bk.Close(), check.IsNil)
+		s.bk.deleteTable(s.tableName, false)
 	}
 }
 
-func (s *DynamoDBSuite) TestCRUD(c *check.C) {
-	s.suite.CRUD(c)
+func (s *DynamoDBSuite) TearDownTest(c *C) {
+	c.Assert(s.bk.Close(), IsNil)
 }
 
-func (s *DynamoDBSuite) TestRange(c *check.C) {
-	s.suite.Range(c)
+func (s *DynamoDBSuite) TestBasicCRUD(c *C) {
+	s.suite.BasicCRUD(c)
 }
 
-func (s *DynamoDBSuite) TestDeleteRange(c *check.C) {
-	s.suite.DeleteRange(c)
+func (s *DynamoDBSuite) TestBatchCRUD(c *C) {
+	s.suite.BatchCRUD(c)
 }
 
-func (s *DynamoDBSuite) TestCompareAndSwap(c *check.C) {
-	s.suite.CompareAndSwap(c)
+func (s *DynamoDBSuite) TestDirectories(c *C) {
+	s.suite.Directories(c)
 }
 
-func (s *DynamoDBSuite) TestExpiration(c *check.C) {
+func (s *DynamoDBSuite) TestExpiration(c *C) {
 	s.suite.Expiration(c)
 }
 
-func (s *DynamoDBSuite) TestKeepAlive(c *check.C) {
-	s.suite.KeepAlive(c)
-}
-
-func (s *DynamoDBSuite) TestEvents(c *check.C) {
-	s.suite.Events(c)
-}
-
-func (s *DynamoDBSuite) TestWatchersClose(c *check.C) {
-	s.suite.WatchersClose(c)
-}
-
-func (s *DynamoDBSuite) TestLocking(c *check.C) {
+func (s *DynamoDBSuite) TestLock(c *C) {
 	s.suite.Locking(c)
+}
+
+func (s *DynamoDBSuite) TestValueAndTTL(c *C) {
+	s.suite.ValueAndTTL(c)
 }

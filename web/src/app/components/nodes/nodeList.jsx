@@ -204,6 +204,7 @@ class NodeList extends React.Component {
   render() {
     const { sshHistory, siteId, nodeRecords, logins, onLoginClick } = this.props;
     const searchValue = this.state.filter;
+    console.log("nodeRecords",nodeRecords);
     const data = this.sortAndFilter(nodeRecords);
     return (
       <div className="grv-nodes m-t">
@@ -228,7 +229,7 @@ class NodeList extends React.Component {
                   <SortHeaderCell
                     sortDir={this.state.colSortDirs.hostname}
                     onSortChange={this.onSortChange}
-                    title="Hostname"
+                    title="Hostname1"
                   />
                 }
                 cell={<TextCell /> }
@@ -240,6 +241,17 @@ class NodeList extends React.Component {
                     sortDir={this.state.colSortDirs.addr}
                     onSortChange={this.onSortChange}
                     title="Address"
+                  />
+                }
+                cell={<TextCell /> }
+              />
+              <Column
+                columnKey="alias"
+                header={
+                  <SortHeaderCell
+                    sortDir={this.state.colSortDirs.alias}
+                    onSortChange={this.onSortChange}
+                    title="Alias"
                   />
                 }
                 cell={<TextCell /> }

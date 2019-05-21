@@ -1,5 +1,5 @@
 /*
-Copyright 2016-2019 Gravitational, Inc.
+Copyright 2016 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log/syslog"
 	"os"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"github.com/gravitational/kingpin"
 	"github.com/gravitational/trace"
 	log "github.com/sirupsen/logrus"
+	logrusSyslog "github.com/sirupsen/logrus/hooks/syslog"
 )
 
 type LoggingPurpose int
@@ -41,39 +43,19 @@ const (
 )
 
 // InitLogger configures the global logger for a given purpose / verbosity level
-func InitLogger(purpose LoggingPurpose, level log.Level, verbose ...bool) {
+func InitLogger(purpose LoggingPurpose, level log.Level) {
 	log.StandardLogger().SetHooks(make(log.LevelHooks))
+	formatter := &trace.TextFormatter{DisableTimestamp: true}
+	log.SetFormatter(formatter)
 	log.SetLevel(level)
 
 	switch purpose {
 	case LoggingForCLI:
-		// If debug logging was asked for on the CLI, then write logs to stderr.
-		// Otherwise discard all logs.
-		if level == log.DebugLevel {
-			log.SetFormatter(&trace.TextFormatter{
-				DisableTimestamp: true,
-				EnableColors:     trace.IsTerminal(os.Stderr),
-			})
-			log.SetOutput(os.Stderr)
-		} else {
-			log.SetOutput(ioutil.Discard)
-		}
+		SwitchLoggingtoSyslog()
 	case LoggingForDaemon:
-		log.SetFormatter(&trace.TextFormatter{
-			DisableTimestamp: true,
-			EnableColors:     trace.IsTerminal(os.Stderr),
-		})
 		log.SetOutput(os.Stderr)
 	case LoggingForTests:
-		log.SetFormatter(&trace.TextFormatter{
-			DisableTimestamp: true,
-			EnableColors:     true,
-		})
 		log.SetLevel(level)
-		log.SetOutput(os.Stderr)
-		if len(verbose) != 0 && verbose[0] {
-			return
-		}
 		val, _ := strconv.ParseBool(os.Getenv(teleport.VerboseLogsEnvVar))
 		if val {
 			return
@@ -87,8 +69,22 @@ func InitLogger(purpose LoggingPurpose, level log.Level, verbose ...bool) {
 	}
 }
 
-func InitLoggerForTests(verbose ...bool) {
-	InitLogger(LoggingForTests, log.DebugLevel, verbose...)
+func InitLoggerForTests() {
+	InitLogger(LoggingForTests, log.DebugLevel)
+}
+
+// SwitchLoggingtoSyslog tells the logger to send the output to syslog
+func SwitchLoggingtoSyslog() {
+	log.StandardLogger().SetHooks(make(log.LevelHooks))
+	hook, err := logrusSyslog.NewSyslogHook("", "", syslog.LOG_WARNING, "")
+	if err != nil {
+		// syslog not available
+		log.SetOutput(os.Stderr)
+	} else {
+		// ... and disable stderr:
+		log.AddHook(hook)
+		log.SetOutput(ioutil.Discard)
+	}
 }
 
 // FatalError is for CLI front-ends: it detects gravitational/trace debugging
@@ -96,21 +92,6 @@ func InitLoggerForTests(verbose ...bool) {
 func FatalError(err error) {
 	fmt.Fprintln(os.Stderr, UserMessageFromError(err))
 	os.Exit(1)
-}
-
-// GetIterations provides a simple way to add iterations to the test
-// by setting environment variable "ITERATIONS", by default it returns 1
-func GetIterations() int {
-	out := os.Getenv(teleport.IterationsEnvVar)
-	if out == "" {
-		return 1
-	}
-	iter, err := strconv.Atoi(out)
-	if err != nil {
-		panic(err)
-	}
-	log.Debugf("Starting tests with %v iterations.", iter)
-	return iter
 }
 
 // UserMessageFromError returns user friendly error message from error
@@ -155,13 +136,13 @@ func UserMessageFromError(err error) string {
 		// If the error is a trace error, check if it has a user message embedded in
 		// it. If a user message is embedded in it, print the user message and the
 		// original error. Otherwise return the original with a generic "A fatal
-		// error occurred" message.
+		// error occured" message.
 		if er, ok := err.(*trace.TraceErr); ok {
 			if er.Message != "" {
-				return fmt.Sprintf("error: %v", EscapeControl(er.Message))
+				return fmt.Sprintf("%v: %v", er.Message, er.Err.Error())
 			}
 		}
-		return fmt.Sprintf("error: %v", EscapeControl(err.Error()))
+		return fmt.Sprintf("A fatal error occurred: %v", err.Error())
 	}
 	return ""
 }
@@ -191,27 +172,6 @@ func InitCLIParser(appName, appHelp string) (app *kingpin.Application) {
 
 	// set our own help template
 	return app.UsageTemplate(defaultUsageTemplate)
-}
-
-// EscapeControl escapes all ANSI escape sequences from string and returns a
-// string that is safe to print on the CLI. This is to ensure that malicious
-// servers can not hide output. For more details, see:
-//   * https://sintonen.fi/advisories/scp-client-multiple-vulnerabilities.txt
-func EscapeControl(s string) string {
-	if needsQuoting(s) {
-		return fmt.Sprintf("%q", s)
-	}
-	return s
-}
-
-// needsQuoting returns true if any non-printable characters are found.
-func needsQuoting(text string) bool {
-	for _, r := range text {
-		if !strconv.IsPrint(r) {
-			return true
-		}
-	}
-	return false
 }
 
 // Usage template with compactly formatted commands.

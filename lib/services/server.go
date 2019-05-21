@@ -1,19 +1,3 @@
-/*
-Copyright 2015-2019 Gravitational, Inc.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package services
 
 import (
@@ -26,7 +10,6 @@ import (
 	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
-
 	"github.com/jonboulle/clockwork"
 )
 
@@ -48,10 +31,6 @@ type Server interface {
 	GetCmdLabels() map[string]CommandLabel
 	// GetPublicAddr is an optional field that returns the public address this cluster can be reached at.
 	GetPublicAddr() string
-	// GetRotation gets the state of certificate authority rotation.
-	GetRotation() Rotation
-	// SetRotation sets the state of certificate authority rotation.
-	SetRotation(Rotation)
 	// String returns string representation of the server
 	String() string
 	// SetAddr sets server address
@@ -82,34 +61,16 @@ func ServersToV1(in []Server) []ServerV1 {
 	return out
 }
 
-// GetVersion returns resource version
-func (s *ServerV2) GetVersion() string {
-	return s.Version
-}
-
-// GetKind returns resource kind
-func (s *ServerV2) GetKind() string {
-	return s.Kind
-}
-
-// GetSubKind returns resource sub kind
-func (s *ServerV2) GetSubKind() string {
-	return s.SubKind
-}
-
-// SetSubKind sets resource subkind
-func (s *ServerV2) SetSubKind(sk string) {
-	s.SubKind = sk
-}
-
-// GetResourceID returns resource ID
-func (s *ServerV2) GetResourceID() int64 {
-	return s.Metadata.ID
-}
-
-// SetResourceID sets resource ID
-func (s *ServerV2) SetResourceID(id int64) {
-	s.Metadata.ID = id
+// ServerV2 is version1 resource spec of the server
+type ServerV2 struct {
+	// Kind is a resource kind
+	Kind string `json:"kind"`
+	// Version is version
+	Version string `json:"version"`
+	// Metadata is User metadata
+	Metadata Metadata `json:"metadata"`
+	// Spec contains user specification
+	Spec ServerSpecV2 `json:"spec"`
 }
 
 // GetMetadata returns metadata
@@ -128,7 +89,7 @@ func (s *ServerV2) V1() *ServerV1 {
 	for key := range s.Spec.CmdLabels {
 		val := s.Spec.CmdLabels[key]
 		labels[key] = CommandLabelV1{
-			Period:  val.Period.Duration(),
+			Period:  val.Period.Duration,
 			Result:  val.Result,
 			Command: val.Command,
 		}
@@ -192,16 +153,6 @@ func (s *ServerV2) GetAddr() string {
 // GetPublicAddr is an optional field that returns the public address this cluster can be reached at.
 func (s *ServerV2) GetPublicAddr() string {
 	return s.Spec.PublicAddr
-}
-
-// GetRotation gets the state of certificate authority rotation.
-func (s *ServerV2) GetRotation() Rotation {
-	return s.Spec.Rotation
-}
-
-// SetRotation sets the state of certificate authority rotation.
-func (s *ServerV2) SetRotation(r Rotation) {
-	s.Spec.Rotation = r
 }
 
 // GetHostname returns server hostname
@@ -288,65 +239,16 @@ func (s *ServerV2) CheckAndSetDefaults() error {
 	return nil
 }
 
-const (
-	// Equal means two objects are equal
-	Equal = iota
-	// OnlyTimestampsDifferent is true when only timestamps are different
-	OnlyTimestampsDifferent = iota
-	// Differnt means that some fields are different
-	Different = iota
-)
-
-// CompareServers returns difference between two server
-// objects, Equal (0) if identical, OnlyTimestampsDifferent(1) if only timestamps differ, Different(2) otherwise
-func CompareServers(a, b Server) int {
-	if a.GetName() != b.GetName() {
-		return Different
-	}
-	if a.GetAddr() != b.GetAddr() {
-		return Different
-	}
-	if a.GetHostname() != b.GetHostname() {
-		return Different
-	}
-	if a.GetNamespace() != b.GetNamespace() {
-		return Different
-	}
-	if a.GetPublicAddr() != b.GetPublicAddr() {
-		return Different
-	}
-	r := a.GetRotation()
-	if !r.Matches(b.GetRotation()) {
-		return Different
-	}
-	if !utils.StringMapsEqual(a.GetLabels(), b.GetLabels()) {
-		return Different
-	}
-	if !CmdLabelMapsEqual(a.GetCmdLabels(), b.GetCmdLabels()) {
-		return Different
-	}
-	if !a.Expiry().Equal(b.Expiry()) {
-		return OnlyTimestampsDifferent
-	}
-	return Equal
-}
-
-// CmdLabelMapsEqual compares two maps with command labels,
-// returns true if label sets are equal
-func CmdLabelMapsEqual(a, b map[string]CommandLabel) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for key, val := range a {
-		val2, ok := b[key]
-		if !ok {
-			return false
-		}
-		if !val.Equals(val2) {
-			return false
-		}
-	}
-	return true
+// ServerSpecV2 is a specification for V2 Server
+type ServerSpecV2 struct {
+	// Addr is server host:port address
+	Addr string `json:"addr"`
+	// PublicAddr is the public address this cluster can be reached at.
+	PublicAddr string `json:"public_addr,omitempty"`
+	// Hostname is server hostname
+	Hostname string `json:"hostname"`
+	// CmdLabels is server dynamic labels
+	CmdLabels map[string]CommandLabelV2 `json:"cmd_labels,omitempty"`
 }
 
 // ServerSpecV2Schema is JSON schema for server
@@ -359,16 +261,14 @@ const ServerSpecV2Schema = `{
     "hostname": {"type": "string"},
     "labels": {
       "type": "object",
-      "additionalProperties": false,
       "patternProperties": {
         "^.*$":  { "type": "string" }
       }
     },
     "cmd_labels": {
       "type": "object",
-      "additionalProperties": false,
       "patternProperties": {
-        "^.*$": {
+        "^.*$": { 
           "type": "object",
           "additionalProperties": false,
           "required": ["command"],
@@ -379,8 +279,7 @@ const ServerSpecV2Schema = `{
           }
         }
       }
-    },
-    "rotation": %v
+    }
   }
 }`
 
@@ -406,7 +305,7 @@ func (s *ServerV1) V2() *ServerV2 {
 	for key := range s.CmdLabels {
 		val := s.CmdLabels[key]
 		labels[key] = CommandLabelV2{
-			Period:  Duration(val.Period),
+			Period:  Duration{Duration: val.Period},
 			Result:  val.Result,
 			Command: val.Command,
 		}
@@ -455,34 +354,23 @@ type CommandLabel interface {
 	GetCommand() []string
 	// Clone returns label copy
 	Clone() CommandLabel
-	// Equals returns true if label is equal to the other one
-	// false otherwise
-	Equals(CommandLabel) bool
 }
 
-// Equals returns true if labels are equal, false otherwise
-func (c *CommandLabelV2) Equals(other CommandLabel) bool {
-	if c.GetPeriod() != other.GetPeriod() {
-		return false
-	}
-	if c.GetResult() != other.GetResult() {
-		return false
-	}
-	if !utils.StringSlicesEqual(c.GetCommand(), other.GetCommand()) {
-		return false
-	}
-	return true
+// CommandLabelV2 is a label that has a value as a result of the
+// output generated by running command, e.g. hostname
+type CommandLabelV2 struct {
+	// Period is a time between command runs
+	Period Duration `json:"period"`
+	// Command is a command to run
+	Command []string `json:"command"` //["/usr/bin/hostname", "--long"]
+	// Result captures standard output
+	Result string `json:"result"`
 }
 
-// Clone returns non-shallow copy of the label
+// Clone returns label copy
 func (c *CommandLabelV2) Clone() CommandLabel {
-	command := make([]string, len(c.Command))
-	copy(command, c.Command)
-	return &CommandLabelV2{
-		Command: command,
-		Period:  c.Period,
-		Result:  c.Result,
-	}
+	cp := *c
+	return &cp
 }
 
 // SetResult sets label result
@@ -492,12 +380,12 @@ func (c *CommandLabelV2) SetResult(r string) {
 
 // SetPeriod sets label period
 func (c *CommandLabelV2) SetPeriod(p time.Duration) {
-	c.Period = Duration(p)
+	c.Period.Duration = p
 }
 
 // GetPeriod returns label period
 func (c *CommandLabelV2) GetPeriod() time.Duration {
-	return c.Period.Duration()
+	return c.Period.Duration
 }
 
 // GetResult returns label result
@@ -524,15 +412,6 @@ type CommandLabelV1 struct {
 // CommandLabels is a set of command labels
 type CommandLabels map[string]CommandLabel
 
-// Clone returns copy of the set
-func (c *CommandLabels) Clone() CommandLabels {
-	out := make(CommandLabels, len(*c))
-	for name, label := range *c {
-		out[name] = label.Clone()
-	}
-	return out
-}
-
 // SetEnv sets the value of the label from environment variable
 func (c *CommandLabels) SetEnv(v string) error {
 	if err := json.Unmarshal([]byte(v), c); err != nil {
@@ -544,63 +423,42 @@ func (c *CommandLabels) SetEnv(v string) error {
 // GetServerSchema returns role schema with optionally injected
 // schema for extensions
 func GetServerSchema() string {
-	return fmt.Sprintf(V2SchemaTemplate, MetadataSchema, fmt.Sprintf(ServerSpecV2Schema, RotationSchema), DefaultDefinitions)
+	return fmt.Sprintf(V2SchemaTemplate, MetadataSchema, ServerSpecV2Schema, DefaultDefinitions)
 }
 
 // UnmarshalServerResource unmarshals role from JSON or YAML,
 // sets defaults and checks the schema
-func UnmarshalServerResource(data []byte, kind string, cfg *MarshalConfig) (Server, error) {
+func UnmarshalServerResource(data []byte, kind string) (Server, error) {
 	if len(data) == 0 {
 		return nil, trace.BadParameter("missing server data")
 	}
-
 	var h ResourceHeader
-	err := utils.FastUnmarshal(data, &h)
+	err := json.Unmarshal(data, &h)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-
 	switch h.Version {
 	case "":
 		var s ServerV1
-		err := utils.FastUnmarshal(data, &s)
+		err := json.Unmarshal(data, &s)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
 		s.Kind = kind
-		v2 := s.V2()
-		if cfg.ID != 0 {
-			v2.SetResourceID(cfg.ID)
-		}
-		if !cfg.Expires.IsZero() {
-			v2.SetExpiry(cfg.Expires)
-		}
-		return v2, nil
+		return s.V2(), nil
 	case V2:
 		var s ServerV2
-
-		if cfg.SkipValidation {
-			if err := utils.FastUnmarshal(data, &s); err != nil {
-				return nil, trace.BadParameter(err.Error())
-			}
-		} else {
-			if err := utils.UnmarshalWithSchema(GetServerSchema(), &s, data); err != nil {
-				return nil, trace.BadParameter(err.Error())
-			}
+		if err := utils.UnmarshalWithSchema(GetServerSchema(), &s, data); err != nil {
+			return nil, trace.BadParameter(err.Error())
 		}
-		s.Kind = kind
+
 		if err := s.CheckAndSetDefaults(); err != nil {
 			return nil, trace.Wrap(err)
 		}
-		if cfg.ID != 0 {
-			s.SetResourceID(cfg.ID)
-		}
-		if !cfg.Expires.IsZero() {
-			s.SetExpiry(cfg.Expires)
-		}
+
 		return &s, nil
 	}
-	return nil, trace.BadParameter("server resource version %q is not supported", h.Version)
+	return nil, trace.BadParameter("server resource version %v is not supported", h.Version)
 }
 
 var serverMarshaler ServerMarshaler = &TeleportServerMarshaler{}
@@ -620,34 +478,20 @@ func GetServerMarshaler() ServerMarshaler {
 // ServerMarshaler implements marshal/unmarshal of Role implementations
 // mostly adds support for extended versions
 type ServerMarshaler interface {
-	// UnmarshalServer from binary representation.
-	UnmarshalServer(bytes []byte, kind string, opts ...MarshalOption) (Server, error)
-
-	// MarshalServer to binary representation.
+	// UnmarshalServer from binary representation
+	UnmarshalServer(bytes []byte, kind string) (Server, error)
+	// MarshalServer to binary representation
 	MarshalServer(Server, ...MarshalOption) ([]byte, error)
-
-	// UnmarshalServers is used to unmarshal multiple servers from their
-	// binary representation.
-	UnmarshalServers(bytes []byte) ([]Server, error)
-
-	// MarshalServers is used to marshal multiple servers to their binary
-	// representation.
-	MarshalServers([]Server) ([]byte, error)
 }
 
 type TeleportServerMarshaler struct{}
 
 // UnmarshalServer unmarshals server from JSON
-func (*TeleportServerMarshaler) UnmarshalServer(bytes []byte, kind string, opts ...MarshalOption) (Server, error) {
-	cfg, err := collectOptions(opts)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	return UnmarshalServerResource(bytes, kind, cfg)
+func (*TeleportServerMarshaler) UnmarshalServer(bytes []byte, kind string) (Server, error) {
+	return UnmarshalServerResource(bytes, kind)
 }
 
-// MarshalServer marshals server into JSON.
+// MarshalServer marshals server into JSON
 func (*TeleportServerMarshaler) MarshalServer(s Server, opts ...MarshalOption) ([]byte, error) {
 	cfg, err := collectOptions(opts)
 	if err != nil {
@@ -656,6 +500,7 @@ func (*TeleportServerMarshaler) MarshalServer(s Server, opts ...MarshalOption) (
 	type serverv1 interface {
 		V1() *ServerV1
 	}
+
 	type serverv2 interface {
 		V2() *ServerV2
 	}
@@ -666,52 +511,16 @@ func (*TeleportServerMarshaler) MarshalServer(s Server, opts ...MarshalOption) (
 		if !ok {
 			return nil, trace.BadParameter("don't know how to marshal %v", V1)
 		}
-		return utils.FastMarshal(v.V1())
+		return json.Marshal(v.V1())
 	case V2:
 		v, ok := s.(serverv2)
 		if !ok {
 			return nil, trace.BadParameter("don't know how to marshal %v", V2)
 		}
-		v2 := v.V2()
-		if !cfg.PreserveResourceID {
-			// avoid modifying the original object
-			// to prevent unexpected data races
-			copy := *v2
-			copy.SetResourceID(0)
-			v2 = &copy
-		}
-		return utils.FastMarshal(v2)
+		return json.Marshal(v.V2())
 	default:
 		return nil, trace.BadParameter("version %v is not supported", version)
 	}
-}
-
-// UnmarshalServers is used to unmarshal multiple servers from their
-// binary representation.
-func (*TeleportServerMarshaler) UnmarshalServers(bytes []byte) ([]Server, error) {
-	var servers []ServerV2
-
-	err := utils.FastUnmarshal(bytes, &servers)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	out := make([]Server, len(servers))
-	for i, v := range servers {
-		out[i] = Server(&v)
-	}
-	return out, nil
-}
-
-// MarshalServers is used to marshal multiple servers to their binary
-// representation.
-func (*TeleportServerMarshaler) MarshalServers(s []Server) ([]byte, error) {
-	bytes, err := utils.FastMarshal(s)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	return bytes, nil
 }
 
 // SortedServers is a sort wrapper that sorts servers by name

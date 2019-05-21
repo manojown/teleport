@@ -25,11 +25,8 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/gravitational/teleport"
-
 	"github.com/gravitational/trace"
-
-	"github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 // ParseSigningKeyStore parses signing key store from PEM encoded key pair
@@ -44,7 +41,7 @@ func ParseSigningKeyStorePEM(keyPEM, certPEM string) (*SigningKeyStore, error) {
 	}
 	rsaKey, ok := key.(*rsa.PrivateKey)
 	if !ok {
-		return nil, trace.BadParameter("key of type %T is not supported, only RSA keys are supported for signatures", key)
+		return nil, trace.BadParameter("key of type %T is not supported, only RSA keys are supported for signatures")
 	}
 	certASN, _ := pem.Decode([]byte(certPEM))
 	if certASN == nil {
@@ -65,7 +62,7 @@ func (ks *SigningKeyStore) GetKeyPair() (*rsa.PrivateKey, []byte, error) {
 
 // GenerateSelfSignedSigningCert generates self-signed certificate used for digital signatures
 func GenerateSelfSignedSigningCert(entity pkix.Name, dnsNames []string, ttl time.Duration) ([]byte, []byte, error) {
-	priv, err := rsa.GenerateKey(rand.Reader, teleport.RSAKeySize)
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, nil, trace.Wrap(err)
 	}
@@ -144,7 +141,7 @@ func ParsePrivateKeyDER(der []byte) (crypto.Signer, error) {
 		if err != nil {
 			generalKey, err = x509.ParseECPrivateKey(der)
 			if err != nil {
-				logrus.Errorf("Failed to parse key: %v.", err)
+				log.Errorf("failed to parse key: %v", err)
 				return nil, trace.BadParameter("failed parsing private key")
 			}
 		}

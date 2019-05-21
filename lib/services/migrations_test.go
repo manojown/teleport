@@ -24,6 +24,8 @@ import (
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/utils"
 
+	"github.com/davecgh/go-spew/spew"
+	"github.com/kylelemons/godebug/diff"
 	. "gopkg.in/check.v1"
 )
 
@@ -87,6 +89,74 @@ func (s *MigrationsSuite) TestMigrateServers(c *C) {
 	out4.Namespace = ""
 	c.Assert(err, IsNil)
 	c.Assert(out4, DeepEquals, *in)
+}
+
+func (s *MigrationsSuite) TestMigrateUsers(c *C) {
+	in := &UserV1{
+		Name:           "alice",
+		AllowedLogins:  []string{"admin", "centos"},
+		OIDCIdentities: []ExternalIdentity{{Username: "alice@example.com", ConnectorID: "example"}},
+		Status: LoginStatus{
+			IsLocked:    true,
+			LockedTime:  time.Date(2015, 12, 10, 1, 1, 3, 0, time.UTC),
+			LockExpires: time.Date(2015, 12, 10, 1, 2, 3, 0, time.UTC),
+		},
+		Expires: time.Date(2016, 12, 10, 1, 2, 3, 0, time.UTC),
+		CreatedBy: CreatedBy{
+			Time:      time.Date(2013, 12, 10, 1, 2, 3, 0, time.UTC),
+			Connector: &ConnectorRef{ID: "example"},
+		},
+	}
+
+	out := in.V2()
+	expected := &UserV2{
+		Kind:    KindUser,
+		Version: V2,
+		Metadata: Metadata{
+			Name:      in.Name,
+			Namespace: defaults.Namespace,
+		},
+		Spec: UserSpecV2{
+			OIDCIdentities: in.OIDCIdentities,
+			Status:         in.Status,
+			Expires:        in.Expires,
+			CreatedBy:      in.CreatedBy,
+			Traits: map[string][]string{
+				"logins": in.AllowedLogins,
+			},
+		},
+		rawObject: *in,
+	}
+	c.Assert(out.rawObject, DeepEquals, *in)
+	c.Assert(out.Metadata, DeepEquals, expected.Metadata)
+	c.Assert(out.Spec, DeepEquals, expected.Spec)
+	c.Assert(out, DeepEquals, expected)
+
+	data, err := json.Marshal(in)
+	c.Assert(err, IsNil)
+	out2, err := GetUserMarshaler().UnmarshalUser(data)
+	c.Assert(err, IsNil)
+	c.Assert(out2.GetRawObject(), DeepEquals, *in)
+	c.Assert(out2, DeepEquals, expected)
+
+	data, err = json.Marshal(expected)
+	c.Assert(err, IsNil)
+	out3, err := GetUserMarshaler().UnmarshalUser(data)
+	c.Assert(err, IsNil)
+
+	d := &spew.ConfigState{Indent: " ", DisableMethods: true, DisablePointerMethods: true, DisablePointerAddresses: true}
+	expected.rawObject = nil
+	obj := out3.(*UserV2)
+	obj.rawObject = nil
+	c.Assert(obj, DeepEquals, expected, Commentf("%v", diff.Diff(d.Sdump(obj), d.Sdump(expected))))
+
+	// test backwards compatibility
+	data, err = GetUserMarshaler().MarshalUser(expected, WithVersion(V1))
+	c.Assert(err, IsNil)
+	var out4 UserV1
+	json.Unmarshal(data, &out4)
+	in.AllowedLogins = nil
+	c.Assert(out4, DeepEquals, *in, Commentf("%v", diff.Diff(d.Sdump(obj), d.Sdump(*in))))
 }
 
 func (s *MigrationsSuite) TestMigrateReverseTunnels(c *C) {
@@ -156,6 +226,7 @@ func (s *MigrationsSuite) TestMigrateCertAuthorities(c *C) {
 			CheckingKeys: in.CheckingKeys,
 			SigningKeys:  in.SigningKeys,
 		},
+		rawObject: *in,
 	}
 	c.Assert(out, DeepEquals, expected)
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2015-2018 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,9 +17,10 @@ limitations under the License.
 package local
 
 import (
-	"context"
+	"encoding/json"
 	"time"
 
+	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/services"
@@ -29,84 +30,72 @@ import (
 
 // ProvisioningService governs adding new nodes to the cluster
 type ProvisioningService struct {
-	backend.Backend
+	backend backend.Backend
 }
 
 // NewProvisioningService returns a new instance of provisioning service
 func NewProvisioningService(backend backend.Backend) *ProvisioningService {
-	return &ProvisioningService{Backend: backend}
+	return &ProvisioningService{backend}
 }
 
 // UpsertToken adds provisioning tokens for the auth server
-func (s *ProvisioningService) UpsertToken(p services.ProvisionToken) error {
-	if err := p.CheckAndSetDefaults(); err != nil {
-		return trace.Wrap(err)
+func (s *ProvisioningService) UpsertToken(token string, roles teleport.Roles, ttl time.Duration) error {
+	if ttl < time.Second {
+		ttl = defaults.ProvisioningTokenTTL
 	}
-	if p.Expiry().IsZero() || p.Expiry().Sub(s.Clock().Now().UTC()) < time.Second {
-		p.SetTTL(s.Clock(), defaults.ProvisioningTokenTTL)
+	t := services.ProvisionToken{
+		Roles:   roles,
+		Expires: time.Now().UTC().Add(ttl),
+		Token:   token,
 	}
-	data, err := services.MarshalProvisionToken(p)
+	out, err := json.Marshal(t)
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	item := backend.Item{
-		Key:     backend.Key(tokensPrefix, p.GetName()),
-		Value:   data,
-		Expires: p.Expiry(),
-		ID:      p.GetResourceID(),
-	}
-	_, err = s.Put(context.TODO(), item)
+
+	err = s.backend.UpsertVal([]string{"tokens"}, token, out, ttl)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 	return nil
 }
 
-// DeleteAllTokens deletes all provisioning tokens
-func (s *ProvisioningService) DeleteAllTokens() error {
-	startKey := backend.Key(tokensPrefix)
-	return s.DeleteRange(context.TODO(), startKey, backend.RangeEnd(startKey))
-}
-
-// GetToken finds and returns token by ID
-func (s *ProvisioningService) GetToken(token string) (services.ProvisionToken, error) {
-	if token == "" {
-		return nil, trace.BadParameter("missing parameter token")
-	}
-	item, err := s.Get(context.TODO(), backend.Key(tokensPrefix, token))
+// GetToken finds and returns token by id
+func (s *ProvisioningService) GetToken(token string) (*services.ProvisionToken, error) {
+	out, err := s.backend.GetVal([]string{"tokens"}, token)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	return services.UnmarshalProvisionToken(item.Value, services.SkipValidation(),
-		services.WithResourceID(item.ID), services.WithExpires(item.Expires))
+	var t *services.ProvisionToken
+	err = json.Unmarshal(out, &t)
+	if err != nil {
+		t.Token = token // for backwards compatibility with older tokens
+		return nil, trace.Wrap(err)
+	}
+	return t, nil
 }
 
 func (s *ProvisioningService) DeleteToken(token string) error {
-	if token == "" {
-		return trace.BadParameter("missing parameter token")
-	}
-	err := s.Delete(context.TODO(), backend.Key(tokensPrefix, token))
-	return trace.Wrap(err)
+	err := s.backend.DeleteKey([]string{"tokens"}, token)
+	return err
 }
 
 // GetTokens returns all active (non-expired) provisioning tokens
-func (s *ProvisioningService) GetTokens(opts ...services.MarshalOption) ([]services.ProvisionToken, error) {
-	startKey := backend.Key(tokensPrefix)
-	result, err := s.GetRange(context.TODO(), startKey, backend.RangeEnd(startKey), backend.NoLimit)
+func (s *ProvisioningService) GetTokens() (tokens []services.ProvisionToken, err error) {
+	keys, err := s.backend.GetKeys([]string{"tokens"})
 	if err != nil {
-		return nil, trace.Wrap(err)
+		return tokens, trace.Wrap(err)
 	}
-	tokens := make([]services.ProvisionToken, len(result.Items))
-	for i, item := range result.Items {
-		t, err := services.UnmarshalProvisionToken(item.Value,
-			services.AddOptions(opts, services.SkipValidation(),
-				services.WithResourceID(item.ID), services.WithExpires(item.Expires))...)
+	for _, k := range keys {
+		tok, err := s.GetToken(k)
 		if err != nil {
-			return nil, trace.Wrap(err)
+			// token could have expired
+			if !trace.IsNotFound(err) {
+				return nil, trace.Wrap(err)
+			}
+			continue
 		}
-		tokens[i] = t
+		tokens = append(tokens, *tok)
 	}
 	return tokens, nil
 }
-
-const tokensPrefix = "tokens"

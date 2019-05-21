@@ -2,7 +2,6 @@ package client
 
 import (
 	"io/ioutil"
-	"net"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -35,16 +34,16 @@ const CurrentProfileSymlink = "profile"
 // type fewer CLI args.
 //
 type ClientProfile struct {
-	// WebProxyAddr is the host:port the web proxy can be accessed at.
-	WebProxyAddr string `yaml:"web_proxy_addr,omitempty"`
+	//
+	// proxy configuration
+	//
+	ProxyHost    string `yaml:"proxy_host,omitempty"`
+	ProxySSHPort int    `yaml:"proxy_port,omitempty"`
+	ProxyWebPort int    `yaml:"proxy_web_port,omitempty"`
 
-	// SSHProxyAddr is the host:port the SSH proxy can be accessed at.
-	SSHProxyAddr string `yaml:"ssh_proxy_addr,omitempty"`
-
-	// KubeProxyAddr is the host:port the Kubernetes proxy can be accessed at.
-	KubeProxyAddr string `yaml:"kube_proxy_addr,omitempty"`
-
-	// Username is the Teleport username for the client.
+	//
+	// auth/identity
+	//
 	Username string `yaml:"user,omitempty"`
 
 	// AuthType (like "google")
@@ -53,33 +52,10 @@ type ClientProfile struct {
 	// SiteName is equivalient to --cluster argument
 	SiteName string `yaml:"cluster,omitempty"`
 
-	// ForwardedPorts is the list of ports to forward to the target node.
+	//
+	// other stuff
+	//
 	ForwardedPorts []string `yaml:"forward_ports,omitempty"`
-
-	// DynamicForwardedPorts is a list of ports to use for dynamic port
-	// forwarding (SOCKS5).
-	DynamicForwardedPorts []string `yaml:"dynamic_forward_ports,omitempty"`
-
-	// DELETE IN: 3.1.0
-	// The following fields have been deprecated and replaced with
-	// "proxy_web_addr" and "proxy_ssh_addr".
-	ProxyHost    string `yaml:"proxy_host,omitempty"`
-	ProxySSHPort int    `yaml:"proxy_port,omitempty"`
-	ProxyWebPort int    `yaml:"proxy_web_port,omitempty"`
-}
-
-// Name returns the name of the profile.
-func (c *ClientProfile) Name() string {
-	if c.ProxyHost != "" {
-		return c.ProxyHost
-	}
-
-	addr, _, err := net.SplitHostPort(c.WebProxyAddr)
-	if err != nil {
-		return c.WebProxyAddr
-	}
-
-	return addr
 }
 
 // FullProfilePath returns the full path to the user profile directory.

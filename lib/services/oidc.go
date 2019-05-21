@@ -31,7 +31,6 @@ import (
 	"github.com/coreos/go-oidc/jose"
 	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
-	log "github.com/sirupsen/logrus"
 )
 
 // OIDCConnector specifies configuration for Open ID Connect compatible external
@@ -64,6 +63,8 @@ type OIDCConnector interface {
 	GetClaims() []string
 	// MapClaims maps claims to roles
 	MapClaims(claims jose.Claims) []string
+	// RoleFromTemplate creates a role from a template and claims.
+	RoleFromTemplate(claims jose.Claims) (Role, error)
 	// Check checks OIDC connector for errors
 	Check() error
 	// CheckAndSetDefaults checks and set default values for any missing fields.
@@ -121,7 +122,7 @@ func GetOIDCConnectorMarshaler() OIDCConnectorMarshaler {
 // mostly adds support for extended versions
 type OIDCConnectorMarshaler interface {
 	// UnmarshalOIDCConnector unmarshals connector from binary representation
-	UnmarshalOIDCConnector(bytes []byte, opts ...MarshalOption) (OIDCConnector, error)
+	UnmarshalOIDCConnector(bytes []byte) (OIDCConnector, error)
 	// MarshalOIDCConnector marshals connector to binary representation
 	MarshalOIDCConnector(c OIDCConnector, opts ...MarshalOption) ([]byte, error)
 }
@@ -134,13 +135,9 @@ func GetOIDCConnectorSchema() string {
 type TeleportOIDCConnectorMarshaler struct{}
 
 // UnmarshalOIDCConnector unmarshals connector from
-func (*TeleportOIDCConnectorMarshaler) UnmarshalOIDCConnector(bytes []byte, opts ...MarshalOption) (OIDCConnector, error) {
-	cfg, err := collectOptions(opts)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
+func (*TeleportOIDCConnectorMarshaler) UnmarshalOIDCConnector(bytes []byte) (OIDCConnector, error) {
 	var h ResourceHeader
-	err = utils.FastUnmarshal(bytes, &h)
+	err := json.Unmarshal(bytes, &h)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -154,25 +151,14 @@ func (*TeleportOIDCConnectorMarshaler) UnmarshalOIDCConnector(bytes []byte, opts
 		return c.V2(), nil
 	case V2:
 		var c OIDCConnectorV2
-		if cfg.SkipValidation {
-			if err := utils.FastUnmarshal(bytes, &c); err != nil {
-				return nil, trace.BadParameter(err.Error())
-			}
-		} else {
-			if err := utils.UnmarshalWithSchema(GetOIDCConnectorSchema(), &c, bytes); err != nil {
-				return nil, trace.BadParameter(err.Error())
-			}
+		if err := utils.UnmarshalWithSchema(GetOIDCConnectorSchema(), &c, bytes); err != nil {
+			return nil, trace.BadParameter(err.Error())
 		}
 
 		if err := c.CheckAndSetDefaults(); err != nil {
 			return nil, trace.Wrap(err)
 		}
-		if cfg.ID != 0 {
-			c.SetResourceID(cfg.ID)
-		}
-		if !cfg.Expires.IsZero() {
-			c.SetExpiry(cfg.Expires)
-		}
+
 		return &c, nil
 	}
 
@@ -205,15 +191,7 @@ func (*TeleportOIDCConnectorMarshaler) MarshalOIDCConnector(c OIDCConnector, opt
 		if !ok {
 			return nil, trace.BadParameter("don't know how to marshal %v", V2)
 		}
-		v2 := v.V2()
-		if !cfg.PreserveResourceID {
-			// avoid modifying the original object
-			// to prevent unexpected data races
-			copy := *v2
-			copy.SetResourceID(0)
-			v2 = &copy
-		}
-		return utils.FastMarshal(v2)
+		return json.Marshal(v.V2())
 	default:
 		return nil, trace.BadParameter("version %v is not supported", version)
 	}
@@ -223,44 +201,12 @@ func (*TeleportOIDCConnectorMarshaler) MarshalOIDCConnector(c OIDCConnector, opt
 type OIDCConnectorV2 struct {
 	// Kind is a resource kind
 	Kind string `json:"kind"`
-	// SubKind is a resource sub kind
-	SubKind string `json:"sub_kind,omitempty"`
 	// Version is version
 	Version string `json:"version"`
 	// Metadata is connector metadata
 	Metadata Metadata `json:"metadata"`
 	// Spec contains connector specification
 	Spec OIDCConnectorSpecV2 `json:"spec"`
-}
-
-// GetVersion returns resource version
-func (o *OIDCConnectorV2) GetVersion() string {
-	return o.Version
-}
-
-// GetSubKind returns resource sub kind
-func (o *OIDCConnectorV2) GetSubKind() string {
-	return o.SubKind
-}
-
-// SetSubKind sets resource subkind
-func (o *OIDCConnectorV2) SetSubKind(s string) {
-	o.SubKind = s
-}
-
-// GetKind returns resource kind
-func (o *OIDCConnectorV2) GetKind() string {
-	return o.Kind
-}
-
-// GetResourceID returns resource ID
-func (o *OIDCConnectorV2) GetResourceID() int64 {
-	return o.Metadata.ID
-}
-
-// SetResourceID sets resource ID
-func (o *OIDCConnectorV2) SetResourceID(id int64) {
-	o.Metadata.ID = id
 }
 
 // V2 returns V2 version of the resource
@@ -425,28 +371,15 @@ func (o *OIDCConnectorV2) MapClaims(claims jose.Claims) []string {
 			if claimName != mapping.Claim {
 				continue
 			}
-			var claimValues []string
 			claimValue, ok, _ := claims.StringClaim(claimName)
-			if ok {
-				claimValues = []string{claimValue}
-			} else {
-				claimValues, _, _ = claims.StringsClaim(claimName)
+			if ok && claimValue == mapping.Value {
+				roles = append(roles, mapping.Roles...)
 			}
-		claimLoop:
-			for _, claimValue := range claimValues {
-				for _, role := range mapping.Roles {
-					outRole, err := utils.ReplaceRegexp(mapping.Value, role, claimValue)
-					switch {
-					case err != nil:
-						if trace.IsNotFound(err) {
-							log.Debugf("Failed to match expression %v, replace with: %v input: %v, err: %v", mapping.Value, role, claimValue, err)
-						}
-						// this claim value clearly did not match, move on to another
-						continue claimLoop
-						// skip empty replacement or empty role
-					case outRole == "":
-					case outRole != "":
-						roles = append(roles, outRole)
+			claimValues, ok, _ := claims.StringsClaim(claimName)
+			if ok {
+				for _, claimValue := range claimValues {
+					if claimValue == mapping.Value {
+						roles = append(roles, mapping.Roles...)
 					}
 				}
 			}
@@ -487,6 +420,51 @@ func executeSliceTemplate(raw []string, claims jose.Claims) ([]string, error) {
 	}
 
 	return sl, nil
+}
+
+// RoleFromTemplate creates a role from a template and claims.
+func (o *OIDCConnectorV2) RoleFromTemplate(claims jose.Claims) (Role, error) {
+	for _, mapping := range o.Spec.ClaimsToRoles {
+		for claimName := range claims {
+			// claim name doesn't match
+			if claimName != mapping.Claim {
+				continue
+			}
+
+			// claim value doesn't match
+			claimValue, ok, _ := claims.StringClaim(claimName)
+			if ok && claimValue != mapping.Value {
+				continue
+			}
+
+			// claim name and value match, if a role template exists, execute template
+			roleTemplate := mapping.RoleTemplate
+			if roleTemplate != nil {
+				// at the moment, only allow templating for role name and logins
+				executedName, err := executeStringTemplate(roleTemplate.GetName(), claims)
+				if err != nil {
+					return nil, trace.Wrap(err)
+				}
+				executedLogins, err := executeSliceTemplate(roleTemplate.GetLogins(), claims)
+				if err != nil {
+					return nil, trace.Wrap(err)
+				}
+
+				roleTemplate.SetName(executedName)
+				roleTemplate.SetLogins(executedLogins)
+
+				// check all fields and make sure we have have a valid role
+				err = roleTemplate.CheckAndSetDefaults()
+				if err != nil {
+					return nil, trace.Wrap(err)
+				}
+
+				return roleTemplate.V3(), nil
+			}
+		}
+	}
+
+	return nil, trace.BadParameter("no matching claim name/value, claims: %v", claims)
 }
 
 // Check returns nil if all parameters are great, err otherwise

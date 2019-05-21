@@ -17,34 +17,35 @@ limitations under the License.
 package utils
 
 import (
-	"fmt"
+	"github.com/coreos/go-semver/semver"
 
 	"github.com/gravitational/trace"
-
-	"github.com/coreos/go-semver/semver"
 )
 
-// CheckVersions compares client and server versions and makes sure that the
-// client version is greater than or equal to the minimum version supported
-// by the server.
-func CheckVersions(clientVersion string, minClientVersion string) error {
+// CheckVersions compares client and server versions
+// and makes sure they are compatible using Teleport convention
+func CheckVersions(clientVersion, serverVersion string) error {
 	clientSemver, err := semver.NewVersion(clientVersion)
 	if err != nil {
 		return trace.Wrap(err,
 			"unsupported version format, need semver format: %q, e.g 1.0.0", clientVersion)
 	}
 
-	minClientSemver, err := semver.NewVersion(minClientVersion)
+	serverSemver, err := semver.NewVersion(serverVersion)
 	if err != nil {
 		return trace.Wrap(err,
-			"unsupported version format, need semver format: %q, e.g 1.0.0", minClientVersion)
+			"unsupported version format, need semver format: %q, e.g 1.0.0", clientVersion)
 	}
 
-	if clientSemver.Compare(*minClientSemver) < 0 {
-		errorMessage := fmt.Sprintf("minimum client version supported by the server "+
-			"is %v. Please upgrade the client, downgrade the server, or use the "+
-			"--skip-version-check flag to by-pass this check.", minClientVersion)
-		return trace.BadParameter(errorMessage)
+	// for now only do simple check that client is not newer version
+	// than server, ignore patch versions
+
+	switch {
+	case serverSemver.Major != clientSemver.Major:
+		return trace.BadParameter("client version %q is not compatible server version %q, please make client and server versions use the same major versions", clientVersion, serverVersion)
+	case serverSemver.Minor < clientSemver.Minor:
+		return trace.BadParameter("client version %q is newer than server version %q, please downgrade client or upgrade server", clientVersion, serverVersion)
+		// for now let's not enforce minor versions diff as it's too harsh
 	}
 
 	return nil

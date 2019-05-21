@@ -12,10 +12,12 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+This file contains the implementations of sshutils.Server class.
+It is the underlying "base SSH server" for everything in Teleport.
+
 */
 
-// Package sshutils contains contains the implementations of the base SSH
-// server used throughout Teleport.
 package sshutils
 
 import (
@@ -23,13 +25,12 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"golang.org/x/crypto/ssh"
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/defaults"
@@ -37,8 +38,8 @@ import (
 	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
-
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/crypto/ssh"
 )
 
 // Server is a generic implementation of an SSH server. All Teleport
@@ -72,10 +73,6 @@ type Server struct {
 	conns int32
 	// shutdownPollPeriod sets polling period for shutdown
 	shutdownPollPeriod time.Duration
-
-	// insecureSkipHostValidation does not validate the host signers to make sure
-	// they are a valid certificate. Used in tests.
-	insecureSkipHostValidation bool
 }
 
 const (
@@ -117,15 +114,6 @@ func SetShutdownPollPeriod(period time.Duration) ServerOption {
 	}
 }
 
-// SetInsecureSkipHostValidation does not validate the host signers to make sure
-// they are a valid certificate. Used in tests.
-func SetInsecureSkipHostValidation() ServerOption {
-	return func(s *Server) error {
-		s.insecureSkipHostValidation = true
-		return nil
-	}
-}
-
 func NewServer(
 	component string,
 	a utils.NetAddr,
@@ -133,7 +121,11 @@ func NewServer(
 	hostSigners []ssh.Signer,
 	ah AuthMethods,
 	opts ...ServerOption) (*Server, error) {
-	var err error
+
+	err := checkArguments(a, h, hostSigners, ah)
+	if err != nil {
+		return nil, err
+	}
 
 	closeContext, cancel := context.WithCancel(context.TODO())
 	s := &Server{
@@ -159,10 +151,6 @@ func NewServer(
 	if s.shutdownPollPeriod == 0 {
 		s.shutdownPollPeriod = defaults.ShutdownPollPeriod
 	}
-	err = s.checkArguments(a, h, hostSigners, ah)
-	if err != nil {
-		return nil, err
-	}
 
 	for _, signer := range hostSigners {
 		(&s.cfg).AddHostKey(signer)
@@ -171,10 +159,9 @@ func NewServer(
 	s.cfg.PasswordCallback = ah.Password
 	s.cfg.NoClientAuth = ah.NoClient
 
-	// Teleport servers need to identify as such to allow passing of the client
-	// IP from the client to the proxy to the destination node.
-	s.cfg.ServerVersion = SSHVersionPrefix
-
+	// Teleport SSH server will be sending the following "version string" during
+	// SSH handshake (example): "SSH-2.0-T eleport 1.5.1-beta" (space is important!)
+	s.cfg.ServerVersion = fmt.Sprintf("%s %s", SSHVersionPrefix, teleport.Version)
 	return s, nil
 }
 
@@ -298,7 +285,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 				lastReport = time.Now()
 			}
 		case <-ctx.Done():
-			s.Infof("Context cancelled wait, returning.")
+			s.Infof("Context cancelled wait, returning")
 			return trace.ConnectionProblem(err, "context cancelled")
 		}
 	}
@@ -379,14 +366,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 		defaults.DefaultIdleConnectionDuration,
 		s.component)
 
-	// Wrap connection with a tracker used to monitor how much data was
-	// transmitted and received over the connection.
-	wconn := utils.NewTrackingConn(conn)
-
 	// create a new SSH server which handles the handshake (and pass the custom
 	// payload structure which will be populated only when/if this connection
 	// comes from another Teleport proxy):
-	sconn, chans, reqs, err := ssh.NewServerConn(wrapConnection(wconn), &s.cfg)
+	sconn, chans, reqs, err := ssh.NewServerConn(wrapConnection(conn), &s.cfg)
 	if err != nil {
 		conn.SetDeadline(time.Time{})
 		return
@@ -400,12 +383,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 		return
 	}
 	// Connection successfully initiated
-	s.Debugf("Incoming connection %v -> %v vesion: %v.",
+	s.Debugf("incoming connection %v -> %v vesion: %v",
 		sconn.RemoteAddr(), sconn.LocalAddr(), string(sconn.ClientVersion()))
 
 	// will be called when the connection is closed
 	connClosed := func() {
-		s.Debugf("Closed connection %v.", sconn.RemoteAddr())
+		s.Debugf("closed connection %v", sconn.RemoteAddr())
 	}
 
 	// The keepalive ticket will ensure that SSH keepalive requests are being sent
@@ -422,7 +405,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 				connClosed()
 				return
 			}
-			s.Debugf("Received out-of-band request: %+v.", req)
+			s.Debugf("received out-of-band request: %+v", req)
 			if s.reqHandler != nil {
 				go s.reqHandler.HandleRequest(req)
 			}
@@ -432,7 +415,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 				connClosed()
 				return
 			}
-			go s.newChanHandler.HandleNewChan(wconn, sconn, nch)
+			go s.newChanHandler.HandleNewChan(conn, sconn, nch)
 			// send keepalive pings to the clients
 		case <-keepAliveTick.C:
 			const wantReply = true
@@ -467,7 +450,7 @@ type AuthMethods struct {
 	NoClient  bool
 }
 
-func (s *Server) checkArguments(a utils.NetAddr, h NewChanHandler, hostSigners []ssh.Signer, ah AuthMethods) error {
+func checkArguments(a utils.NetAddr, h NewChanHandler, hostSigners []ssh.Signer, ah AuthMethods) error {
 	if a.Addr == "" || a.AddrNetwork == "" {
 		return trace.BadParameter("addr: specify network and the address for listening socket")
 	}
@@ -478,39 +461,14 @@ func (s *Server) checkArguments(a utils.NetAddr, h NewChanHandler, hostSigners [
 	if len(hostSigners) == 0 {
 		return trace.BadParameter("need at least one signer")
 	}
-	for _, signer := range hostSigners {
-		if signer == nil {
+	for _, s := range hostSigners {
+		if s == nil {
 			return trace.BadParameter("host signer can not be nil")
-		}
-		if !s.insecureSkipHostValidation {
-			err := validateHostSigner(signer)
-			if err != nil {
-				return trace.Wrap(err)
-			}
 		}
 	}
 	if ah.PublicKey == nil && ah.Password == nil && ah.NoClient == false {
 		return trace.BadParameter("need at least one auth method")
 	}
-	return nil
-}
-
-// validateHostSigner make sure the signer is a valid certificate.
-func validateHostSigner(signer ssh.Signer) error {
-	cert, ok := signer.PublicKey().(*ssh.Certificate)
-	if !ok {
-		return trace.BadParameter("only host certificates supported")
-	}
-	if len(cert.ValidPrincipals) == 0 {
-		return trace.BadParameter("at least one valid principal is required in host certificate")
-	}
-
-	certChecker := utils.CertChecker{}
-	err := certChecker.CheckCert(cert.ValidPrincipals[0], cert)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-
 	return nil
 }
 

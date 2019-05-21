@@ -53,8 +53,7 @@ func (s *AuthServer) CreateGithubAuthRequest(req services.GithubAuthRequest) (*s
 	req.RedirectURL = client.AuthCodeURL(req.StateToken, "", "")
 	log.WithFields(logrus.Fields{trace.Component: "github"}).Debugf(
 		"Redirect URL: %v.", req.RedirectURL)
-	req.SetTTL(s.GetClock(), defaults.GithubAuthRequestTTL)
-	err = s.Identity.CreateGithubAuthRequest(req)
+	err = s.Identity.CreateGithubAuthRequest(req, defaults.GithubAuthRequestTTL)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -84,13 +83,13 @@ type GithubAuthResponse struct {
 func (a *AuthServer) ValidateGithubAuthCallback(q url.Values) (*GithubAuthResponse, error) {
 	re, err := a.validateGithubAuthCallback(q)
 	if err != nil {
-		a.EmitAuditEvent(events.UserSSOLoginFailure, events.EventFields{
+		a.EmitAuditEvent(events.UserLoginEvent, events.EventFields{
 			events.LoginMethod:        events.LoginMethodGithub,
 			events.AuthAttemptSuccess: false,
 			events.AuthAttemptErr:     err.Error(),
 		})
 	} else {
-		a.EmitAuditEvent(events.UserSSOLogin, events.EventFields{
+		a.EmitAuditEvent(events.UserLoginEvent, events.EventFields{
 			events.EventUser:          re.Username,
 			events.AuthAttemptSuccess: true,
 			events.LoginMethod:        events.LoginMethodGithub,
@@ -150,215 +149,119 @@ func (s *AuthServer) validateGithubAuthCallback(q url.Values) (*GithubAuthRespon
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-
-	// Calculate (figure out name, roles, traits, session TTL) of user and
-	// create the user in the backend.
-	params, err := s.calculateGithubUser(connector, claims, req)
+	err = s.createGithubUser(connector, *claims)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	user, err := s.createGithubUser(params)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	// Auth was successful, return session, certificate, etc. to caller.
 	response := &GithubAuthResponse{
-		Req: *req,
 		Identity: services.ExternalIdentity{
-			ConnectorID: params.connectorName,
-			Username:    params.username,
+			ConnectorID: connector.GetName(),
+			Username:    claims.Username,
 		},
-		Username: user.GetName(),
+		Req: *req,
+	}
+	user, err := s.Identity.GetUserByGithubIdentity(response.Identity)
+	if err != nil {
+		return nil, trace.Wrap(err)
 	}
 	response.Username = user.GetName()
-
-	// If the request is coming from a browser, create a web session.
+	roles, err := services.FetchRoles(user.GetRoles(), s.Access, user.GetTraits())
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
 	if req.CreateWebSession {
-		session, err := s.createWebSession(user, params.sessionTTL)
+		session, err := s.NewWebSession(user.GetName())
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
-
+		sessionTTL := roles.AdjustSessionTTL(defaults.OAuth2TTL)
+		bearerTTL := utils.MinTTL(BearerTokenTTL, sessionTTL)
+		session.SetExpiryTime(s.clock.Now().UTC().Add(sessionTTL))
+		session.SetBearerTokenExpiryTime(s.clock.Now().UTC().Add(bearerTTL))
+		err = s.UpsertWebSession(user.GetName(), session)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
 		response.Session = session
 	}
-
-	// If a public key was provided, sign it and return a certificate.
 	if len(req.PublicKey) != 0 {
-		sshCert, tlsCert, err := s.createSessionCert(user, params.sessionTTL, req.PublicKey, req.Compatibility)
+		certTTL := utils.MinTTL(defaults.OAuth2TTL, req.CertTTL)
+		certs, err := s.generateUserCert(certRequest{
+			user:          user,
+			roles:         roles,
+			ttl:           certTTL,
+			publicKey:     req.PublicKey,
+			compatibility: req.Compatibility,
+		})
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
+		response.Cert = certs.ssh
+		response.TLSCert = certs.tls
 
-		clusterName, err := s.GetClusterName()
+		authorities, err := s.GetCertAuthorities(services.HostCA, false)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
-
-		response.Cert = sshCert
-		response.TLSCert = tlsCert
-
-		// Return the host CA for this cluster only.
-		authority, err := s.GetCertAuthority(services.CertAuthID{
-			Type:       services.HostCA,
-			DomainName: clusterName.GetClusterName(),
-		}, false)
-		if err != nil {
-			return nil, trace.Wrap(err)
+		for _, authority := range authorities {
+			response.HostSigners = append(response.HostSigners, authority)
 		}
-		response.HostSigners = append(response.HostSigners, authority)
 	}
-
 	return response, nil
 }
 
-func (s *AuthServer) createWebSession(user services.User, sessionTTL time.Duration) (services.WebSession, error) {
-	session, err := s.NewWebSession(user.GetName())
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	// Session expiry time is the same as the user expiry time.
-	session.SetExpiryTime(s.clock.Now().UTC().Add(sessionTTL))
-
-	// Bearer tokens expire quicker than the overall session time and need to be refreshed.
-	bearerTTL := utils.MinTTL(BearerTokenTTL, sessionTTL)
-	session.SetBearerTokenExpiryTime(s.clock.Now().UTC().Add(bearerTTL))
-
-	err = s.UpsertWebSession(user.GetName(), session)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	return session, nil
-}
-
-func (s *AuthServer) createSessionCert(user services.User, sessionTTL time.Duration, publicKey []byte, compatibility string) ([]byte, []byte, error) {
-	roles, err := services.FetchRoles(user.GetRoles(), s.Access, user.GetTraits())
-	if err != nil {
-		return nil, nil, trace.Wrap(err)
-	}
-
-	certs, err := s.generateUserCert(certRequest{
-		user:          user,
-		roles:         roles,
-		ttl:           sessionTTL,
-		publicKey:     publicKey,
-		compatibility: compatibility,
-	})
-	if err != nil {
-		return nil, nil, trace.Wrap(err)
-	}
-
-	return certs.ssh, certs.tls, nil
-}
-
-// createUserParams is a set of parameters used to create a user for an
-// external identity provider.
-type createUserParams struct {
-	// connectorName is the name of the connector for the identity provider.
-	connectorName string
-
-	// username is the Teleport user name .
-	username string
-
-	// logins is the list of *nix logins.
-	logins []string
-
-	// kubeGroups is the list of Kubernetes this user belongs to.
-	kubeGroups []string
-
-	// roles is the list of roles this user is assigned to.
-	roles []string
-
-	// traits is the list of traits for this user.
-	traits map[string][]string
-
-	// sessionTTL is how long this session will last.
-	sessionTTL time.Duration
-}
-
-func (s *AuthServer) calculateGithubUser(connector services.GithubConnector, claims *services.GithubClaims, request *services.GithubAuthRequest) (*createUserParams, error) {
-	p := createUserParams{
-		connectorName: connector.GetName(),
-		username:      claims.Username,
-	}
-
-	// Calculate logins, kubegroups, roles, and traits.
-	p.logins, p.kubeGroups = connector.MapClaims(*claims)
-	if len(p.logins) == 0 {
-		return nil, trace.BadParameter(
+func (s *AuthServer) createGithubUser(connector services.GithubConnector, claims services.GithubClaims) error {
+	logins := connector.MapClaims(claims)
+	if len(logins) == 0 {
+		return trace.BadParameter(
 			"user %q does not belong to any teams configured in %q connector",
 			claims.Username, connector.GetName())
 	}
-	p.roles = modules.GetModules().RolesFromLogins(p.logins)
-	p.traits = modules.GetModules().TraitsFromLogins(p.logins, p.kubeGroups)
-
-	// Pick smaller for role: session TTL from role or requested TTL.
-	roles, err := services.FetchRoles(p.roles, s.Access, p.traits)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	roleTTL := roles.AdjustSessionTTL(defaults.MaxCertDuration)
-	p.sessionTTL = utils.MinTTL(roleTTL, request.CertTTL)
-
-	return &p, nil
-}
-
-func (s *AuthServer) createGithubUser(p *createUserParams) (services.User, error) {
-
 	log.WithFields(logrus.Fields{trace.Component: "github"}).Debugf(
 		"Generating dynamic identity %v/%v with logins: %v.",
-		p.connectorName, p.username, p.logins)
-
-	expires := s.GetClock().Now().UTC().Add(p.sessionTTL)
-
+		connector.GetName(), claims.Username, logins)
 	user, err := services.GetUserMarshaler().GenerateUser(&services.UserV2{
 		Kind:    services.KindUser,
 		Version: services.V2,
 		Metadata: services.Metadata{
-			Name:      p.username,
+			Name:      claims.Username,
 			Namespace: defaults.Namespace,
-			Expires:   &expires,
 		},
 		Spec: services.UserSpecV2{
-			Roles:  p.roles,
-			Traits: p.traits,
+			Roles:   modules.GetModules().RolesFromLogins(logins),
+			Traits:  modules.GetModules().TraitsFromLogins(logins),
+			Expires: s.clock.Now().UTC().Add(defaults.OAuth2TTL),
 			GithubIdentities: []services.ExternalIdentity{{
-				ConnectorID: p.connectorName,
-				Username:    p.username,
+				ConnectorID: connector.GetName(),
+				Username:    claims.Username,
 			}},
 			CreatedBy: services.CreatedBy{
 				User: services.UserRef{Name: "system"},
-				Time: s.GetClock().Now().UTC(),
+				Time: time.Now().UTC(),
 				Connector: &services.ConnectorRef{
 					Type:     teleport.ConnectorGithub,
-					ID:       p.connectorName,
-					Identity: p.username,
+					ID:       connector.GetName(),
+					Identity: claims.Username,
 				},
 			},
 		},
 	})
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	existingUser, err := s.GetUser(p.username)
+	existingUser, err := s.GetUser(claims.Username)
 	if err != nil && !trace.IsNotFound(err) {
-		return nil, trace.Wrap(err)
+		return trace.Wrap(err)
 	}
 	if existingUser != nil {
 		ref := user.GetCreatedBy().Connector
 		if !ref.IsSameProvider(existingUser.GetCreatedBy().Connector) {
-			return nil, trace.AlreadyExists("user %q already exists and is not Github user",
+			return trace.AlreadyExists("user %q already exists and is not Github user",
 				existingUser.GetName())
 		}
 	}
 	err = s.UpsertUser(user)
 	if err != nil {
-		return nil, trace.Wrap(err)
+		return trace.Wrap(err)
 	}
-	return user, nil
+	return nil
 }
 
 // populateGithubClaims retrieves information about user and its team
@@ -507,7 +410,7 @@ func (c *githubAPIClient) getTeams() ([]teamResponse, error) {
 
 			// Print warning to Teleport logs as well as the Audit Log.
 			log.Warnf(warningMessage)
-			c.authServer.EmitAuditEvent(events.UserSSOLoginFailure, events.EventFields{
+			c.authServer.EmitAuditEvent(events.UserLoginEvent, events.EventFields{
 				events.LoginMethod:        events.LoginMethodGithub,
 				events.AuthAttemptMessage: warningMessage,
 			})

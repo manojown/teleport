@@ -17,29 +17,30 @@ limitations under the License.
 package local
 
 import (
-	"context"
 	"fmt"
+	"io/ioutil"
+	"os"
 
 	"github.com/gravitational/teleport/lib/backend"
-	"github.com/gravitational/teleport/lib/backend/lite"
+	"github.com/gravitational/teleport/lib/backend/boltbk"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
 
 	"gopkg.in/check.v1"
-	"testing"
 )
 
 type PresenceSuite struct {
-	bk backend.Backend
+	bk      backend.Backend
+	tempDir string
 }
 
 var _ = check.Suite(&PresenceSuite{})
 var _ = fmt.Printf
 
 func (s *PresenceSuite) SetUpSuite(c *check.C) {
-	utils.InitLoggerForTests(testing.Verbose())
+	utils.InitLoggerForTests()
 }
 
 func (s *PresenceSuite) TearDownSuite(c *check.C) {
@@ -48,12 +49,20 @@ func (s *PresenceSuite) TearDownSuite(c *check.C) {
 func (s *PresenceSuite) SetUpTest(c *check.C) {
 	var err error
 
-	s.bk, err = lite.New(context.TODO(), backend.Params{"path": c.MkDir()})
+	s.tempDir, err = ioutil.TempDir("", "trusted-clusters-")
+	c.Assert(err, check.IsNil)
+
+	s.bk, err = boltbk.New(backend.Params{"path": s.tempDir})
 	c.Assert(err, check.IsNil)
 }
 
 func (s *PresenceSuite) TearDownTest(c *check.C) {
+	var err error
+
 	c.Assert(s.bk.Close(), check.IsNil)
+
+	err = os.RemoveAll(s.tempDir)
+	c.Assert(err, check.IsNil)
 }
 
 func (s *PresenceSuite) TestTrustedClusterCRUD(c *check.C) {

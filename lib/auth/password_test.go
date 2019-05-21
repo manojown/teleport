@@ -1,5 +1,5 @@
 /*
-Copyright 2017-2018 Gravitational, Inc.
+Copyright 2017 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,11 +13,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-
 package auth
 
 import (
-	"context"
 	"encoding/base32"
 	"fmt"
 	"time"
@@ -25,7 +23,7 @@ import (
 	"github.com/gravitational/teleport"
 	authority "github.com/gravitational/teleport/lib/auth/testauthority"
 	"github.com/gravitational/teleport/lib/backend"
-	"github.com/gravitational/teleport/lib/backend/lite"
+	"github.com/gravitational/teleport/lib/backend/boltbk"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/services/suite"
@@ -43,8 +41,8 @@ type PasswordSuite struct {
 	a  *AuthServer
 }
 
-var _ = fmt.Printf
 var _ = Suite(&PasswordSuite{})
+var _ = fmt.Printf
 
 func (s *PasswordSuite) SetUpSuite(c *C) {
 	utils.InitLoggerForTests()
@@ -56,7 +54,7 @@ func (s *PasswordSuite) TearDownSuite(c *C) {
 func (s *PasswordSuite) SetUpTest(c *C) {
 	var err error
 	c.Assert(err, IsNil)
-	s.bk, err = lite.New(context.TODO(), backend.Params{"path": c.MkDir()})
+	s.bk, err = boltbk.New(backend.Params{"path": c.MkDir()})
 	c.Assert(err, IsNil)
 
 	// set cluster name
@@ -65,10 +63,9 @@ func (s *PasswordSuite) SetUpTest(c *C) {
 	})
 	c.Assert(err, IsNil)
 	authConfig := &InitConfig{
-		ClusterName:            clusterName,
-		Backend:                s.bk,
-		Authority:              authority.New(),
-		SkipPeriodicOperations: true,
+		ClusterName: clusterName,
+		Backend:     s.bk,
+		Authority:   authority.New(),
 	}
 	s.a, err = NewAuthServer(authConfig)
 	c.Assert(err, IsNil)
@@ -78,7 +75,7 @@ func (s *PasswordSuite) SetUpTest(c *C) {
 
 	// set static tokens
 	staticTokens, err := services.NewStaticTokens(services.StaticTokensSpecV2{
-		StaticTokens: []services.ProvisionTokenV1{},
+		StaticTokens: []services.ProvisionToken{},
 	})
 	c.Assert(err, IsNil)
 	err = s.a.SetStaticTokens(staticTokens)
@@ -122,7 +119,7 @@ func (s *PasswordSuite) TestChangePassword(c *C) {
 	c.Assert(err, IsNil)
 
 	fakeClock := clockwork.NewFakeClock()
-	s.a.SetClock(fakeClock)
+	s.a.clock = fakeClock
 	req.NewPassword = []byte("abce456")
 
 	err = s.a.ChangePassword(req)
@@ -147,9 +144,9 @@ func (s *PasswordSuite) TestChangePasswordWithOTP(c *C) {
 	c.Assert(err, IsNil)
 
 	fakeClock := clockwork.NewFakeClock()
-	s.a.SetClock(fakeClock)
+	s.a.clock = fakeClock
 
-	validToken, err := totp.GenerateCode(otpSecret, s.a.GetClock().Now())
+	validToken, err := totp.GenerateCode(otpSecret, s.a.clock.Now())
 	c.Assert(err, IsNil)
 
 	// change password
@@ -163,7 +160,7 @@ func (s *PasswordSuite) TestChangePasswordWithOTP(c *C) {
 	// advance time and make sure we can login again
 	fakeClock.Advance(defaults.AccountLockInterval + time.Second)
 
-	validToken, _ = totp.GenerateCode(otpSecret, s.a.GetClock().Now())
+	validToken, _ = totp.GenerateCode(otpSecret, s.a.clock.Now())
 	req.OldPassword = req.NewPassword
 	req.NewPassword = []byte("abc5555")
 	req.SecondFactorToken = validToken
@@ -219,6 +216,11 @@ func (s *PasswordSuite) prepareForPasswordChange(user string, pass []byte, secon
 		return req, err
 	}
 	err = s.a.UpsertPassword(user, pass)
+	if err != nil {
+		return req, err
+	}
+
+	_, err = s.a.SignIn(user, pass)
 	if err != nil {
 		return req, err
 	}

@@ -17,7 +17,6 @@ limitations under the License.
 package auth
 
 import (
-	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -28,13 +27,14 @@ import (
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth/testauthority"
 	"github.com/gravitational/teleport/lib/backend"
-	"github.com/gravitational/teleport/lib/backend/lite"
+	"github.com/gravitational/teleport/lib/backend/boltbk"
+	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
+
 	. "gopkg.in/check.v1"
-	"testing"
 )
 
 type AuthInitSuite struct {
@@ -45,7 +45,7 @@ var _ = Suite(&AuthInitSuite{})
 var _ = fmt.Printf
 
 func (s *AuthInitSuite) SetUpSuite(c *C) {
-	utils.InitLoggerForTests(testing.Verbose())
+	utils.InitLoggerForTests()
 }
 
 func (s *AuthInitSuite) TearDownSuite(c *C) {
@@ -166,7 +166,7 @@ func (s *AuthInitSuite) TestBadIdentity(c *C) {
 // TestAuthPreference ensures that the act of creating an AuthServer sets
 // the AuthPreference (type and second factor) on the backend.
 func (s *AuthInitSuite) TestAuthPreference(c *C) {
-	bk, err := lite.New(context.TODO(), backend.Params{"path": s.tempDir})
+	bk, err := boltbk.New(backend.Params{"path": s.tempDir})
 	c.Assert(err, IsNil)
 
 	ap, err := services.NewAuthPreference(services.AuthPreferenceSpecV2{
@@ -184,7 +184,7 @@ func (s *AuthInitSuite) TestAuthPreference(c *C) {
 	})
 	c.Assert(err, IsNil)
 	staticTokens, err := services.NewStaticTokens(services.StaticTokensSpecV2{
-		StaticTokens: []services.ProvisionTokenV1{},
+		StaticTokens: []services.ProvisionToken{},
 	})
 	c.Assert(err, IsNil)
 
@@ -199,7 +199,7 @@ func (s *AuthInitSuite) TestAuthPreference(c *C) {
 		StaticTokens:   staticTokens,
 		AuthPreference: ap,
 	}
-	as, err := Init(ac)
+	as, _, err := Init(ac)
 	c.Assert(err, IsNil)
 
 	cap, err := as.GetAuthPreference()
@@ -213,7 +213,7 @@ func (s *AuthInitSuite) TestAuthPreference(c *C) {
 }
 
 func (s *AuthInitSuite) TestClusterID(c *C) {
-	bk, err := lite.New(context.TODO(), backend.Params{"path": c.MkDir()})
+	bk, err := boltbk.New(backend.Params{"path": c.MkDir()})
 	c.Assert(err, IsNil)
 
 	clusterName, err := services.NewClusterName(services.ClusterNameSpecV2{
@@ -221,21 +221,14 @@ func (s *AuthInitSuite) TestClusterID(c *C) {
 	})
 	c.Assert(err, IsNil)
 
-	authPreference, err := services.NewAuthPreference(services.AuthPreferenceSpecV2{
-		Type: "local",
-	})
-	c.Assert(err, IsNil)
-
-	authServer, err := Init(InitConfig{
-		DataDir:        c.MkDir(),
-		HostUUID:       "00000000-0000-0000-0000-000000000000",
-		NodeName:       "foo",
-		Backend:        bk,
-		Authority:      testauthority.New(),
-		ClusterConfig:  services.DefaultClusterConfig(),
-		ClusterName:    clusterName,
-		StaticTokens:   services.DefaultStaticTokens(),
-		AuthPreference: authPreference,
+	authServer, _, err := Init(InitConfig{
+		DataDir:       c.MkDir(),
+		HostUUID:      "00000000-0000-0000-0000-000000000000",
+		NodeName:      "foo",
+		Backend:       bk,
+		Authority:     testauthority.New(),
+		ClusterConfig: services.DefaultClusterConfig(),
+		ClusterName:   clusterName,
 	})
 	c.Assert(err, IsNil)
 
@@ -245,16 +238,14 @@ func (s *AuthInitSuite) TestClusterID(c *C) {
 	c.Assert(clusterID, Not(Equals), "")
 
 	// do it again and make sure cluster ID hasn't changed
-	authServer, err = Init(InitConfig{
-		DataDir:        c.MkDir(),
-		HostUUID:       "00000000-0000-0000-0000-000000000000",
-		NodeName:       "foo",
-		Backend:        bk,
-		Authority:      testauthority.New(),
-		ClusterConfig:  services.DefaultClusterConfig(),
-		ClusterName:    clusterName,
-		StaticTokens:   services.DefaultStaticTokens(),
-		AuthPreference: authPreference,
+	authServer, _, err = Init(InitConfig{
+		DataDir:       c.MkDir(),
+		HostUUID:      "00000000-0000-0000-0000-000000000000",
+		NodeName:      "foo",
+		Backend:       bk,
+		Authority:     testauthority.New(),
+		ClusterConfig: services.DefaultClusterConfig(),
+		ClusterName:   clusterName,
 	})
 	c.Assert(err, IsNil)
 
@@ -263,9 +254,11 @@ func (s *AuthInitSuite) TestClusterID(c *C) {
 	c.Assert(cc.GetClusterID(), Equals, clusterID)
 }
 
-// TestClusterName ensures that a cluster can not be renamed.
-func (s *AuthInitSuite) TestClusterName(c *C) {
-	bk, err := lite.New(context.TODO(), backend.Params{"path": c.MkDir()})
+// DELETE IN: 2.6.0
+// Migration of cert_format will be done in Teleport 2.5.0, so this test can
+// be removed in Teleport 2.6.0.
+func (s *AuthInitSuite) TestOptions(c *C) {
+	bk, err := boltbk.New(backend.Params{"path": c.MkDir()})
 	c.Assert(err, IsNil)
 
 	clusterName, err := services.NewClusterName(services.ClusterNameSpecV2{
@@ -273,45 +266,41 @@ func (s *AuthInitSuite) TestClusterName(c *C) {
 	})
 	c.Assert(err, IsNil)
 
-	authPreference, err := services.NewAuthPreference(services.AuthPreferenceSpecV2{
-		Type: "local",
+	authServer, _, err := Init(InitConfig{
+		DataDir:       c.MkDir(),
+		HostUUID:      "00000000-0000-0000-0000-000000000000",
+		NodeName:      "foo",
+		Backend:       bk,
+		Authority:     testauthority.New(),
+		ClusterConfig: services.DefaultClusterConfig(),
+		ClusterName:   clusterName,
 	})
 	c.Assert(err, IsNil)
 
-	_, err = Init(InitConfig{
-		DataDir:        c.MkDir(),
-		HostUUID:       "00000000-0000-0000-0000-000000000000",
-		NodeName:       "foo",
-		Backend:        bk,
-		Authority:      testauthority.New(),
-		ClusterConfig:  services.DefaultClusterConfig(),
-		ClusterName:    clusterName,
-		StaticTokens:   services.DefaultStaticTokens(),
-		AuthPreference: authPreference,
+	// upsert role with no values for certificate format
+	role := services.NewAdminRole()
+	role.SetOptions(services.RoleOptions{
+		services.MaxSessionTTL: services.NewDuration(defaults.MaxCertDuration),
+	})
+	err = authServer.UpsertRole(role, backend.Forever)
+	c.Assert(err, IsNil)
+
+	// do it again and make sure the options have been populated
+	authServer, _, err = Init(InitConfig{
+		DataDir:       c.MkDir(),
+		HostUUID:      "00000000-0000-0000-0000-000000000000",
+		NodeName:      "foo",
+		Backend:       bk,
+		Authority:     testauthority.New(),
+		ClusterConfig: services.DefaultClusterConfig(),
+		ClusterName:   clusterName,
 	})
 	c.Assert(err, IsNil)
 
-	// Start the auth server with a different cluster name. The auth server
-	// should start, but with the original name.
-	clusterName, err = services.NewClusterName(services.ClusterNameSpecV2{
-		ClusterName: "dev.localhost",
-	})
+	role, err = authServer.GetRole(teleport.AdminRoleName)
 	c.Assert(err, IsNil)
 
-	authServer, err := Init(InitConfig{
-		DataDir:        c.MkDir(),
-		HostUUID:       "00000000-0000-0000-0000-000000000000",
-		NodeName:       "foo",
-		Backend:        bk,
-		Authority:      testauthority.New(),
-		ClusterConfig:  services.DefaultClusterConfig(),
-		ClusterName:    clusterName,
-		StaticTokens:   services.DefaultStaticTokens(),
-		AuthPreference: authPreference,
-	})
+	certificateFormat, err := role.GetOptions().GetString(services.CertificateFormat)
 	c.Assert(err, IsNil)
-
-	cn, err := authServer.GetClusterName()
-	c.Assert(err, IsNil)
-	c.Assert(cn.GetClusterName(), Equals, "me.localhost")
+	c.Assert(certificateFormat, Equals, teleport.CertificateFormatStandard)
 }

@@ -97,7 +97,7 @@ func (roles Roles) Include(role Role) bool {
 func (roles Roles) StringSlice() []string {
 	s := make([]string, 0)
 	for _, r := range roles {
-		s = append(s, r.String())
+		s = append(s, string(r))
 	}
 	return s
 }
@@ -140,16 +140,9 @@ func (r *Role) Set(v string) error {
 	return nil
 }
 
-// String returns debug-friendly representation of this role.
+// String returns debug-friendly representation of this role
 func (r *Role) String() string {
-	switch string(*r) {
-	case string(RoleSignup):
-		return "User signup"
-	case string(RoleTrustedCluster), string(LegacyClusterTokenType):
-		return "trusted_cluster"
-	default:
-		return fmt.Sprintf("%v", string(*r))
-	}
+	return fmt.Sprintf("%v", string(*r))
 }
 
 // Check checks if this a a valid role value, returns nil

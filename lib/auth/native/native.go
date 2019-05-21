@@ -34,7 +34,6 @@ import (
 
 	"github.com/gravitational/trace"
 
-	"github.com/jonboulle/clockwork"
 	"github.com/sirupsen/logrus"
 )
 
@@ -52,70 +51,34 @@ type keyPair struct {
 
 // keygen is a key generator that precomputes keys to provide quick access to
 // public/private key pairs.
-type Keygen struct {
+type keygen struct {
 	keysCh chan keyPair
 
-	ctx             context.Context
-	cancel          context.CancelFunc
-	precomputeCount int
-
-	// clock is used to control time.
-	clock clockwork.Clock
-}
-
-// KeygenOption is a functional optional argument for key generator
-type KeygenOption func(k *Keygen) error
-
-// SetClock sets the clock to use for key generation.
-func SetClock(clock clockwork.Clock) KeygenOption {
-	return func(k *Keygen) error {
-		k.clock = clock
-		return nil
-	}
-}
-
-// PrecomputeKeys sets up a number of private keys to pre-compute
-// in background, 0 disables the process
-func PrecomputeKeys(count int) KeygenOption {
-	return func(k *Keygen) error {
-		k.precomputeCount = count
-		return nil
-	}
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // New returns a new key generator.
-func New(ctx context.Context, opts ...KeygenOption) (*Keygen, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	k := &Keygen{
-		ctx:             ctx,
-		cancel:          cancel,
-		precomputeCount: PrecomputedNum,
-		clock:           clockwork.NewRealClock(),
-	}
-	for _, opt := range opts {
-		if err := opt(k); err != nil {
-			return nil, trace.Wrap(err)
-		}
-	}
+func New() *keygen {
+	ctx, cancel := context.WithCancel(context.Background())
 
-	if k.precomputeCount > 0 {
-		log.Debugf("SSH cert authority is going to pre-compute %v keys.", k.precomputeCount)
-		k.keysCh = make(chan keyPair, k.precomputeCount)
-		go k.precomputeKeys()
-	} else {
-		log.Debugf("SSH cert authority started with no keys pre-compute.")
+	k := &keygen{
+		keysCh: make(chan keyPair, PrecomputedNum),
+		ctx:    ctx,
+		cancel: cancel,
 	}
+	go k.precomputeKeys()
 
-	return k, nil
+	return k
 }
 
 // Close stops the precomputation of keys (if enabled) and releases all resources.
-func (k *Keygen) Close() {
+func (k *keygen) Close() {
 	k.cancel()
 }
 
 // GetNewKeyPairFromPool returns precomputed key pair from the pool.
-func (k *Keygen) GetNewKeyPairFromPool() ([]byte, []byte, error) {
+func (k *keygen) GetNewKeyPairFromPool() ([]byte, []byte, error) {
 	select {
 	case key := <-k.keysCh:
 		return key.privPem, key.pubBytes, nil
@@ -125,7 +88,7 @@ func (k *Keygen) GetNewKeyPairFromPool() ([]byte, []byte, error) {
 }
 
 // precomputeKeys continues loops forever trying to compute cache key pairs.
-func (k *Keygen) precomputeKeys() {
+func (k *keygen) precomputeKeys() {
 	for {
 		privPem, pubBytes, err := GenerateKeyPair("")
 		if err != nil {
@@ -150,7 +113,7 @@ func (k *Keygen) precomputeKeys() {
 // GenerateKeyPair returns fresh priv/pub keypair, takes about 300ms to
 // execute.
 func GenerateKeyPair(passphrase string) ([]byte, []byte, error) {
-	priv, err := rsa.GenerateKey(rand.Reader, teleport.RSAKeySize)
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -172,13 +135,13 @@ func GenerateKeyPair(passphrase string) ([]byte, []byte, error) {
 
 // GenerateKeyPair returns fresh priv/pub keypair, takes about 300ms to
 // execute.
-func (k *Keygen) GenerateKeyPair(passphrase string) ([]byte, []byte, error) {
+func (k *keygen) GenerateKeyPair(passphrase string) ([]byte, []byte, error) {
 	return GenerateKeyPair(passphrase)
 }
 
 // GenerateHostCert generates a host certificate with the passed in parameters.
 // The private key of the CA to sign the certificate must be provided.
-func (k *Keygen) GenerateHostCert(c services.HostCertParams) ([]byte, error) {
+func (k *keygen) GenerateHostCert(c services.HostCertParams) ([]byte, error) {
 	if err := c.Check(); err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -193,7 +156,7 @@ func (k *Keygen) GenerateHostCert(c services.HostCertParams) ([]byte, error) {
 		return nil, trace.Wrap(err)
 	}
 
-	// Build a valid list of principals from the HostID and NodeName and then
+	// build a valid list of principals from the HostID and NodeName and then
 	// add in any additional principals passed in.
 	principals := BuildPrincipals(c.HostID, c.NodeName, c.ClusterName, c.Roles)
 	principals = append(principals, c.Principals...)
@@ -201,18 +164,16 @@ func (k *Keygen) GenerateHostCert(c services.HostCertParams) ([]byte, error) {
 		return nil, trace.BadParameter("no principals provided: %v, %v, %v",
 			c.HostID, c.NodeName, c.Principals)
 	}
-	principals = utils.Deduplicate(principals)
 
 	// create certificate
 	validBefore := uint64(ssh.CertTimeInfinity)
 	if c.TTL != 0 {
-		b := k.clock.Now().UTC().Add(c.TTL)
+		b := time.Now().Add(c.TTL)
 		validBefore = uint64(b.Unix())
 	}
 	cert := &ssh.Certificate{
 		ValidPrincipals: principals,
 		Key:             pubKey,
-		ValidAfter:      uint64(k.clock.Now().UTC().Add(-1 * time.Minute).Unix()),
 		ValidBefore:     validBefore,
 		CertType:        ssh.HostCert,
 	}
@@ -225,14 +186,12 @@ func (k *Keygen) GenerateHostCert(c services.HostCertParams) ([]byte, error) {
 		return nil, trace.Wrap(err)
 	}
 
-	log.Debugf("Generated SSH host certificate for role %v with principals: %v.",
-		c.Roles, principals)
 	return ssh.MarshalAuthorizedKey(cert), nil
 }
 
 // GenerateUserCert generates a host certificate with the passed in parameters.
 // The private key of the CA to sign the certificate must be provided.
-func (k *Keygen) GenerateUserCert(c services.UserCertParams) ([]byte, error) {
+func (k *keygen) GenerateUserCert(c services.UserCertParams) ([]byte, error) {
 	if c.TTL < defaults.MinCertDuration {
 		return nil, trace.BadParameter("wrong certificate TTL")
 	}
@@ -245,7 +204,7 @@ func (k *Keygen) GenerateUserCert(c services.UserCertParams) ([]byte, error) {
 	}
 	validBefore := uint64(ssh.CertTimeInfinity)
 	if c.TTL != 0 {
-		b := k.clock.Now().UTC().Add(c.TTL)
+		b := time.Now().Add(c.TTL)
 		validBefore = uint64(b.Unix())
 		log.Debugf("generated user key for %v with expiry on (%v) %v", c.AllowedLogins, validBefore, b)
 	}
@@ -254,7 +213,6 @@ func (k *Keygen) GenerateUserCert(c services.UserCertParams) ([]byte, error) {
 		KeyId:           c.Username,
 		ValidPrincipals: c.AllowedLogins,
 		Key:             pubKey,
-		ValidAfter:      uint64(k.clock.Now().UTC().Add(-1 * time.Minute).Unix()),
 		ValidBefore:     validBefore,
 		CertType:        ssh.UserCert,
 	}

@@ -17,7 +17,6 @@ limitations under the License.
 package tlsca
 
 import (
-	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
@@ -28,7 +27,7 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/gravitational/teleport"
+	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/trace"
 )
 
@@ -42,7 +41,7 @@ func ClusterName(subject pkix.Name) (string, error) {
 
 // GenerateRSAPrivateKeyPEM generates new RSA private key and returns PEM encoded bytes
 func GenerateRSAPrivateKeyPEM() ([]byte, error) {
-	priv, err := rsa.GenerateKey(rand.Reader, teleport.RSAKeySize)
+	priv, err := rsa.GenerateKey(rand.Reader, defaults.RSABits)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -88,7 +87,7 @@ func GenerateSelfSignedCAWithPrivateKey(priv *rsa.PrivateKey, entity pkix.Name, 
 
 // GenerateSelfSignedCA generates self-signed certificate authority used for internal inter-node communications
 func GenerateSelfSignedCA(entity pkix.Name, dnsNames []string, ttl time.Duration) ([]byte, []byte, error) {
-	priv, err := rsa.GenerateKey(rand.Reader, teleport.RSAKeySize)
+	priv, err := rsa.GenerateKey(rand.Reader, defaults.RSABits)
 	if err != nil {
 		return nil, nil, trace.Wrap(err)
 	}
@@ -154,50 +153,4 @@ func ParsePrivateKeyDER(der []byte) (crypto.Signer, error) {
 	}
 
 	return nil, trace.BadParameter("unsupported private key type")
-}
-
-// ParsePublicKeyPEM parses public key PEM
-func ParsePublicKeyPEM(bytes []byte) (interface{}, error) {
-	block, _ := pem.Decode(bytes)
-	if block == nil {
-		return nil, trace.BadParameter("expected PEM-encoded block")
-	}
-	return ParsePublicKeyDER(block.Bytes)
-}
-
-// ParsePublicKeyDER parses unencrypted DER-encoded publice key
-func ParsePublicKeyDER(der []byte) (crypto.PublicKey, error) {
-	generalKey, err := x509.ParsePKIXPublicKey(der)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return generalKey, nil
-}
-
-// MarshalPublicKeyFromPrivateKeyPEM extracts public key from private key
-// and returns PEM marshalled key
-func MarshalPublicKeyFromPrivateKeyPEM(privateKey crypto.PrivateKey) ([]byte, error) {
-	rsaPrivateKey, ok := privateKey.(*rsa.PrivateKey)
-	if !ok {
-		return nil, trace.BadParameter("expected RSA key")
-	}
-	rsaPublicKey := rsaPrivateKey.Public()
-	derBytes, err := x509.MarshalPKIXPublicKey(rsaPublicKey)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return pem.EncodeToMemory(&pem.Block{Type: "RSA PUBLIC KEY", Bytes: derBytes}), nil
-}
-
-// MarshalCertificatePEM takes a *x509.Certificate and returns the PEM
-// encoded bytes.
-func MarshalCertificatePEM(cert *x509.Certificate) ([]byte, error) {
-	var buf bytes.Buffer
-
-	err := pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	return buf.Bytes(), nil
 }

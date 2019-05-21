@@ -22,9 +22,6 @@ import (
 	"os"
 
 	"github.com/gravitational/teleport/lib/auth/native"
-	"github.com/gravitational/teleport/lib/services"
-	"github.com/gravitational/teleport/lib/sshutils"
-
 	"github.com/gravitational/trace"
 )
 
@@ -59,7 +56,7 @@ const (
 
 // MakeIdentityFile takes a username + their credentials and saves them to disk
 // in a specified format
-func MakeIdentityFile(filePath string, key *Key, format IdentityFileFormat, certAuthorities []services.CertAuthority) (err error) {
+func MakeIdentityFile(filePath string, key *Key, format IdentityFileFormat) (err error) {
 	const (
 		// the files and the dir will be created with these permissions:
 		fileMode = 0600
@@ -89,22 +86,6 @@ func MakeIdentityFile(filePath string, key *Key, format IdentityFileFormat, cert
 		if _, err = output.Write(key.Cert); err != nil {
 			return trace.Wrap(err)
 		}
-		// append trusted host certificate authorities
-		for _, ca := range certAuthorities {
-			for _, publicKey := range ca.GetCheckingKeys() {
-				data, err := sshutils.MarshalAuthorizedHostsFormat(ca.GetClusterName(), publicKey, nil)
-				if err != nil {
-					return trace.Wrap(err)
-				}
-				if _, err = output.Write([]byte(data)); err != nil {
-					return trace.Wrap(err)
-				}
-				if _, err = output.Write([]byte("\n")); err != nil {
-					return trace.Wrap(err)
-				}
-			}
-		}
-
 	// dump user identity into separate files:
 	case IdentityFormatOpenSSH:
 		keyPath := filePath
@@ -119,9 +100,6 @@ func MakeIdentityFile(filePath string, key *Key, format IdentityFileFormat, cert
 		if err != nil {
 			return trace.Wrap(err)
 		}
-	default:
-		return trace.BadParameter("unsupported identity format: %q, use either %q or %q",
-			format, IdentityFormatFile, IdentityFormatOpenSSH)
 	}
 	return nil
 }

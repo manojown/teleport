@@ -1,5 +1,5 @@
 /*
-Copyright 2015-2018 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,20 +19,16 @@ limitations under the License.
 package session
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/defaults"
+	log "github.com/sirupsen/logrus"
 
-	"github.com/docker/docker/pkg/term"
 	"github.com/gravitational/trace"
-	"github.com/jonboulle/clockwork"
+	"github.com/moby/moby/pkg/term"
 	"github.com/pborman/uuid"
 )
 
@@ -158,33 +154,10 @@ func (p *Party) String() string {
 	)
 }
 
-// TerminalParams holds the terminal size in a session.
+// TerminalParams holds parameters of the terminal used in session
 type TerminalParams struct {
 	W int `json:"w"`
 	H int `json:"h"`
-}
-
-// UnmarshalTerminalParams takes a serialized string that contains the
-// terminal parameters and returns a *TerminalParams.
-func UnmarshalTerminalParams(s string) (*TerminalParams, error) {
-	parts := strings.Split(s, ":")
-	if len(parts) != 2 {
-		return nil, trace.BadParameter("failed to unmarshal: too many parts")
-	}
-
-	w, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	h, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	return &TerminalParams{
-		W: w,
-		H: h,
-	}, nil
 }
 
 // Serialize is a more strict version of String(): it returns a string
@@ -267,17 +240,15 @@ type Service interface {
 }
 
 type server struct {
-	bk               backend.Backend
+	bk               backend.JSONCodec
 	activeSessionTTL time.Duration
-	clock            clockwork.Clock
 }
 
 // New returns new session server that uses sqlite to manage
 // active sessions
 func New(bk backend.Backend) (Service, error) {
 	s := &server{
-		bk:    bk,
-		clock: clockwork.NewRealClock(),
+		bk: backend.JSONCodec{Backend: bk},
 	}
 	if s.activeSessionTTL == 0 {
 		s.activeSessionTTL = defaults.ActiveSessionTTL
@@ -285,31 +256,38 @@ func New(bk backend.Backend) (Service, error) {
 	return s, nil
 }
 
-func activePrefix(namespace string) []byte {
-	return backend.Key("namespaces", namespace, "sessions", "active")
+func activeBucket(namespace string) []string {
+	return []string{"namespaces", namespace, "sessions", "active"}
 }
 
-func activeKey(namespace string, key string) []byte {
-	return backend.Key("namespaces", namespace, "sessions", "active", key)
+func partiesBucket(namespace string, id ID) []string {
+	return []string{"namespaces", namespace, "sessions", "parties", string(id)}
 }
 
 // GetSessions returns a list of active sessions. Returns an empty slice
 // if no sessions are active
 func (s *server) GetSessions(namespace string) ([]Session, error) {
-	prefix := activePrefix(namespace)
+	bucket := activeBucket(namespace)
+	out := make(Sessions, 0)
 
-	result, err := s.bk.GetRange(context.TODO(), prefix, backend.RangeEnd(prefix), MaxSessionSliceLength)
+	keys, err := s.bk.GetKeys(bucket)
 	if err != nil {
+		log.Error(err)
 		return nil, trace.Wrap(err)
 	}
-	out := make(Sessions, 0, len(result.Items))
-
-	for i := range result.Items {
-		var session Session
-		if err := json.Unmarshal(result.Items[i].Value, &session); err != nil {
+	for i, sid := range keys {
+		if i > MaxSessionSliceLength {
+			break
+		}
+		se, err := s.GetSession(namespace, ID(sid))
+		if err != nil {
+			if trace.IsNotFound(err) {
+				continue
+			}
+			log.Errorf("Unable to retrieve session: %v", err)
 			return nil, trace.Wrap(err)
 		}
-		out = append(out, session)
+		out = append(out, *se)
 	}
 	sort.Stable(out)
 	return out, nil
@@ -339,18 +317,15 @@ func (slice Sessions) Len() int {
 // GetSession returns the session by it's id. Returns NotFound if a session
 // is not found
 func (s *server) GetSession(namespace string, id ID) (*Session, error) {
-	item, err := s.bk.Get(context.TODO(), activeKey(namespace, string(id)))
+	var sess *Session
+	err := s.bk.GetJSONVal(activeBucket(namespace), string(id), &sess)
 	if err != nil {
 		if trace.IsNotFound(err) {
 			return nil, trace.NotFound("session(%v, %v) is not found", namespace, id)
 		}
 		return nil, trace.Wrap(err)
 	}
-	var sess Session
-	if err := json.Unmarshal(item.Value, &sess); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return &sess, nil
+	return sess, nil
 }
 
 // CreateSession creates a new session if it does not exist, if the session
@@ -377,78 +352,40 @@ func (s *server) CreateSession(sess Session) error {
 		return trace.Wrap(err)
 	}
 	sess.Parties = nil
-	data, err := json.Marshal(sess)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-	item := backend.Item{
-		Key:     activeKey(sess.Namespace, string(sess.ID)),
-		Value:   data,
-		Expires: s.clock.Now().UTC().Add(s.activeSessionTTL),
-	}
-	_, err = s.bk.Create(context.TODO(), item)
+	err = s.bk.UpsertJSONVal(activeBucket(sess.Namespace), string(sess.ID), sess, s.activeSessionTTL)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 	return nil
 }
 
-const (
-	sessionUpdateAttempts    = 10
-	sessionUpdateRetryPeriod = 20 * time.Millisecond
-)
-
 // UpdateSession updates session parameters - can mark it as inactive and update it's terminal parameters
 func (s *server) UpdateSession(req UpdateRequest) error {
+	lock := "sessions" + string(req.ID)
+	s.bk.AcquireLock(lock, 5*time.Second)
+	defer s.bk.ReleaseLock(lock)
 	if err := req.Check(); err != nil {
 		return trace.Wrap(err)
 	}
-
-	key := activeKey(req.Namespace, string(req.ID))
-
-	// Try several times, then give up
-	for i := 0; i < sessionUpdateAttempts; i++ {
-		item, err := s.bk.Get(context.TODO(), key)
-		if err != nil {
-			return trace.Wrap(err)
-		}
-
-		var session Session
-		if err := json.Unmarshal(item.Value, &session); err != nil {
-			return trace.Wrap(err)
-		}
-
-		if req.TerminalParams != nil {
-			session.TerminalParams = *req.TerminalParams
-		}
-		if req.Active != nil {
-			session.Active = *req.Active
-		}
-		if req.Parties != nil {
-			session.Parties = *req.Parties
-		}
-		newValue, err := json.Marshal(session)
-		if err != nil {
-			return trace.Wrap(err)
-		}
-		newItem := backend.Item{
-			Key:     key,
-			Value:   newValue,
-			Expires: s.clock.Now().UTC().Add(s.activeSessionTTL),
-		}
-
-		_, err = s.bk.CompareAndSwap(context.TODO(), *item, newItem)
-		if err != nil {
-			if trace.IsCompareFailed(err) || trace.IsConnectionProblem(err) {
-				s.clock.Sleep(sessionUpdateRetryPeriod)
-				continue
-			}
-			return trace.Wrap(err)
-		} else {
-			return nil
-		}
+	var sess *Session
+	err := s.bk.GetJSONVal(activeBucket(req.Namespace), string(req.ID), &sess)
+	if err != nil {
+		return trace.Wrap(err)
 	}
-	return trace.ConnectionProblem(nil, "failed concurrently update the session")
+	if req.TerminalParams != nil {
+		sess.TerminalParams = *req.TerminalParams
+	}
+	if req.Active != nil {
+		sess.Active = *req.Active
+	}
+	if req.Parties != nil {
+		sess.Parties = *req.Parties
+	}
+	err = s.bk.UpsertJSONVal(activeBucket(req.Namespace), string(req.ID), sess, s.activeSessionTTL)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	return nil
 }
 
 // discardSessionServer discards all information about sessions given to it.

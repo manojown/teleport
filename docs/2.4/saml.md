@@ -29,7 +29,7 @@ auth_service:
 ...
 ```
 
-### Configure Okta
+### Confiugre Okta
 
 First, create a SAML 2.0 Web App in Okta configuration section
 
@@ -85,7 +85,7 @@ spec:
   # in the Web interface
   display: "Login with Okta SSO"
 
-  acs: https://teleport-proxy.example.com:3080/v1/webapi/saml/acs
+  acs: https://teleprot-proxy.example.com:3080/v1/webapi/saml/acs
   attributes_to_roles:
     - {name: "groups", value: "okta-admin", roles: ["admin"]}
     - {name: "groups", value: "okta-dev", roles: ["dev"]}
@@ -321,7 +321,7 @@ auth_service:
 ...
 ```
 
-### Configure One Login Application
+### Confiugre One Login Application
 
 Create a SAML 2.0 Web App in SAML configuration section:
 

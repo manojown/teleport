@@ -1,5 +1,5 @@
 /*
-Copyright 2017-2018 Gravitational, Inc.
+Copyright 2017 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,11 +13,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-
 package native
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -29,58 +27,38 @@ import (
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/utils"
 
-	"github.com/jonboulle/clockwork"
-	"gopkg.in/check.v1"
+	. "gopkg.in/check.v1"
 )
 
-func TestNative(t *testing.T) { check.TestingT(t) }
+func TestNative(t *testing.T) { TestingT(t) }
 
 type NativeSuite struct {
 	suite *test.AuthSuite
 }
 
-var _ = check.Suite(&NativeSuite{})
+var _ = Suite(&NativeSuite{})
 var _ = fmt.Printf
 
-func (s *NativeSuite) SetUpSuite(c *check.C) {
+func (s *NativeSuite) SetUpSuite(c *C) {
 	utils.InitLoggerForTests()
-
-	fakeClock := clockwork.NewFakeClockAt(time.Date(2016, 9, 8, 7, 6, 5, 0, time.UTC))
-
-	a, err := New(context.TODO(), PrecomputeKeys(1), SetClock(fakeClock))
-	c.Assert(err, check.IsNil)
-
-	s.suite = &test.AuthSuite{
-		A:     a,
-		Clock: fakeClock,
-	}
+	PrecomputedNum = 1
+	s.suite = &test.AuthSuite{A: New()}
 }
 
-func (s *NativeSuite) TestGenerateKeypairEmptyPass(c *check.C) {
+func (s *NativeSuite) TestGenerateKeypairEmptyPass(c *C) {
 	s.suite.GenerateKeypairEmptyPass(c)
 }
 
-func (s *NativeSuite) TestGenerateKeypairPass(c *check.C) {
+func (s *NativeSuite) TestGenerateKeypairPass(c *C) {
 	s.suite.GenerateKeypairPass(c)
 }
 
-func (s *NativeSuite) TestGenerateHostCert(c *check.C) {
+func (s *NativeSuite) TestGenerateHostCert(c *C) {
 	s.suite.GenerateHostCert(c)
 }
 
-func (s *NativeSuite) TestGenerateUserCert(c *check.C) {
+func (s *NativeSuite) TestGenerateUserCert(c *C) {
 	s.suite.GenerateUserCert(c)
-}
-
-// TestDisablePrecompute makes sure that keygen works
-// when no keys are precomputed
-func (s *NativeSuite) TestDisablePrecompute(c *check.C) {
-	a, err := New(context.TODO(), PrecomputeKeys(0))
-	c.Assert(err, check.IsNil)
-
-	caPrivateKey, _, err := a.GenerateKeyPair("")
-	c.Assert(err, check.IsNil)
-	c.Assert(caPrivateKey, check.NotNil)
 }
 
 // TestBuildPrincipals makes sure that the list of principals for a host
@@ -92,12 +70,12 @@ func (s *NativeSuite) TestDisablePrecompute(c *check.C) {
 //   * If both host ID and node name are given, then both should be included
 //     on the certificate.
 //   * If the host ID and node name are the same, only list one.
-func (s *NativeSuite) TestBuildPrincipals(c *check.C) {
+func (s *NativeSuite) TestBuildPrincipals(c *C) {
 	caPrivateKey, _, err := s.suite.A.GenerateKeyPair("")
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	_, hostPublicKey, err := s.suite.A.GenerateKeyPair("")
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	tests := []struct {
 		inHostID           string
@@ -152,23 +130,23 @@ func (s *NativeSuite) TestBuildPrincipals(c *check.C) {
 				Roles:               tt.inRoles,
 				TTL:                 time.Hour,
 			})
-		c.Assert(err, check.IsNil)
+		c.Assert(err, IsNil)
 
 		publicKey, _, _, _, err := ssh.ParseAuthorizedKey(hostCertificateBytes)
-		c.Assert(err, check.IsNil)
+		c.Assert(err, IsNil)
 
 		hostCertificate, ok := publicKey.(*ssh.Certificate)
-		c.Assert(ok, check.Equals, true)
+		c.Assert(ok, Equals, true)
 
-		c.Assert(hostCertificate.ValidPrincipals, check.DeepEquals, tt.outValidPrincipals)
+		c.Assert(hostCertificate.ValidPrincipals, DeepEquals, tt.outValidPrincipals)
 	}
 }
 
 // TestUserCertCompatibility makes sure the compatibility flag can be used to
 // add to remove roles from certificate extensions.
-func (s *NativeSuite) TestUserCertCompatibility(c *check.C) {
+func (s *NativeSuite) TestUserCertCompatibility(c *C) {
 	priv, pub, err := s.suite.A.GenerateKeyPair("")
-	c.Assert(err, check.IsNil)
+	c.Assert(err, IsNil)
 
 	tests := []struct {
 		inCompatibility string
@@ -188,7 +166,7 @@ func (s *NativeSuite) TestUserCertCompatibility(c *check.C) {
 
 	// run tests
 	for i, tt := range tests {
-		comment := check.Commentf("Test %v", i)
+		comment := Commentf("Test %v", i)
 
 		userCertificateBytes, err := s.suite.A.GenerateUserCert(services.UserCertParams{
 			PrivateCASigningKey:   priv,
@@ -201,16 +179,16 @@ func (s *NativeSuite) TestUserCertCompatibility(c *check.C) {
 			PermitAgentForwarding: true,
 			PermitPortForwarding:  true,
 		})
-		c.Assert(err, check.IsNil, comment)
+		c.Assert(err, IsNil, comment)
 
 		publicKey, _, _, _, err := ssh.ParseAuthorizedKey(userCertificateBytes)
-		c.Assert(err, check.IsNil, comment)
+		c.Assert(err, IsNil, comment)
 
 		userCertificate, ok := publicKey.(*ssh.Certificate)
-		c.Assert(ok, check.Equals, true, comment)
+		c.Assert(ok, Equals, true, comment)
 
 		// check if we added the roles extension
 		_, ok = userCertificate.Extensions[teleport.CertExtensionTeleportRoles]
-		c.Assert(ok, check.Equals, tt.outHasRoles, comment)
+		c.Assert(ok, Equals, tt.outHasRoles, comment)
 	}
 }

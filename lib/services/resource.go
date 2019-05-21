@@ -1,5 +1,5 @@
 /*
-Copyright 2015-2019 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -55,9 +55,6 @@ const (
 
 	// KindHostCert is a host certificate
 	KindHostCert = "host_cert"
-
-	// KindLicense is a license resource
-	KindLicense = "license"
 
 	// KindRole is a role resource
 	KindRole = "role"
@@ -119,9 +116,6 @@ const (
 	// KindGithubConnector is Github OAuth2 connector resource
 	KindGithubConnector = "github"
 
-	// KindConnectors is a shortcut for all authentication connector types.
-	KindConnectors = "connectors"
-
 	// KindAuthPreference is the type of authentication for this cluster.
 	KindClusterAuthPreference = "cluster_auth_preference"
 
@@ -131,7 +125,7 @@ const (
 	// KindClusterConfig is the resource that holds cluster level configuration.
 	KindClusterConfig = "cluster_config"
 
-	// MetaNameClusterConfig is the exact name of the cluster config singleton resource.
+	// MetaNameClusterName is the exact name of the singleton resource.
 	MetaNameClusterConfig = "cluster-config"
 
 	// KindClusterName is a type of configuration resource that contains the cluster name.
@@ -158,12 +152,6 @@ const (
 	// KindRemoteCluster represents remote cluster connected via reverse tunnel
 	// to proxy
 	KindRemoteCluster = "remote_cluster"
-
-	// KindIdenity is local on disk identity resource
-	KindIdentity = "identity"
-
-	// KindState is local on disk process state
-	KindState = "state"
 
 	// V3 is the third version of resources.
 	V3 = "v3"
@@ -194,21 +182,7 @@ const (
 
 	// VerbDelete is used to remove an object.
 	VerbDelete = "delete"
-
-	// VerbRotate is used to rotate certificate authorities
-	// used only internally
-	VerbRotate = "rotate"
 )
-
-func CollectOptions(opts []MarshalOption) (*MarshalConfig, error) {
-	var cfg MarshalConfig
-	for _, o := range opts {
-		if err := o(&cfg); err != nil {
-			return nil, trace.Wrap(err)
-		}
-	}
-	return &cfg, nil
-}
 
 func collectOptions(opts []MarshalOption) (*MarshalConfig, error) {
 	var cfg MarshalConfig
@@ -224,19 +198,6 @@ func collectOptions(opts []MarshalOption) (*MarshalConfig, error) {
 type MarshalConfig struct {
 	// Version specifies particular version we should marshal resources with
 	Version string
-
-	// SkipValidation is used to skip schema validation.
-	SkipValidation bool
-
-	// ID is a record ID to assign
-	ID int64
-
-	// PreserveResourceID preserves resource IDs in resource
-	// specs when marshaling
-	PreserveResourceID bool
-
-	// Expires is an optional expiry time
-	Expires time.Time
 }
 
 // GetVersion returns explicitly provided version or sets latest as default
@@ -245,29 +206,6 @@ func (m *MarshalConfig) GetVersion() string {
 		return V2
 	}
 	return m.Version
-}
-
-// AddOptions adds marshal options and returns a new copy
-func AddOptions(opts []MarshalOption, add ...MarshalOption) []MarshalOption {
-	out := make([]MarshalOption, len(opts), len(opts)+len(add))
-	copy(out, opts)
-	return append(opts, add...)
-}
-
-// WithResourceID assigns ID to the resource
-func WithResourceID(id int64) MarshalOption {
-	return func(c *MarshalConfig) error {
-		c.ID = id
-		return nil
-	}
-}
-
-// WithExpires assigns expiry value
-func WithExpires(expires time.Time) MarshalOption {
-	return func(c *MarshalConfig) error {
-		c.Expires = expires
-		return nil
-	}
 }
 
 // MarshalOption sets marshalling option
@@ -286,23 +224,6 @@ func WithVersion(v string) MarshalOption {
 	}
 }
 
-// PreserveResourceID preserves resource ID when
-// marshaling value
-func PreserveResourceID() MarshalOption {
-	return func(c *MarshalConfig) error {
-		c.PreserveResourceID = true
-		return nil
-	}
-}
-
-// SkipValidation is used to disable schema validation.
-func SkipValidation() MarshalOption {
-	return func(c *MarshalConfig) error {
-		c.SkipValidation = true
-		return nil
-	}
-}
-
 // marshalerMutex is a mutex for resource marshalers/unmarshalers
 var marshalerMutex sync.RWMutex
 
@@ -313,7 +234,6 @@ const V2SchemaTemplate = `{
   "required": ["kind", "spec", "metadata", "version"],
   "properties": {
     "kind": {"type": "string"},
-    "sub_kind": {"type": "string"},
     "version": {"type": "string", "default": "v2"},
     "metadata": %v,
     "spec": %v
@@ -331,12 +251,10 @@ const MetadataSchema = `{
     "namespace": {"type": "string", "default": "default"},
     "description": {"type": "string"},
     "expires": {"type": "string"},
-    "id": {"type": "integer"},
     "labels": {
       "type": "object",
-      "additionalProperties": false,
       "patternProperties": {
-         "^[a-zA-Z/.0-9_*-]+$":  { "type": "string" }
+         "^[a-zA-Z/.0-9_]$":  { "type": "string" }
       }
     }
   }
@@ -352,64 +270,14 @@ type UnknownResource struct {
 	Raw []byte
 }
 
-// GetVersion returns resource version
-func (h *ResourceHeader) GetVersion() string {
-	return h.Version
-}
-
-// GetResourceID returns resource ID
-func (h *ResourceHeader) GetResourceID() int64 {
-	return h.Metadata.ID
-}
-
-// SetResourceID sets resource ID
-func (h *ResourceHeader) SetResourceID(id int64) {
-	h.Metadata.ID = id
-}
-
-// GetName returns the name of the resource
-func (h *ResourceHeader) GetName() string {
-	return h.Metadata.Name
-}
-
-// SetName sets the name of the resource
-func (h *ResourceHeader) SetName(v string) {
-	h.Metadata.SetName(v)
-}
-
-// Expiry returns object expiry setting
-func (h *ResourceHeader) Expiry() time.Time {
-	return h.Metadata.Expiry()
-}
-
-// SetExpiry sets object expiry
-func (h *ResourceHeader) SetExpiry(t time.Time) {
-	h.Metadata.SetExpiry(t)
-}
-
-// SetTTL sets Expires header using current clock
-func (h *ResourceHeader) SetTTL(clock clockwork.Clock, ttl time.Duration) {
-	h.Metadata.SetTTL(clock, ttl)
-}
-
-// GetMetadata returns object metadata
-func (h *ResourceHeader) GetMetadata() Metadata {
-	return h.Metadata
-}
-
-// GetKind returns resource kind
-func (h *ResourceHeader) GetKind() string {
-	return h.Kind
-}
-
-// GetSubKind returns resource subkind
-func (h *ResourceHeader) GetSubKind() string {
-	return h.SubKind
-}
-
-// SetSubKind sets resource subkind
-func (h *ResourceHeader) SetSubKind(s string) {
-	h.SubKind = s
+// ResorceHeader is a shared resource header
+type ResourceHeader struct {
+	// Kind is a resource kind - always resource
+	Kind string `json:"kind"`
+	// Version is a resource version
+	Version string `json:"version"`
+	// Metadata is Role metadata
+	Metadata Metadata `json:"metadata"`
 }
 
 // UnmarshalJSON unmarshals header and captures raw state
@@ -424,16 +292,23 @@ func (u *UnknownResource) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
+// Metadata is resource metadata
+type Metadata struct {
+	// Name is an object name
+	Name string `json:"name"`
+	// Namespace is object namespace. The field should be called "namespace"
+	// when it returns in Teleport 2.4.
+	Namespace string `json:"-"`
+	// Description is object description
+	Description string `json:"description,omitempty"`
+	// Labels is a set of labels
+	Labels map[string]string `json:"labels,omitempty"`
+	// Expires is a global expiry time header can be set on any resource in the system.
+	Expires *time.Time `json:"expires,omitempty"`
+}
+
 // Resource represents common properties for resources
 type Resource interface {
-	// GetKind returns resource kind
-	GetKind() string
-	// GetSubKind returns resource subkind
-	GetSubKind() string
-	// SetSubKind sets resource subkind
-	SetSubKind(string)
-	// GetVersion returns resource version
-	GetVersion() string
 	// GetName returns the name of the resource
 	GetName() string
 	// SetName sets the name of the resource
@@ -446,20 +321,6 @@ type Resource interface {
 	SetTTL(clock clockwork.Clock, ttl time.Duration)
 	// GetMetadata returns object metadata
 	GetMetadata() Metadata
-	// GetResourceID returns resource ID
-	GetResourceID() int64
-	// SetResourceID sets resource ID
-	SetResourceID(int64)
-}
-
-// GetResourceID returns resource ID
-func (m *Metadata) GetID() int64 {
-	return m.ID
-}
-
-// SetID sets resource ID
-func (m *Metadata) SetID(id int64) {
-	m.ID = id
 }
 
 // GetMetadata returns object metadata
@@ -535,8 +396,6 @@ func ParseShortcut(in string) (string, error) {
 		return KindSAMLConnector, nil
 	case "github":
 		return KindGithubConnector, nil
-	case "connectors", "connector":
-		return KindConnectors, nil
 	case "user", "users":
 		return KindUser, nil
 	case "cert_authorities", "cas":

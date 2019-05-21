@@ -17,41 +17,28 @@ limitations under the License.
 package services
 
 import (
-	"context"
 	"time"
-
-	"github.com/gravitational/teleport/lib/defaults"
-	"github.com/gravitational/trace"
 )
 
 // Presence records and reports the presence of all components
 // of the cluster - Nodes, Proxies and SSH nodes
 type Presence interface {
+
 	// UpsertLocalClusterName upserts local domain
 	UpsertLocalClusterName(name string) error
 
 	// GetLocalClusterName upserts local domain
 	GetLocalClusterName() (string, error)
 
-	// GetNodes returns a list of registered servers. Schema validation can be
-	// skipped to improve performance.
-	GetNodes(namespace string, opts ...MarshalOption) ([]Server, error)
+	// GetNodes returns a list of registered servers
+	GetNodes(namespace string) ([]Server, error)
 
-	// DeleteAllNodes deletes all nodes in a namespace.
+	// DeleteAllNodes deletes all nodes in a namespace
 	DeleteAllNodes(namespace string) error
 
-	// DeleteNode deletes node in a namespace
-	DeleteNode(namespace, name string) error
-
-	// UpsertNode registers node presence, permanently if TTL is 0 or for the
-	// specified duration with second resolution if it's >= 1 second.
-	UpsertNode(server Server) (*KeepAlive, error)
-
-	// UpsertNodes bulk inserts nodes.
-	UpsertNodes(namespace string, servers []Server) error
-
-	// KeepAliveNode updates node TTL in the storage
-	KeepAliveNode(ctx context.Context, h KeepAlive) error
+	// UpsertNode registers node presence, permanently if ttl is 0 or
+	// for the specified duration with second resolution if it's >= 1 second
+	UpsertNode(server Server) error
 
 	// GetAuthServers returns a list of registered servers
 	GetAuthServers() ([]Server, error)
@@ -66,9 +53,6 @@ type Presence interface {
 
 	// GetProxies returns a list of registered proxies
 	GetProxies() ([]Server, error)
-
-	// DeleteProxy deletes proxy by name
-	DeleteProxy(name string) error
 
 	// DeleteAllProxies deletes all proxies
 	DeleteAllProxies() error
@@ -119,10 +103,10 @@ type Presence interface {
 	UpsertTunnelConnection(TunnelConnection) error
 
 	// GetTunnelConnections returns tunnel connections for a given cluster
-	GetTunnelConnections(clusterName string, opts ...MarshalOption) ([]TunnelConnection, error)
+	GetTunnelConnections(clusterName string) ([]TunnelConnection, error)
 
 	// GetAllTunnelConnections returns all tunnel connections
-	GetAllTunnelConnections(opts ...MarshalOption) ([]TunnelConnection, error)
+	GetAllTunnelConnections() ([]TunnelConnection, error)
 
 	// DeleteTunnelConnection deletes tunnel connection by name
 	DeleteTunnelConnection(clusterName string, connName string) error
@@ -137,7 +121,7 @@ type Presence interface {
 	CreateRemoteCluster(RemoteCluster) error
 
 	// GetRemoteClusters returns a list of remote clusters
-	GetRemoteClusters(opts ...MarshalOption) ([]RemoteCluster, error)
+	GetRemoteClusters() ([]RemoteCluster, error)
 
 	// GetRemoteCluster returns a remote cluster by name
 	GetRemoteCluster(clusterName string) (RemoteCluster, error)
@@ -169,36 +153,4 @@ type Site struct {
 	Name          string    `json:"name"`
 	LastConnected time.Time `json:"lastconnected"`
 	Status        string    `json:"status"`
-}
-
-// IsEmpty returns true if keepalive is empty,
-// used to indicate that keepalive is not supported
-func (s *KeepAlive) IsEmpty() bool {
-	return s.LeaseID == 0 && s.ServerName == ""
-}
-
-func (s *KeepAlive) CheckAndSetDefaults() error {
-	if s.IsEmpty() {
-		return trace.BadParameter("no lease ID or server name is specified")
-	}
-	if s.Namespace == "" {
-		s.Namespace = defaults.Namespace
-	}
-	return nil
-}
-
-// KeepAliver keeps object alive
-type KeepAliver interface {
-	// KeepAlives allows to receive keep alives
-	KeepAlives() chan<- KeepAlive
-
-	// Done returns the channel signalling the closure
-	Done() <-chan struct{}
-
-	// Close closes the watcher and releases
-	// all associated resources
-	Close() error
-
-	// Error returns error associated with keep aliver if any
-	Error() error
 }

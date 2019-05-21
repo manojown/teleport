@@ -63,6 +63,7 @@ export function fetchInitData(siteId) {
 export function fetchSites(){
   return api.get(cfg.api.sitesBasePath)
     .then(json => {
+      console.log("this.get('siteId');",json);
       const trusted = json.trusted || [];
       const allClusters = [json.current, ...trusted];
       reactor.dispatch(RECEIVE_CLUSTERS, allClusters);

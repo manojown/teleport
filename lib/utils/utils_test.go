@@ -1,5 +1,5 @@
 /*
-Copyright 2015-2019 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,44 +17,20 @@ limitations under the License.
 package utils
 
 import (
-	"bytes"
 	"io/ioutil"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/gravitational/teleport"
-	"github.com/gravitational/teleport/lib/fixtures"
+	"gopkg.in/check.v1"
 
 	"github.com/gravitational/trace"
-	"gopkg.in/check.v1"
 )
 
 type UtilsSuite struct {
 }
 
 var _ = check.Suite(&UtilsSuite{})
-
-// TestLinear tests retry logic
-func (s *UtilsSuite) TestLinear(c *check.C) {
-	r, err := NewLinear(LinearConfig{
-		Step: time.Second,
-		Max:  3 * time.Second,
-	})
-	c.Assert(err, check.IsNil)
-	c.Assert(r.Duration(), check.Equals, time.Duration(0))
-	r.Inc()
-	c.Assert(r.Duration(), check.Equals, time.Second)
-	r.Inc()
-	c.Assert(r.Duration(), check.Equals, 2*time.Second)
-	r.Inc()
-	c.Assert(r.Duration(), check.Equals, 3*time.Second)
-	r.Inc()
-	c.Assert(r.Duration(), check.Equals, 3*time.Second)
-	r.Reset()
-	c.Assert(r.Duration(), check.Equals, time.Duration(0))
-}
 
 func (s *UtilsSuite) TestHostUUID(c *check.C) {
 	// call twice, get same result
@@ -110,354 +86,32 @@ func (s *UtilsSuite) TestMiscFunctions(c *check.C) {
 	c.Assert(Deduplicate([]string{}), check.DeepEquals, []string{})
 	c.Assert(Deduplicate([]string{"a", "b"}), check.DeepEquals, []string{"a", "b"})
 	c.Assert(Deduplicate([]string{"a", "b", "b", "a", "c"}), check.DeepEquals, []string{"a", "b", "c"})
-
-	// RemoveFromSlice
-	c.Assert(RemoveFromSlice([]string{}, "a"), check.DeepEquals, []string{})
-	c.Assert(RemoveFromSlice([]string{"a"}, "a"), check.DeepEquals, []string{})
-	c.Assert(RemoveFromSlice([]string{"a", "b"}, "a"), check.DeepEquals, []string{"b"})
-	c.Assert(RemoveFromSlice([]string{"a", "b"}, "b"), check.DeepEquals, []string{"a"})
-	c.Assert(RemoveFromSlice([]string{"a", "a", "b"}, "a"), check.DeepEquals, []string{"b"})
 }
 
 // TestVersions tests versions compatibility checking
 func (s *UtilsSuite) TestVersions(c *check.C) {
 	testCases := []struct {
-		info      string
-		client    string
-		minClient string
-		err       error
+		info   string
+		client string
+		server string
+		err    error
 	}{
-		{info: "client older than min version", client: "1.0.0", minClient: "1.1.0", err: trace.BadParameter("")},
-		{info: "client same as min version", client: "1.0.0", minClient: "1.0.0"},
-		{info: "client newer than min version", client: "1.1.0", minClient: "1.0.0"},
-		{info: "pre-releases clients are ok", client: "1.1.0-alpha.1", minClient: "1.0.0"},
-		{info: "older pre-releases are no ok", client: "1.1.0-alpha.1", minClient: "1.1.0", err: trace.BadParameter("")},
+		{info: "same versions are ok", client: "1.0.0", server: "1.0.0"},
+		{info: "minor diff is ok if server is newer", client: "1.0.0", server: "1.1.0"},
+		{info: "minor diff is ok if server is newer even after one version", client: "1.0.0", server: "1.3.0"},
+		{info: "minor diff is not ok if server is older", client: "1.1.0", server: "1.0.0", err: trace.BadParameter("")},
+		{info: "major diff is not ok", client: "5.1.0", server: "1.0.0", err: trace.BadParameter("")},
+		{info: "major diff is not ok", client: "1.1.0", server: "5.0.0", err: trace.BadParameter("")},
+		{info: "minor diff is ok if server is newer", client: "1.0.0-beta.1", server: "1.1.0-alpha.1"},
+		{info: "older pre-release client is ok", client: "1.0.0-beta.1", server: "1.0.0-beta.12"},
 	}
 	for i, testCase := range testCases {
 		comment := check.Commentf("test case %v %q", i, testCase.info)
-		err := CheckVersions(testCase.client, testCase.minClient)
+		err := CheckVersions(testCase.client, testCase.server)
 		if testCase.err == nil {
 			c.Assert(err, check.IsNil, comment)
 		} else {
 			c.Assert(err, check.FitsTypeOf, testCase.err, comment)
-		}
-	}
-}
-
-// TestClickableURL tests clickable URL conversions
-func (s *UtilsSuite) TestClickableURL(c *check.C) {
-	testCases := []struct {
-		info string
-		in   string
-		out  string
-	}{
-		{info: "original URL is OK", in: "http://127.0.0.1:3000/hello", out: "http://127.0.0.1:3000/hello"},
-		{info: "unspecified IPV6", in: "http://[::]:5050/howdy", out: "http://127.0.0.1:5050/howdy"},
-		{info: "unspecified IPV4", in: "http://0.0.0.0:5050/howdy", out: "http://127.0.0.1:5050/howdy"},
-		{info: "specified IPV4", in: "http://192.168.1.1:5050/howdy", out: "http://192.168.1.1:5050/howdy"},
-		{info: "specified IPV6", in: "http://[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:5050/howdy", out: "http://[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:5050/howdy"},
-	}
-	for i, testCase := range testCases {
-		comment := check.Commentf("test case %v %q", i, testCase.info)
-		out := ClickableURL(testCase.in)
-		c.Assert(out, check.Equals, testCase.out, comment)
-	}
-}
-
-// TestParseSessionsURI parses sessions URI
-func (s *UtilsSuite) TestParseSessionsURI(c *check.C) {
-	testCases := []struct {
-		info string
-		in   string
-		url  *url.URL
-		err  error
-	}{
-		{info: "local default file system URI", in: "/home/log", url: &url.URL{Scheme: teleport.SchemeFile, Path: "/home/log"}},
-		{info: "explicit filesystem URI", in: "file:///home/log", url: &url.URL{Scheme: teleport.SchemeFile, Path: "/home/log"}},
-		{info: "S3 URI", in: "s3://my-bucket", url: &url.URL{Scheme: teleport.SchemeS3, Host: "my-bucket"}},
-	}
-	for i, testCase := range testCases {
-		comment := check.Commentf("test case %v %q", i, testCase.info)
-		out, err := ParseSessionsURI(testCase.in)
-		if testCase.err == nil {
-			c.Assert(err, check.IsNil, comment)
-			c.Assert(out, check.DeepEquals, testCase.url)
-		} else {
-			c.Assert(err, check.FitsTypeOf, testCase.err, comment)
-		}
-	}
-}
-
-// TestParseAdvertiseAddr tests parsing of advertise address
-func (s *UtilsSuite) TestParseAdvertiseAddr(c *check.C) {
-	testCases := []struct {
-		info string
-		in   string
-		host string
-		port string
-		err  error
-	}{
-		{info: "ok address", in: "192.168.1.1", host: "192.168.1.1"},
-		{info: "trim space", in: "   192.168.1.1    ", host: "192.168.1.1"},
-		{info: "multicast address", in: "224.0.0.0", err: trace.BadParameter("")},
-		{info: "multicast address", in: "   224.0.0.0   ", err: trace.BadParameter("")},
-		{info: "ok address and port", in: "192.168.1.1:22", host: "192.168.1.1", port: "22"},
-		{info: "ok address and bad port", in: "192.168.1.1:b", err: trace.BadParameter("")},
-		{info: "ok host", in: "localhost", host: "localhost"},
-		{info: "ok host and port", in: "localhost:33", host: "localhost", port: "33"},
-		{info: "missing host ", in: ":33", err: trace.BadParameter("")},
-		{info: "missing port", in: "localhost:", err: trace.BadParameter("")},
-		{info: "ipv6 address", in: "2001:0db8:85a3:0000:0000:8a2e:0370:7334", host: "2001:0db8:85a3:0000:0000:8a2e:0370:7334"},
-		{info: "ipv6 address and port", in: "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:443", host: "2001:0db8:85a3:0000:0000:8a2e:0370:7334", port: "443"},
-	}
-	for i, testCase := range testCases {
-		comment := check.Commentf("test case %v %q", i, testCase.info)
-		host, port, err := ParseAdvertiseAddr(testCase.in)
-		if testCase.err == nil {
-			c.Assert(err, check.IsNil, comment)
-			c.Assert(host, check.Equals, testCase.host)
-			c.Assert(port, check.Equals, testCase.port)
-		} else {
-			c.Assert(err, check.FitsTypeOf, testCase.err, comment)
-		}
-	}
-}
-
-// TestGlobToRegexp tests replacement of glob-style wildcard values
-// with regular expression compatible value
-func (s *UtilsSuite) TestGlobToRegexp(c *check.C) {
-	testCases := []struct {
-		comment string
-		in      string
-		out     string
-	}{
-		{
-			comment: "simple values are not replaced",
-			in:      "value-value",
-			out:     "value-value",
-		},
-		{
-			comment: "wildcard and start of string is replaced with regexp wildcard expression",
-			in:      "*",
-			out:     "(.*)",
-		},
-		{
-			comment: "wildcard is replaced with regexp wildcard expression",
-			in:      "a-*-b-*",
-			out:     "a-(.*)-b-(.*)",
-		},
-		{
-			comment: "special chars are quoted",
-			in:      "a-.*-b-*$",
-			out:     `a-\.(.*)-b-(.*)\$`,
-		},
-	}
-	for i, testCase := range testCases {
-		comment := check.Commentf("test case %v %v", i, testCase.comment)
-		out := GlobToRegexp(testCase.in)
-		c.Assert(out, check.Equals, testCase.out, comment)
-	}
-}
-
-// TestReplaceRegexp tests regexp-style replacement of values
-func (s *UtilsSuite) TestReplaceRegexp(c *check.C) {
-	testCases := []struct {
-		comment string
-		expr    string
-		replace string
-		in      string
-		out     string
-		err     error
-	}{
-		{
-			comment: "simple values are replaced directly",
-			expr:    "value",
-			replace: "value",
-			in:      "value",
-			out:     "value",
-		},
-		{
-			comment: "no match returns explicit not found error",
-			expr:    "value",
-			replace: "value",
-			in:      "val",
-			err:     trace.NotFound(""),
-		},
-		{
-			comment: "empty value is no match",
-			expr:    "",
-			replace: "value",
-			in:      "value",
-			err:     trace.NotFound(""),
-		},
-		{
-			comment: "bad regexp results in bad parameter error",
-			expr:    "^(($",
-			replace: "value",
-			in:      "val",
-			err:     trace.BadParameter(""),
-		},
-		{
-			comment: "full match is supported",
-			expr:    "^value$",
-			replace: "value",
-			in:      "value",
-			out:     "value",
-		},
-		{
-			comment: "wildcard replaces to itself",
-			expr:    "^(.*)$",
-			replace: "$1",
-			in:      "value",
-			out:     "value",
-		},
-		{
-			comment: "wildcard replaces to predefined value",
-			expr:    "*",
-			replace: "boo",
-			in:      "different",
-			out:     "boo",
-		},
-		{
-			comment: "wildcard replaces empty string to predefined value",
-			expr:    "*",
-			replace: "boo",
-			in:      "",
-			out:     "boo",
-		},
-		{
-			comment: "regexp wildcard replaces to itself",
-			expr:    "^(.*)$",
-			replace: "$1",
-			in:      "value",
-			out:     "value",
-		},
-		{
-			comment: "partial conversions are supported",
-			expr:    "^test-(.*)$",
-			replace: "replace-$1",
-			in:      "test-hello",
-			out:     "replace-hello",
-		},
-		{
-			comment: "partial conversions are supported",
-			expr:    "^test-(.*)$",
-			replace: "replace-$1",
-			in:      "test-hello",
-			out:     "replace-hello",
-		},
-	}
-	for i, testCase := range testCases {
-		comment := check.Commentf("test case %v %v", i, testCase.comment)
-		out, err := ReplaceRegexp(testCase.expr, testCase.replace, testCase.in)
-		if testCase.err == nil {
-			c.Assert(err, check.IsNil, comment)
-			c.Assert(out, check.Equals, testCase.out, comment)
-		} else {
-			comment := check.Commentf("test case %v %v, expected type %T, got type %T", i, testCase.comment, testCase.err, err)
-			c.Assert(err, check.FitsTypeOf, testCase.err, comment)
-		}
-	}
-}
-
-// TestContainsExpansion tests whether string contains expansion value
-func (s *UtilsSuite) TestContainsExpansion(c *check.C) {
-	testCases := []struct {
-		comment  string
-		val      string
-		contains bool
-	}{
-		{
-			comment:  "detect simple expansion",
-			val:      "$1",
-			contains: true,
-		},
-		{
-			comment:  "escaping is honored",
-			val:      "$$",
-			contains: false,
-		},
-		{
-			comment:  "escaping is honored",
-			val:      "$$$$",
-			contains: false,
-		},
-		{
-			comment:  "escaping is honored",
-			val:      "$$$$$",
-			contains: false,
-		},
-		{
-			comment:  "escaping and expansion",
-			val:      "$$$$$1",
-			contains: true,
-		},
-		{
-			comment:  "expansion with brackets",
-			val:      "${100}",
-			contains: true,
-		},
-	}
-	for i, testCase := range testCases {
-		comment := check.Commentf("test case %v %v", i, testCase.comment)
-		contains := ContainsExpansion(testCase.val)
-		c.Assert(contains, check.Equals, testCase.contains, comment)
-	}
-}
-
-// TestMarshalYAML tests marshal/unmarshal of elements
-func (s *UtilsSuite) TestMarshalYAML(c *check.C) {
-	type kv struct {
-		Key string
-	}
-	testCases := []struct {
-		comment  string
-		val      interface{}
-		expected interface{}
-		isDoc    bool
-	}{
-		{
-			comment: "simple yaml value",
-			val:     "hello",
-		},
-		{
-			comment: "list of yaml types",
-			val:     []interface{}{"hello", "there"},
-		},
-		{
-			comment:  "list of yaml documents",
-			val:      []interface{}{kv{Key: "a"}, kv{Key: "b"}},
-			expected: []interface{}{map[string]interface{}{"Key": "a"}, map[string]interface{}{"Key": "b"}},
-			isDoc:    true,
-		},
-		{
-			comment:  "list of pointers to yaml docs",
-			val:      []interface{}{kv{Key: "a"}, &kv{Key: "b"}},
-			expected: []interface{}{map[string]interface{}{"Key": "a"}, map[string]interface{}{"Key": "b"}},
-			isDoc:    true,
-		},
-		{
-			comment: "list of maps",
-			val:     []interface{}{map[string]interface{}{"Key": "a"}, map[string]interface{}{"Key": "b"}},
-			isDoc:   true,
-		},
-	}
-	for i, testCase := range testCases {
-		comment := check.Commentf("test case %v %v", i, testCase.comment)
-		buf := &bytes.Buffer{}
-		err := WriteYAML(buf, testCase.val)
-		c.Assert(err, check.IsNil, comment)
-		if testCase.isDoc {
-			c.Assert(bytes.Contains(buf.Bytes(),
-				[]byte(yamlDocDelimiter)), check.Equals, true,
-				check.Commentf("test case %v: expected to find --- in %q", testCase.comment, buf.String()))
-		}
-		out, err := ReadYAML(bytes.NewReader(buf.Bytes()))
-		c.Assert(err, check.IsNil, comment)
-		if testCase.expected != nil {
-			fixtures.DeepCompare(c, out, testCase.expected)
-		} else {
-			fixtures.DeepCompare(c, out, testCase.val)
 		}
 	}
 }

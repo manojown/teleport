@@ -1,5 +1,5 @@
 /*
-Copyright 2015-2019 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,127 +17,103 @@ limitations under the License.
 package local
 
 import (
-	"context"
-	"fmt"
 	"testing"
-	"time"
 
 	"github.com/gravitational/teleport/lib/backend"
-	"github.com/gravitational/teleport/lib/backend/lite"
+	"github.com/gravitational/teleport/lib/backend/boltbk"
 	"github.com/gravitational/teleport/lib/services/suite"
 	"github.com/gravitational/teleport/lib/utils"
 
-	"github.com/jonboulle/clockwork"
-	"gopkg.in/check.v1"
+	. "gopkg.in/check.v1"
 )
 
-func TestServices(t *testing.T) { check.TestingT(t) }
+func TestServices(t *testing.T) { TestingT(t) }
 
 type ServicesSuite struct {
 	bk    backend.Backend
 	suite *suite.ServicesTestSuite
+	dir   string
 }
 
-var _ = fmt.Printf
-var _ = check.Suite(&ServicesSuite{})
+var _ = Suite(&ServicesSuite{})
 
-func (s *ServicesSuite) SetUpSuite(c *check.C) {
-	utils.InitLoggerForTests(testing.Verbose())
+func (s *ServicesSuite) SetUpSuite(c *C) {
+	utils.InitLoggerForTests()
 }
 
-func (s *ServicesSuite) SetUpTest(c *check.C) {
+func (s *ServicesSuite) SetUpTest(c *C) {
 	var err error
 
-	clock := clockwork.NewFakeClockAt(time.Now())
+	s.dir = c.MkDir()
+	s.bk, err = boltbk.New(backend.Params{"path": s.dir})
+	c.Assert(err, IsNil)
 
-	s.bk, err = lite.NewWithConfig(context.TODO(), lite.Config{
-		Path:             c.MkDir(),
-		PollStreamPeriod: 200 * time.Millisecond,
-		Clock:            clock,
-	})
-	c.Assert(err, check.IsNil)
-
-	s.suite = &suite.ServicesTestSuite{
-		CAS:           NewCAService(s.bk),
-		PresenceS:     NewPresenceService(s.bk),
-		ProvisioningS: NewProvisioningService(s.bk),
-		WebS:          NewIdentityService(s.bk),
-		Access:        NewAccessService(s.bk),
-		EventsS:       NewEventsService(s.bk),
-		ChangesC:      make(chan interface{}),
-		ConfigS:       NewClusterConfigurationService(s.bk),
-		Clock:         clock,
-	}
+	suite := &suite.ServicesTestSuite{}
+	suite.CAS = NewCAService(s.bk)
+	suite.PresenceS = NewPresenceService(s.bk)
+	suite.ProvisioningS = NewProvisioningService(s.bk)
+	suite.WebS = NewIdentityService(s.bk)
+	suite.Access = NewAccessService(s.bk)
+	suite.ChangesC = make(chan interface{})
+	s.suite = suite
 }
 
-func (s *ServicesSuite) TearDownTest(c *check.C) {
-	c.Assert(s.bk.Close(), check.IsNil)
+func (s *ServicesSuite) TearDownTest(c *C) {
+	c.Assert(s.bk.Close(), IsNil)
 }
 
-func (s *ServicesSuite) TestUserCACRUD(c *check.C) {
+func (s *ServicesSuite) TestUserCACRUD(c *C) {
 	s.suite.CertAuthCRUD(c)
 }
 
-func (s *ServicesSuite) TestServerCRUD(c *check.C) {
+func (s *ServicesSuite) TestServerCRUD(c *C) {
 	s.suite.ServerCRUD(c)
 }
 
-func (s *ServicesSuite) TestReverseTunnelsCRUD(c *check.C) {
+func (s *ServicesSuite) TestReverseTunnelsCRUD(c *C) {
 	s.suite.ReverseTunnelsCRUD(c)
 }
 
-func (s *ServicesSuite) TestUsersCRUD(c *check.C) {
+func (s *ServicesSuite) TestUsersCRUD(c *C) {
 	s.suite.UsersCRUD(c)
 }
 
-func (s *ServicesSuite) TestUsersExpiry(c *check.C) {
-	s.suite.UsersExpiry(c)
-}
-
-func (s *ServicesSuite) TestLoginAttempts(c *check.C) {
+func (s *ServicesSuite) TestLoginAttempts(c *C) {
 	s.suite.LoginAttempts(c)
 }
 
-func (s *ServicesSuite) TestPasswordHashCRUD(c *check.C) {
+func (s *ServicesSuite) TestPasswordHashCRUD(c *C) {
 	s.suite.PasswordHashCRUD(c)
 }
 
-func (s *ServicesSuite) TestWebSessionCRUD(c *check.C) {
+func (s *ServicesSuite) TestWebSessionCRUD(c *C) {
 	s.suite.WebSessionCRUD(c)
 }
 
-func (s *ServicesSuite) TestToken(c *check.C) {
+func (s *ServicesSuite) TestToken(c *C) {
 	s.suite.TokenCRUD(c)
 }
 
-func (s *ServicesSuite) TestRoles(c *check.C) {
+func (s *ServicesSuite) TestRoles(c *C) {
 	s.suite.RolesCRUD(c)
 }
 
-func (s *ServicesSuite) TestU2FCRUD(c *check.C) {
+func (s *ServicesSuite) TestU2FCRUD(c *C) {
 	s.suite.U2FCRUD(c)
 }
 
-func (s *ServicesSuite) TestSAMLCRUD(c *check.C) {
+func (s *ServicesSuite) TestSAMLCRUD(c *C) {
 	s.suite.SAMLCRUD(c)
 }
 
-func (s *ServicesSuite) TestTunnelConnectionsCRUD(c *check.C) {
+func (s *ServicesSuite) TestTunnelConnectionsCRUD(c *C) {
 	s.suite.TunnelConnectionsCRUD(c)
 }
 
-func (s *ServicesSuite) TestGithubConnectorCRUD(c *check.C) {
+func (s *ServicesSuite) TestGithubConnectorCRUD(c *C) {
 	s.suite.GithubConnectorCRUD(c)
 }
 
-func (s *ServicesSuite) TestRemoteClustersCRUD(c *check.C) {
+func (s *ServicesSuite) TestRemoteClustersCRUD(c *C) {
 	s.suite.RemoteClustersCRUD(c)
-}
-
-func (s *ServicesSuite) TestEvents(c *check.C) {
-	s.suite.Events(c)
-}
-
-func (s *ServicesSuite) TestEventsClusterConfig(c *check.C) {
-	s.suite.EventsClusterConfig(c)
 }
