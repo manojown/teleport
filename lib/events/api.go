@@ -26,26 +26,14 @@ import (
 )
 
 const (
-	// EventType is event type/kind
-	EventType = "event"
-	// EventTime is event time
-	EventTime = "time"
-	// EventLogin is OS login
-	EventLogin = "login"
-	// EventUser is teleport user name
-	EventUser = "user"
-	// EventProtocol specifies protocol that was captured
-	EventProtocol = "proto"
-	// EventProtocolsSSH specifies SSH as a type of captured protocol
-	EventProtocolSSH = "ssh"
-	// EventProtocolKube specifies kubernetes as a type of captured protocol
-	EventProtocolKube = "kube"
-	// LocalAddr is a target address on the host
-	LocalAddr = "addr.local"
-	// RemoteAddr is a client (user's) address
-	RemoteAddr = "addr.remote"
-	// EventCursor is an event ID (used as cursor value for enumeration, not stored)
-	EventCursor = "id"
+	// Common event fields:
+	EventType   = "event"       // event type/kind
+	EventTime   = "time"        // event time
+	EventLogin  = "login"       // OS login
+	EventUser   = "user"        // teleport user
+	LocalAddr   = "addr.local"  // address on the host
+	RemoteAddr  = "addr.remote" // client (user's) address
+	EventCursor = "id"          // event ID (used as cursor value for enumeration, not stored)
 
 	// EventIndex is an event index as received from the logging server
 	EventIndex = "ei"
@@ -71,11 +59,6 @@ const (
 
 	// SessionEndEvent indicates that a session has ended
 	SessionEndEvent = "session.end"
-	// SessionUploadEvent indicates that session has been uploaded to the external storage
-	SessionUploadEvent = "session.upload"
-	// URL is used for a session upload URL
-	URL = "url"
-
 	SessionEventID  = "sid"
 	SessionServerID = "server_id"
 
@@ -87,14 +70,6 @@ const (
 	SessionJoinEvent = "session.join"
 	// SessionLeaveEvent indicates that someone left a session
 	SessionLeaveEvent = "session.leave"
-
-	// ClientDisconnectEvent is emitted when client is disconnected
-	// by the server due to inactivity or any other reason
-	ClientDisconnectEvent = "client.disconnect"
-
-	// Reason is a field that specifies reason for event, e.g. in disconnect
-	// event it explains why server disconnected the client
-	Reason = "reason"
 
 	// UserLoginEvent indicates that a user logged into web UI or via tsh
 	UserLoginEvent = "user.login"
@@ -135,12 +110,10 @@ const (
 	AuthAttemptMessage = "message"
 
 	// SCPEvent means data transfer that occurred on the server
-	SCPEvent    = "scp"
-	SCPPath     = "path"
-	SCPLengh    = "len"
-	SCPAction   = "action"
-	SCPUpload   = "upload"
-	SCPDownload = "download"
+	SCPEvent  = "scp"
+	SCPPath   = "path"
+	SCPLengh  = "len"
+	SCPAction = "action"
 
 	// ResizeEvent means that some user resized PTY on the client
 	ResizeEvent  = "resize"
@@ -159,11 +132,6 @@ const (
 	V1 = 0
 	// V2 is the V2 version of slice chunks  API
 	V2 = 2
-	// V3 is almost like V2, but it assumes
-	// that session recordings are being uploaded
-	// at the end of the session, so it skips writing session event index
-	// on the fly
-	V3 = 3
 )
 
 // IAuditLog is the primary (and the only external-facing) interface for AuditLogger.
@@ -176,14 +144,12 @@ type IAuditLog interface {
 	// EmitAuditEvent emits audit event
 	EmitAuditEvent(eventType string, fields EventFields) error
 
-	// DELETE IN: 2.7.0
-	// This method is no longer necessary as nodes and proxies >= 2.7.0
-	// use UploadSessionRecording method.
 	// PostSessionSlice sends chunks of recorded session to the event log
 	PostSessionSlice(SessionSlice) error
 
-	// UploadSessionRecording uploads session recording to the audit server
-	UploadSessionRecording(r SessionRecording) error
+	// PostSessionChunk returns a writer which SSH nodes use to submit
+	// their live sessions into the session log
+	PostSessionChunk(namespace string, sid session.ID, reader io.Reader) error
 
 	// GetSessionChunk returns a reader which can be used to read a byte stream
 	// of a recorded session starting from 'offsetBytes' (pass 0 to start from the
@@ -199,7 +165,7 @@ type IAuditLog interface {
 	//
 	// This function is usually used in conjunction with GetSessionReader to
 	// replay recorded session streams.
-	GetSessionEvents(namespace string, sid session.ID, after int, includePrintEvents bool) ([]EventFields, error)
+	GetSessionEvents(namespace string, sid session.ID, after int) ([]EventFields, error)
 
 	// SearchEvents is a flexible way to find events. The format of a query string
 	// depends on the implementing backend. A recommended format is urlencoded

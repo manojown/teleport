@@ -35,7 +35,7 @@ func TestSessions(t *testing.T) { TestingT(t) }
 type SessionSuite struct {
 	dir   string
 	srv   *server
-	bk    backend.Backend
+	bk    *dir.Backend
 	clock clockwork.FakeClock
 }
 
@@ -46,18 +46,13 @@ func (s *SessionSuite) SetUpSuite(c *C) {
 }
 
 func (s *SessionSuite) SetUpTest(c *C) {
-	var err error
-
 	s.clock = clockwork.NewFakeClockAt(time.Date(2016, 9, 8, 7, 6, 5, 0, time.UTC))
 	s.dir = c.MkDir()
 
-	s.bk, err = dir.New(backend.Params{"path": s.dir})
+	bk, err := dir.New(backend.Params{"path": s.dir})
 	c.Assert(err, IsNil)
-
-	sb, ok := s.bk.(*backend.Sanitizer)
-	c.Assert(ok, Equals, true)
-
-	sb.Backend().(*dir.Backend).InternalClock = s.clock
+	s.bk = bk.(*dir.Backend)
+	s.bk.InternalClock = s.clock
 
 	srv, err := New(s.bk)
 	s.srv = srv.(*server)

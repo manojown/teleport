@@ -31,11 +31,11 @@ var _ = check.Suite(&ProfileTestSuite{})
 
 func (s *ProfileTestSuite) TestEverything(c *check.C) {
 	p := &ClientProfile{
-		WebProxyAddr:          "proxy:3088",
-		SSHProxyAddr:          "proxy:3023",
-		Username:              "testuser",
-		ForwardedPorts:        []string{"8000:example.com:8000"},
-		DynamicForwardedPorts: []string{"localhost:8080"},
+		ProxyHost:      "proxy",
+		ProxySSHPort:   3023,
+		ProxyWebPort:   3088,
+		Username:       "testuser",
+		ForwardedPorts: []string{"8000:example.com:8000"},
 	}
 
 	home := c.MkDir()

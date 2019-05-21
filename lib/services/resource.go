@@ -56,9 +56,6 @@ const (
 	// KindHostCert is a host certificate
 	KindHostCert = "host_cert"
 
-	// KindLicense is a license resource
-	KindLicense = "license"
-
 	// KindRole is a role resource
 	KindRole = "role"
 
@@ -128,7 +125,7 @@ const (
 	// KindClusterConfig is the resource that holds cluster level configuration.
 	KindClusterConfig = "cluster_config"
 
-	// MetaNameClusterConfig is the exact name of the cluster config singleton resource.
+	// MetaNameClusterName is the exact name of the singleton resource.
 	MetaNameClusterConfig = "cluster-config"
 
 	// KindClusterName is a type of configuration resource that contains the cluster name.
@@ -155,12 +152,6 @@ const (
 	// KindRemoteCluster represents remote cluster connected via reverse tunnel
 	// to proxy
 	KindRemoteCluster = "remote_cluster"
-
-	// KindIdenity is local on disk identity resource
-	KindIdentity = "identity"
-
-	// KindState is local on disk process state
-	KindState = "state"
 
 	// V3 is the third version of resources.
 	V3 = "v3"
@@ -191,21 +182,7 @@ const (
 
 	// VerbDelete is used to remove an object.
 	VerbDelete = "delete"
-
-	// VerbRotate is used to rotate certificate authorities
-	// used only internally
-	VerbRotate = "rotate"
 )
-
-func CollectOptions(opts []MarshalOption) (*MarshalConfig, error) {
-	var cfg MarshalConfig
-	for _, o := range opts {
-		if err := o(&cfg); err != nil {
-			return nil, trace.Wrap(err)
-		}
-	}
-	return &cfg, nil
-}
 
 func collectOptions(opts []MarshalOption) (*MarshalConfig, error) {
 	var cfg MarshalConfig
@@ -221,9 +198,6 @@ func collectOptions(opts []MarshalOption) (*MarshalConfig, error) {
 type MarshalConfig struct {
 	// Version specifies particular version we should marshal resources with
 	Version string
-
-	// SkipValidation is used to skip schema validation.
-	SkipValidation bool
 }
 
 // GetVersion returns explicitly provided version or sets latest as default
@@ -247,14 +221,6 @@ func WithVersion(v string) MarshalOption {
 		default:
 			return trace.BadParameter("version '%v' is not supported", v)
 		}
-	}
-}
-
-// SkipValidation is used to disable schema validation.
-func SkipValidation() MarshalOption {
-	return func(c *MarshalConfig) error {
-		c.SkipValidation = true
-		return nil
 	}
 }
 
@@ -287,9 +253,8 @@ const MetadataSchema = `{
     "expires": {"type": "string"},
     "labels": {
       "type": "object",
-      "additionalProperties": false,
       "patternProperties": {
-         "^[a-zA-Z/.0-9_*]+$":  { "type": "string" }
+         "^[a-zA-Z/.0-9_]$":  { "type": "string" }
       }
     }
   }

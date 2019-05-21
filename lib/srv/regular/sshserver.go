@@ -38,7 +38,6 @@ import (
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/events"
 	"github.com/gravitational/teleport/lib/limiter"
-	"github.com/gravitational/teleport/lib/pam"
 	"github.com/gravitational/teleport/lib/reversetunnel"
 	"github.com/gravitational/teleport/lib/services"
 	rsession "github.com/gravitational/teleport/lib/session"
@@ -66,7 +65,6 @@ type Server struct {
 	srv           *sshutils.Server
 	hostSigner    ssh.Signer
 	shell         string
-	getRotation   RotationGetter
 	authService   auth.AccessPoint
 	reg           *srv.SessionRegistry
 	sessionServer rsession.Service
@@ -79,7 +77,7 @@ type Server struct {
 	proxyMode bool
 	proxyTun  reversetunnel.Server
 
-	advertiseIP     string
+	advertiseIP     net.IP
 	proxyPublicAddr utils.NetAddr
 
 	// server UUID gets generated once on the first start and never changes
@@ -120,22 +118,6 @@ type Server struct {
 
 	// termHandlers are common terminal related handlers.
 	termHandlers *srv.TermHandlers
-
-	// pamConfig holds configuration for PAM.
-	pamConfig *pam.Config
-
-	// dataDir is a server local data directory
-	dataDir string
-}
-
-// GetClock returns server clock implementation
-func (s *Server) GetClock() clockwork.Clock {
-	return s.clock
-}
-
-// GetDataDir returns server data dir
-func (s *Server) GetDataDir() string {
-	return s.dataDir
 }
 
 func (s *Server) GetNamespace() string {
@@ -158,11 +140,6 @@ func (s *Server) GetSessionServer() rsession.Service {
 		return rsession.NewDiscardSessionServer()
 	}
 	return s.sessionServer
-}
-
-// GetPAM returns the PAM configuration for this server.
-func (s *Server) GetPAM() (*pam.Config, error) {
-	return s.pamConfig, nil
 }
 
 // isAuditedAtProxy returns true if sessions are being recorded at the proxy
@@ -225,17 +202,6 @@ func (s *Server) Wait() {
 	s.srv.Wait(context.TODO())
 }
 
-// RotationGetter returns rotation state
-type RotationGetter func(role teleport.Role) (*services.Rotation, error)
-
-// SetRotationGetter sets rotation state getter
-func SetRotationGetter(getter RotationGetter) ServerOption {
-	return func(s *Server) error {
-		s.getRotation = getter
-		return nil
-	}
-}
-
 // SetShell sets default shell that will be executed for interactive
 // sessions
 func SetShell(shell string) ServerOption {
@@ -256,10 +222,7 @@ func SetSessionServer(sessionServer rsession.Service) ServerOption {
 // SetProxyMode starts this server in SSH proxying mode
 func SetProxyMode(tsrv reversetunnel.Server) ServerOption {
 	return func(s *Server) error {
-		// always set proxy mode to true,
-		// because in some tests reverse tunnel is disabled,
-		// but proxy is still used without it.
-		s.proxyMode = true
+		s.proxyMode = (tsrv != nil)
 		s.proxyTun = tsrv
 		return nil
 	}
@@ -336,20 +299,13 @@ func SetMACAlgorithms(macAlgorithms []string) ServerOption {
 	}
 }
 
-func SetPAMConfig(pamConfig *pam.Config) ServerOption {
-	return func(s *Server) error {
-		s.pamConfig = pamConfig
-		return nil
-	}
-}
-
 // New returns an unstarted server
 func New(addr utils.NetAddr,
 	hostname string,
 	signers []ssh.Signer,
 	authService auth.AccessPoint,
 	dataDir string,
-	advertiseIP string,
+	advertiseIP net.IP,
 	proxyPublicAddr utils.NetAddr,
 	options ...ServerOption) (*Server, error) {
 
@@ -369,7 +325,6 @@ func New(addr utils.NetAddr,
 		uuid:            uuid,
 		closer:          utils.NewCloseBroadcaster(),
 		clock:           clockwork.NewRealClock(),
-		dataDir:         dataDir,
 	}
 	s.limiter, err = limiter.NewLimiter(limiter.LimiterConfig{})
 	if err != nil {
@@ -409,7 +364,7 @@ func New(addr utils.NetAddr,
 			trace.Component:       component,
 			trace.ComponentFields: log.Fields{},
 		}),
-		Server:      s,
+		Server:      s.getInfo(),
 		Component:   component,
 		AuditLog:    s.alog,
 		AccessPoint: s.authService,
@@ -463,13 +418,13 @@ func (s *Server) PermitUserEnvironment() bool {
 	return s.permitUserEnvironment
 }
 
-func (s *Server) setAdvertiseIP(ip string) {
+func (s *Server) setAdvertiseIP(ip net.IP) {
 	s.Lock()
 	defer s.Unlock()
 	s.advertiseIP = ip
 }
 
-func (s *Server) getAdvertiseIP() string {
+func (s *Server) getAdvertiseIP() net.IP {
 	s.Lock()
 	defer s.Unlock()
 	return s.advertiseIP
@@ -479,31 +434,14 @@ func (s *Server) getAdvertiseIP() string {
 // as, in "ip:host" form
 func (s *Server) AdvertiseAddr() string {
 	// set if we have explicit --advertise-ip option
-	advertiseIP := s.getAdvertiseIP()
-	if advertiseIP == "" {
+	if s.getAdvertiseIP() == nil {
 		return s.addr.Addr
 	}
 	_, port, _ := net.SplitHostPort(s.addr.Addr)
-	ahost, aport, err := utils.ParseAdvertiseAddr(advertiseIP)
-	if err != nil {
-		log.Warningf("Failed to parse advertise address %q, %v, using default value %q.", advertiseIP, err, s.addr.Addr)
-		return s.addr.Addr
-	}
-	if aport == "" {
-		aport = port
-	}
-	return fmt.Sprintf("%v:%v", ahost, aport)
+	return net.JoinHostPort(s.getAdvertiseIP().String(), port)
 }
 
-func (s *Server) getRole() teleport.Role {
-	if s.proxyMode {
-		return teleport.RoleProxy
-	}
-	return teleport.RoleNode
-}
-
-// GetInfo returns a services.Server that represents this server.
-func (s *Server) GetInfo() services.Server {
+func (s *Server) getInfo() services.Server {
 	return &services.ServerV2{
 		Kind:    services.KindNode,
 		Version: services.V2,
@@ -522,17 +460,7 @@ func (s *Server) GetInfo() services.Server {
 
 // registerServer attempts to register server in the cluster
 func (s *Server) registerServer() error {
-	server := s.GetInfo()
-	if s.getRotation != nil {
-		rotation, err := s.getRotation(s.getRole())
-		if err != nil {
-			if !trace.IsNotFound(err) {
-				log.Warningf("Failed to get rotation state: %v", err)
-			}
-		} else {
-			server.SetRotation(*rotation)
-		}
-	}
+	server := s.getInfo()
 	server.SetTTL(s.clock, defaults.ServerHeartbeatTTL)
 	if !s.proxyMode {
 		return trace.Wrap(s.authService.UpsertNode(server))
@@ -637,7 +565,7 @@ func (s *Server) serveAgent(ctx *srv.ServerContext) error {
 	socketPath := filepath.Join(socketDir, fmt.Sprintf("teleport-%v.socket", pid))
 	if err := os.Chown(socketDir, uid, gid); err != nil {
 		if err := dirCloser.Close(); err != nil {
-			log.Warnf("failed to remove directory: %v", err)
+			log.Warn("failed to remove directory: %v", err)
 		}
 		return trace.ConvertSystemError(err)
 	}
@@ -705,15 +633,10 @@ func (s *Server) HandleNewChan(nc net.Conn, sconn *ssh.ServerConn, nch ssh.NewCh
 
 	channelType := nch.ChannelType()
 	if s.proxyMode {
-		// Channels of type "session" handle requests that are invovled in running
-		// commands on a server. In the case of proxy mode subsystem and agent
-		// forwarding requests occur over the "session" channel.
-		if channelType == "session" {
+		if channelType == "session" { // interactive sessions
 			ch, requests, err := nch.Accept()
 			if err != nil {
-				log.Warnf("Unable to accept channel: %v.", err)
-				nch.Reject(ssh.ConnectionFailed, fmt.Sprintf("unable to accept channel: %v", err))
-				return
+				log.Infof("could not accept channel (%s)", err)
 			}
 			go s.handleSessionRequests(sconn, identityContext, ch, requests)
 		} else {
@@ -723,29 +646,26 @@ func (s *Server) HandleNewChan(nc net.Conn, sconn *ssh.ServerConn, nch ssh.NewCh
 	}
 
 	switch channelType {
-	// Channels of type "session" handle requests that are invovled in running
-	// commands on a server, subsystem requests, and agent forwarding.
-	case "session":
+	// a client requested the terminal size to be sent along with every
+	// session message (Teleport-specific SSH channel for web-based terminals)
+	case "x-teleport-request-resize-events":
+		ch, _, _ := nch.Accept()
+		go s.handleTerminalResize(sconn, ch)
+	case "session": // interactive sessions
 		ch, requests, err := nch.Accept()
 		if err != nil {
-			log.Warnf("Unable to accept channel: %v.", err)
-			nch.Reject(ssh.ConnectionFailed, fmt.Sprintf("unable to accept channel: %v", err))
-			return
+			log.Infof("could not accept channel (%s)", err)
 		}
 		go s.handleSessionRequests(sconn, identityContext, ch, requests)
-	// Channels of type "direct-tcpip" handles request for port forwarding.
-	case "direct-tcpip":
+	case "direct-tcpip": //port forwarding
 		req, err := sshutils.ParseDirectTCPIPReq(nch.ExtraData())
 		if err != nil {
-			log.Errorf("Failed to parse request data: %v, err: %v.", string(nch.ExtraData()), err)
+			log.Errorf("failed to parse request data: %v, err: %v", string(nch.ExtraData()), err)
 			nch.Reject(ssh.UnknownChannelType, "failed to parse direct-tcpip request")
-			return
 		}
 		ch, _, err := nch.Accept()
 		if err != nil {
-			log.Warnf("Unable to accept channel: %v.", err)
-			nch.Reject(ssh.ConnectionFailed, fmt.Sprintf("unable to accept channel: %v", err))
-			return
+			log.Infof("could not accept channel (%s)", err)
 		}
 		go s.handleDirectTCPIPRequest(sconn, identityContext, ch, req)
 	default:
@@ -753,54 +673,26 @@ func (s *Server) HandleNewChan(nc net.Conn, sconn *ssh.ServerConn, nch ssh.NewCh
 	}
 }
 
-// handleDirectTCPIPRequest handles port forwarding requests.
+// handleDirectTCPIPRequest does the port forwarding
 func (s *Server) handleDirectTCPIPRequest(sconn *ssh.ServerConn, identityContext srv.IdentityContext, ch ssh.Channel, req *sshutils.DirectTCPIPReq) {
-	// Create context for this channel. This context will be closed when
-	// forwarding is complete.
-	ctx, err := srv.NewServerContext(s, sconn, identityContext)
-	if err != nil {
-		ctx.Errorf("Unable to create connection context: %v.", err)
-		ch.Stderr().Write([]byte("Unable to create connection context."))
-		return
-	}
-
+	// ctx holds the connection context and keeps track of the associated resources
+	ctx := srv.NewServerContext(s, sconn, identityContext)
 	ctx.IsTestStub = s.isTestStub
 	ctx.AddCloser(ch)
 	defer ctx.Debugf("direct-tcp closed")
 	defer ctx.Close()
 
-	srcAddr := net.JoinHostPort(req.Orig, strconv.Itoa(int(req.OrigPort)))
-	dstAddr := net.JoinHostPort(req.Host, strconv.Itoa(int(req.Port)))
+	srcAddr := fmt.Sprintf("%v:%d", req.Orig, req.OrigPort)
+	dstAddr := fmt.Sprintf("%v:%d", req.Host, req.Port)
 
 	// check if the role allows port forwarding for this user
-	err = s.authHandlers.CheckPortForward(dstAddr, ctx)
+	err := s.authHandlers.CheckPortForward(dstAddr, ctx)
 	if err != nil {
 		ch.Stderr().Write([]byte(err.Error()))
 		return
 	}
 
 	ctx.Debugf("Opening direct-tcpip channel from %v to %v", srcAddr, dstAddr)
-
-	// If PAM is enabled check the account and open a session.
-	var pamContext *pam.PAM
-	if s.pamConfig.Enabled {
-		// Note, stdout/stderr is discarded here, otherwise MOTD would be printed to
-		// the users screen during port forwarding.
-		pamContext, err = pam.Open(&pam.Config{
-			ServiceName: s.pamConfig.ServiceName,
-			Username:    ctx.Identity.Login,
-			Stdin:       ch,
-			Stderr:      ioutil.Discard,
-			Stdout:      ioutil.Discard,
-		})
-		if err != nil {
-			ctx.Errorf("Unable to open PAM context for direct-tcpip request: %v.", err)
-			ch.Stderr().Write([]byte(err.Error()))
-			return
-		}
-
-		ctx.Debugf("Opening PAM context for direct-tcpip request.")
-	}
 
 	conn, err := net.Dial("tcp", dstAddr)
 	if err != nil {
@@ -814,7 +706,6 @@ func (s *Server) handleDirectTCPIPRequest(sconn *ssh.ServerConn, identityContext
 		events.PortForwardAddr:    dstAddr,
 		events.PortForwardSuccess: true,
 		events.EventLogin:         ctx.Identity.Login,
-		events.EventUser:          ctx.Identity.TeleportUser,
 		events.LocalAddr:          sconn.LocalAddr().String(),
 		events.RemoteAddr:         sconn.RemoteAddr().String(),
 	})
@@ -828,34 +719,31 @@ func (s *Server) handleDirectTCPIPRequest(sconn *ssh.ServerConn, identityContext
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		io.Copy(conn, srv.NewTrackingReader(ctx, ch))
+		io.Copy(conn, ch)
 		conn.Close()
 	}()
 	wg.Wait()
+}
 
-	// If PAM is enabled, close the PAM context after port forwarding is complete.
-	if s.pamConfig.Enabled {
-		err = pamContext.Close()
-		if err != nil {
-			ctx.Errorf("Unable to close PAM context for direct-tcpip request: %v.", err)
-			return
-		}
-		ctx.Debugf("Closing PAM context for direct-tcpip request.")
+// handleTerminalResize is called by the web proxy via its SSH connection.
+// when a web browser connects to the web API, the web proxy asks us,
+// by creating this new SSH channel, to start injecting the terminal size
+// into every SSH write back to it.
+//
+// this is the only way to make web-based terminal UI not break apart
+// when window changes its size
+func (s *Server) handleTerminalResize(sconn *ssh.ServerConn, ch ssh.Channel) {
+	err := s.reg.PushTermSizeToParty(sconn, ch)
+	if err != nil {
+		log.Warnf("Unable to push terminal size to party: %v", err)
 	}
 }
 
-// handleSessionRequests handles out of band session requests once the session
-// channel has been created this function's loop handles all the "exec",
-// "subsystem" and "shell" requests.
+// handleSessionRequests handles out of band session requests once the session channel has been created
+// this function's loop handles all the "exec", "subsystem" and "shell" requests.
 func (s *Server) handleSessionRequests(sconn *ssh.ServerConn, identityContext srv.IdentityContext, ch ssh.Channel, in <-chan *ssh.Request) {
-	// Create context for this channel. This context will be closed when the
-	// session request is complete.
-	ctx, err := srv.NewServerContext(s, sconn, identityContext)
-	if err != nil {
-		ctx.Errorf("Unable to create connection context: %v.", err)
-		ch.Stderr().Write([]byte("Unable to create connection context."))
-		return
-	}
+	// ctx holds the connection context and keeps track of the associated resources
+	ctx := srv.NewServerContext(s, sconn, identityContext)
 	ctx.IsTestStub = s.isTestStub
 	ctx.AddCloser(ch)
 	defer ctx.Close()
@@ -1006,27 +894,29 @@ func (s *Server) handleAgentForwardNode(req *ssh.Request, ctx *srv.ServerContext
 // requests should never fail, all errors should be logged and we should
 // continue processing requests.
 func (s *Server) handleAgentForwardProxy(req *ssh.Request, ctx *srv.ServerContext) error {
-	// Forwarding an agent to the proxy is only supported when the proxy is in
-	// recording mode.
-	if ctx.ClusterConfig.GetSessionRecording() != services.RecordAtProxy {
+	// we only support agent forwarding at the proxy when the proxy is in recording mode
+	clusterConfig, err := s.GetAccessPoint().GetClusterConfig()
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	if clusterConfig.GetSessionRecording() != services.RecordAtProxy {
 		return trace.BadParameter("agent forwarding to proxy only supported in recording mode")
 	}
 
-	// Check if the user's RBAC role allows agent forwarding.
-	err := s.authHandlers.CheckAgentForward(ctx)
+	// check if the user's RBAC role allows agent forwarding
+	err = s.authHandlers.CheckAgentForward(ctx)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 
-	// Open a channel to the client where the client will serve an agent.
+	// open a channel to the client where the client will serve an agent
 	authChannel, _, err := ctx.Conn.OpenChannel(sshutils.AuthAgentRequest, nil)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 
-	// Save the agent so it can be used when making a proxy subsystem request
-	// later. It will also be used when building a remote connection to the
-	// target node.
+	// we save the agent so it can be used when we make a proxy subsystem request
+	// later and use it to build a remote connection to the target node.
 	ctx.SetAgent(agent.NewClient(authChannel), authChannel)
 
 	return nil

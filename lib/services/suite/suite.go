@@ -89,7 +89,6 @@ type ServicesTestSuite struct {
 	PresenceS     services.Presence
 	ProvisioningS services.Provisioner
 	WebS          services.Identity
-	ConfigS       services.ClusterConfiguration
 	ChangesC      chan interface{}
 }
 
@@ -175,11 +174,11 @@ func (s *ServicesTestSuite) UsersCRUD(c *C) {
 	userSlicesEqual(c, u, []services.User{newUser("user2", nil)})
 
 	err = s.WebS.DeleteUser("user1")
-	fixtures.ExpectNotFound(c, err)
+	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("unexpected %T %#v", err, err))
 
 	// bad username
 	err = s.WebS.UpsertUser(newUser("", nil))
-	fixtures.ExpectBadParameter(c, err)
+	c.Assert(trace.IsBadParameter(err), Equals, true, Commentf("expected bad parameter error, got %T", err))
 }
 
 func (s *ServicesTestSuite) LoginAttempts(c *C) {
@@ -225,32 +224,8 @@ func (s *ServicesTestSuite) CertAuthCRUD(c *C) {
 	c.Assert(err, IsNil)
 	fixtures.DeepCompare(c, cas[0], ca)
 
-	cas, err = s.CAS.GetCertAuthorities(services.UserCA, true, services.SkipValidation())
-	c.Assert(err, IsNil)
-	fixtures.DeepCompare(c, cas[0], ca)
-
 	err = s.CAS.DeleteCertAuthority(*ca.ID())
 	c.Assert(err, IsNil)
-
-	// test compare and swap
-	ca = NewTestCA(services.UserCA, "example.com")
-	c.Assert(s.CAS.CreateCertAuthority(ca), IsNil)
-
-	clock := clockwork.NewFakeClock()
-	newCA := *ca
-	rotation := services.Rotation{
-		State:       services.RotationStateInProgress,
-		CurrentID:   "id1",
-		GracePeriod: services.NewDuration(time.Hour),
-		Started:     clock.Now(),
-	}
-	newCA.SetRotation(rotation)
-
-	err = s.CAS.CompareAndSwapCertAuthority(&newCA, ca)
-
-	out, err = s.CAS.GetCertAuthority(ca.GetID(), true)
-	c.Assert(err, IsNil)
-	fixtures.DeepCompare(c, &newCA, out)
 }
 
 func newServer(kind, name, addr, namespace string) *services.ServerV2 {
@@ -338,13 +313,13 @@ func (s *ServicesTestSuite) ReverseTunnelsCRUD(c *C) {
 	c.Assert(len(out), Equals, 0)
 
 	err = s.PresenceS.UpsertReverseTunnel(newReverseTunnel("", []string{"127.0.0.1:1234"}))
-	fixtures.ExpectBadParameter(c, err)
+	c.Assert(trace.IsBadParameter(err), Equals, true, Commentf("%#v", err))
 
-	err = s.PresenceS.UpsertReverseTunnel(newReverseTunnel("example.com", []string{""}))
-	fixtures.ExpectBadParameter(c, err)
+	err = s.PresenceS.UpsertReverseTunnel(newReverseTunnel("example.com", []string{"bad address"}))
+	c.Assert(trace.IsBadParameter(err), Equals, true, Commentf("%#v", err))
 
 	err = s.PresenceS.UpsertReverseTunnel(newReverseTunnel("example.com", []string{}))
-	fixtures.ExpectBadParameter(c, err)
+	c.Assert(trace.IsBadParameter(err), Equals, true, Commentf("%#v", err))
 }
 
 func (s *ServicesTestSuite) PasswordHashCRUD(c *C) {
@@ -434,13 +409,11 @@ func (s *ServicesTestSuite) RolesCRUD(c *C) {
 		},
 		Spec: services.RoleSpecV3{
 			Options: services.RoleOptions{
-				MaxSessionTTL:     services.Duration{Duration: time.Hour},
-				PortForwarding:    services.NewBoolOption(true),
-				CertificateFormat: teleport.CertificateFormatStandard,
+				services.MaxSessionTTL: services.Duration{Duration: time.Hour},
 			},
 			Allow: services.RoleConditions{
 				Logins:     []string{"root", "bob"},
-				NodeLabels: services.Labels{services.Wildcard: []string{services.Wildcard}},
+				NodeLabels: map[string]string{services.Wildcard: services.Wildcard},
 				Namespaces: []string{defaults.Namespace},
 				Rules: []services.Rule{
 					services.NewRule(services.KindRole, services.RO()),
@@ -455,7 +428,7 @@ func (s *ServicesTestSuite) RolesCRUD(c *C) {
 	c.Assert(err, IsNil)
 	rout, err := s.Access.GetRole(role.Metadata.Name)
 	c.Assert(err, IsNil)
-	fixtures.DeepCompare(c, rout, &role)
+	c.Assert(rout, DeepEquals, &role)
 
 	role.Spec.Allow.Logins = []string{"bob"}
 	err = s.Access.UpsertRole(&role, backend.Forever)
@@ -685,7 +658,6 @@ func (s *ServicesTestSuite) GithubConnectorCRUD(c *C) {
 					Organization: "gravitational",
 					Team:         "admins",
 					Logins:       []string{"admin"},
-					KubeGroups:   []string{"system:masters"},
 				},
 			},
 		},
@@ -765,48 +737,4 @@ func (s *ServicesTestSuite) RemoteClustersCRUD(c *C) {
 
 	err = s.PresenceS.DeleteRemoteCluster(clusterName)
 	fixtures.ExpectNotFound(c, err)
-}
-
-// AuthPreference tests authentication preference service
-func (s *ServicesTestSuite) AuthPreference(c *C) {
-	ap, err := services.NewAuthPreference(services.AuthPreferenceSpecV2{
-		Type:         "local",
-		SecondFactor: "otp",
-	})
-	c.Assert(err, IsNil)
-
-	err = s.ConfigS.SetAuthPreference(ap)
-	c.Assert(err, IsNil)
-
-	gotAP, err := s.ConfigS.GetAuthPreference()
-	c.Assert(err, IsNil)
-
-	c.Assert(gotAP.GetType(), Equals, "local")
-	c.Assert(gotAP.GetSecondFactor(), Equals, "otp")
-}
-
-// ClusterConfig tests cluster configuration
-func (s *ServicesTestSuite) ClusterConfig(c *C) {
-	config, err := services.NewClusterConfig(services.ClusterConfigSpecV3{
-		ClientIdleTimeout:     services.NewDuration(17 * time.Second),
-		DisconnectExpiredCert: services.NewBool(true),
-		ClusterID:             "27",
-		SessionRecording:      services.RecordAtProxy,
-		Audit: services.AuditConfig{
-			Region:           "us-west-1",
-			Type:             "dynamodb",
-			AuditSessionsURI: "file:///home/log",
-			AuditTableName:   "audit_table_name",
-			AuditEventsURI:   []string{"dynamodb://audit_table_name", "file:///home/log"},
-		},
-	})
-	c.Assert(err, IsNil)
-
-	err = s.ConfigS.SetClusterConfig(config)
-	c.Assert(err, IsNil)
-
-	gotConfig, err := s.ConfigS.GetClusterConfig()
-	c.Assert(err, IsNil)
-
-	fixtures.DeepCompare(c, config, gotConfig)
 }

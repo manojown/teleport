@@ -172,28 +172,16 @@ func GetRemoteClusterSchema() string {
 }
 
 // UnmarshalRemoteCluster unmarshals remote cluster from JSON or YAML.
-func UnmarshalRemoteCluster(bytes []byte, opts ...MarshalOption) (RemoteCluster, error) {
-	cfg, err := collectOptions(opts)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
+func UnmarshalRemoteCluster(bytes []byte) (RemoteCluster, error) {
 	var cluster RemoteClusterV3
 
 	if len(bytes) == 0 {
 		return nil, trace.BadParameter("missing resource data")
 	}
 
-	if cfg.SkipValidation {
-		err := utils.FastUnmarshal(bytes, &cluster)
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-	} else {
-		err = utils.UnmarshalWithSchema(GetRemoteClusterSchema(), &cluster, bytes)
-		if err != nil {
-			return nil, trace.BadParameter(err.Error())
-		}
+	err := utils.UnmarshalWithSchema(GetRemoteClusterSchema(), &cluster, bytes)
+	if err != nil {
+		return nil, trace.BadParameter(err.Error())
 	}
 
 	err = cluster.CheckAndSetDefaults()

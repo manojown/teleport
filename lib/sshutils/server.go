@@ -25,6 +25,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -158,10 +159,9 @@ func NewServer(
 	s.cfg.PasswordCallback = ah.Password
 	s.cfg.NoClientAuth = ah.NoClient
 
-	// Teleport servers need to identify as such to allow passing of the client
-	// IP from the client to the proxy to the destination node.
-	s.cfg.ServerVersion = SSHVersionPrefix
-
+	// Teleport SSH server will be sending the following "version string" during
+	// SSH handshake (example): "SSH-2.0-T eleport 1.5.1-beta" (space is important!)
+	s.cfg.ServerVersion = fmt.Sprintf("%s %s", SSHVersionPrefix, teleport.Version)
 	return s, nil
 }
 

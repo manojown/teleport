@@ -12,13 +12,12 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
 */
 
 package state
 
 import (
-	"fmt"
-	"io/ioutil"
 	"os"
 	"testing"
 	"time"
@@ -27,7 +26,6 @@ import (
 	"github.com/gravitational/teleport/lib/auth/testauthority"
 	"github.com/gravitational/teleport/lib/backend"
 	"github.com/gravitational/teleport/lib/backend/boltbk"
-	"github.com/gravitational/teleport/lib/backend/dir"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/fixtures"
 	"github.com/gravitational/teleport/lib/services"
@@ -38,8 +36,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/check.v1"
 )
-
-var _ = fmt.Printf
 
 // fake cluster we're testing on:
 var (
@@ -178,12 +174,7 @@ func (s *ClusterSnapshotSuite) TearDownTest(c *check.C) {
 }
 
 func (s *ClusterSnapshotSuite) TestEverything(c *check.C) {
-	tempDir, err := ioutil.TempDir("", "everything-test-")
-	c.Assert(err, check.IsNil)
-	cacheBackend, err := dir.New(backend.Params{"path": tempDir})
-	c.Assert(err, check.IsNil)
-	defer os.RemoveAll(tempDir)
-
+	cacheBackend, err := boltbk.New(backend.Params{"path": c.MkDir()})
 	c.Assert(err, check.IsNil)
 	snap, err := NewCachingAuthClient(Config{
 		AccessPoint: s.authServer,
@@ -200,7 +191,7 @@ func (s *ClusterSnapshotSuite) TestEverything(c *check.C) {
 	c.Assert(err, check.IsNil)
 	c.Assert(users, check.HasLen, len(Users))
 
-	nodes, err := snap.GetNodes(defaults.Namespace, services.SkipValidation())
+	nodes, err := snap.GetNodes(defaults.Namespace)
 	c.Assert(err, check.IsNil)
 	c.Assert(nodes, check.HasLen, len(Nodes))
 

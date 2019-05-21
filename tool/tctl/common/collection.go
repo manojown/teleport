@@ -131,13 +131,13 @@ func printActions(rules []services.Rule) string {
 	return strings.Join(pairs, ",")
 }
 
-func printNodeLabels(labels services.Labels) string {
+func printNodeLabels(labels map[string]string) string {
 	pairs := []string{}
-	for key, values := range labels {
+	for key, val := range labels {
 		if key == services.Wildcard {
 			return "<all nodes>"
 		}
-		pairs = append(pairs, fmt.Sprintf("%v=%v", key, values))
+		pairs = append(pairs, fmt.Sprintf("%v=%v", key, val))
 	}
 	return strings.Join(pairs, ",")
 }

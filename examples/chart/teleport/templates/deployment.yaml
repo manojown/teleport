@@ -3,12 +3,14 @@ kind: Deployment
 metadata:
   name: {{ template "teleport.fullname" . }}
   labels:
-    app: {{ template "teleport.name" . }}
-    chart: {{ template "teleport.chart" . }}
-    release: {{ .Release.Name }}
-    heritage: {{ .Release.Service }}
+{{ include "teleport.labels" . | indent 4 }}
+{{- if .Values.labels }}
+{{ toYaml .Values.labels | indent 4 }}
+{{- end }}
 spec:
   replicas: 1
+  strategy:
+    type: {{ .Values.strategy }}
   template:
     metadata:
       labels:
@@ -21,6 +23,7 @@ spec:
 {{ toYaml .Values.annotations | indent 8 }}
 {{- end }}
     spec:
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
       containers:
       - name: {{ .Chart.Name }}
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -48,34 +51,43 @@ spec:
         volumeMounts:
 {{- if .Values.proxy.tls.enabled }}
         - mountPath: /var/lib/certs
-          name: tls-web
+          name: {{ template "teleport.fullname" . }}-tls-web
           readOnly: true
 {{- end }}
         - mountPath: /etc/teleport
-          name: config
+          name: {{ template "teleport.fullname" . }}-config
           readOnly: true
-        - mountPath: /var/lib/license
-          name: license
+{{- if .Values.license.enabled }}
+        - mountPath: {{ .Values.license.mountPath }}
+          name: {{ template "teleport.fullname" . }}-license
           readOnly: true
+{{- end }}
         - mountPath: /var/lib/teleport
-          name: storage
+          name: {{ template "teleport.fullname" . }}-storage
 {{- if .Values.extraVolumeMounts }}
 {{ toYaml .Values.extraVolumeMounts | indent 8 }}
 {{- end }}
       volumes:
 {{- if .Values.proxy.tls.enabled }}
-      - name: tls-web
+      - name: {{ template "teleport.fullname" . }}-tls-web
         secret:
-          secretName: tls-web
+          secretName: {{ .Values.proxy.tls.secretName }}
 {{- end }}
-      - name: license
+{{- if .Values.license.enabled }}
+      - name: {{ template "teleport.fullname" . }}-license
         secret:
-          secretName: license
-      - name: config
+          secretName: {{ .Values.license.secretName }}
+{{- end }}
+      - name: {{ template "teleport.fullname" . }}-config
         configMap:
           name: {{ template "teleport.fullname" . }}
-      - name: storage
+      - name: {{ template "teleport.fullname" . }}-storage
+        {{- if .Values.persistence.enabled }}
+        persistentVolumeClaim:
+          claimName: {{ .Values.persistence.existingClaim | default (printf "%s-%s" (include "teleport.fullname" .) "storage") }}
+        {{- else }}
         emptyDir: {}
+        {{- end }}
 {{- if .Values.extraVolumes }}
 {{ toYaml .Values.extraVolumes | indent 6 }}
 {{- end }}

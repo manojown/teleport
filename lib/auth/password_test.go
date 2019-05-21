@@ -63,10 +63,9 @@ func (s *PasswordSuite) SetUpTest(c *C) {
 	})
 	c.Assert(err, IsNil)
 	authConfig := &InitConfig{
-		ClusterName:            clusterName,
-		Backend:                s.bk,
-		Authority:              authority.New(),
-		SkipPeriodicOperations: true,
+		ClusterName: clusterName,
+		Backend:     s.bk,
+		Authority:   authority.New(),
 	}
 	s.a, err = NewAuthServer(authConfig)
 	c.Assert(err, IsNil)
@@ -120,7 +119,7 @@ func (s *PasswordSuite) TestChangePassword(c *C) {
 	c.Assert(err, IsNil)
 
 	fakeClock := clockwork.NewFakeClock()
-	s.a.SetClock(fakeClock)
+	s.a.clock = fakeClock
 	req.NewPassword = []byte("abce456")
 
 	err = s.a.ChangePassword(req)
@@ -145,9 +144,9 @@ func (s *PasswordSuite) TestChangePasswordWithOTP(c *C) {
 	c.Assert(err, IsNil)
 
 	fakeClock := clockwork.NewFakeClock()
-	s.a.SetClock(fakeClock)
+	s.a.clock = fakeClock
 
-	validToken, err := totp.GenerateCode(otpSecret, s.a.GetClock().Now())
+	validToken, err := totp.GenerateCode(otpSecret, s.a.clock.Now())
 	c.Assert(err, IsNil)
 
 	// change password
@@ -161,7 +160,7 @@ func (s *PasswordSuite) TestChangePasswordWithOTP(c *C) {
 	// advance time and make sure we can login again
 	fakeClock.Advance(defaults.AccountLockInterval + time.Second)
 
-	validToken, _ = totp.GenerateCode(otpSecret, s.a.GetClock().Now())
+	validToken, _ = totp.GenerateCode(otpSecret, s.a.clock.Now())
 	req.OldPassword = req.NewPassword
 	req.NewPassword = []byte("abc5555")
 	req.SecondFactorToken = validToken
@@ -217,6 +216,11 @@ func (s *PasswordSuite) prepareForPasswordChange(user string, pass []byte, secon
 		return req, err
 	}
 	err = s.a.UpsertPassword(user, pass)
+	if err != nil {
+		return req, err
+	}
+
+	_, err = s.a.SignIn(user, pass)
 	if err != nil {
 		return req, err
 	}

@@ -26,23 +26,22 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
-
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/client"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/reversetunnel"
 	"github.com/gravitational/teleport/lib/services"
+	"github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
 	"github.com/gravitational/ttlmap"
-
 	"github.com/jonboulle/clockwork"
 	log "github.com/sirupsen/logrus"
 	"github.com/tstranex/u2f"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 // SessionContext is a context associated with users'
@@ -58,7 +57,43 @@ type SessionContext struct {
 	remoteClt map[string]auth.ClientI
 	parent    *sessionCache
 	closers   []io.Closer
-	tc        *client.TeleportClient
+}
+
+// getTerminal finds and returns an active web terminal for a given session:
+func (c *SessionContext) getTerminal(sessionID session.ID) (*TerminalHandler, error) {
+	c.Lock()
+	defer c.Unlock()
+
+	for _, closer := range c.closers {
+		term, ok := closer.(*TerminalHandler)
+		if ok && term.params.SessionID == sessionID {
+			return term, nil
+		}
+	}
+	return nil, trace.NotFound("no connected streams")
+}
+
+// UpdateSessionTerminal is called when a browser window is resized and
+// we need to update PTY on the server side
+func (c *SessionContext) UpdateSessionTerminal(
+	siteAPI auth.ClientI, namespace string, sessionID session.ID, params session.TerminalParams) error {
+
+	// update the session size on the auth server's side
+	err := siteAPI.UpdateSession(session.UpdateRequest{
+		ID:             sessionID,
+		TerminalParams: &params,
+		Namespace:      namespace,
+	})
+	if err != nil {
+		log.Error(err)
+	}
+	// update the server-side PTY to match the browser window size
+	term, err := c.getTerminal(sessionID)
+	if err != nil {
+		log.Error(err)
+		return trace.Wrap(err)
+	}
+	return trace.Wrap(term.resizePTYWindow(params))
 }
 
 func (c *SessionContext) AddClosers(closers ...io.Closer) {
@@ -213,14 +248,13 @@ func (c *SessionContext) ClientTLSConfig(clusterName ...string) (*tls.Config, er
 		}
 	}
 
-	tlsConfig := utils.TLSConfig(c.parent.cipherSuites)
+	tlsConfig := utils.TLSConfig()
 	tlsCert, err := tls.X509KeyPair(c.sess.GetTLSCert(), c.sess.GetPriv())
 	if err != nil {
 		return nil, trace.Wrap(err, "failed to parse TLS cert and key")
 	}
 	tlsConfig.Certificates = []tls.Certificate{tlsCert}
 	tlsConfig.RootCAs = certPool
-	tlsConfig.ServerName = auth.EncodeClusterName(c.parent.clusterName)
 	return tlsConfig, nil
 }
 
@@ -349,7 +383,7 @@ func (c *SessionContext) Close() error {
 }
 
 // newSessionCache returns new instance of the session cache
-func newSessionCache(proxyClient auth.ClientI, servers []utils.NetAddr, cipherSuites []uint16) (*sessionCache, error) {
+func newSessionCache(proxyClient auth.ClientI, servers []utils.NetAddr) (*sessionCache, error) {
 	clusterName, err := proxyClient.GetClusterName()
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -359,12 +393,11 @@ func newSessionCache(proxyClient auth.ClientI, servers []utils.NetAddr, cipherSu
 		return nil, trace.Wrap(err)
 	}
 	cache := &sessionCache{
-		clusterName:  clusterName.GetClusterName(),
-		proxyClient:  proxyClient,
-		contexts:     m,
-		authServers:  servers,
-		closer:       utils.NewCloseBroadcaster(),
-		cipherSuites: cipherSuites,
+		clusterName: clusterName.GetClusterName(),
+		proxyClient: proxyClient,
+		contexts:    m,
+		authServers: servers,
+		closer:      utils.NewCloseBroadcaster(),
 	}
 	// periodically close expired and unused sessions
 	go cache.expireSessions()
@@ -380,9 +413,6 @@ type sessionCache struct {
 	authServers []utils.NetAddr
 	closer      *utils.CloseBroadcaster
 	clusterName string
-
-	// cipherSuites is the list of supported TLS cipher suites.
-	cipherSuites []uint16
 }
 
 // Close closes all allocated resources and stops goroutines
@@ -619,14 +649,14 @@ func (s *sessionCache) ValidateSession(user, sid string) (*SessionContext, error
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	tlsConfig := utils.TLSConfig(s.cipherSuites)
+
+	tlsConfig := utils.TLSConfig()
 	tlsCert, err := tls.X509KeyPair(sess.GetTLSCert(), sess.GetPriv())
 	if err != nil {
 		return nil, trace.Wrap(err, "failed to parse TLS cert and key")
 	}
 	tlsConfig.Certificates = []tls.Certificate{tlsCert}
 	tlsConfig.RootCAs = certPool
-	tlsConfig.ServerName = auth.EncodeClusterName(s.clusterName)
 
 	userClient, err := auth.NewTLSClient(s.authServers, tlsConfig)
 	if err != nil {

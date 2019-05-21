@@ -67,9 +67,6 @@ func DialWithDeadline(network string, addr string, config *ssh.ClientConfig) (*s
 type Dialer interface {
 	// Dial establishes a client connection to a SSH server.
 	Dial(network string, addr string, config *ssh.ClientConfig) (*ssh.Client, error)
-
-	// DialTimeout acts like Dial but takes a timeout.
-	DialTimeout(network, address string, timeout time.Duration) (net.Conn, error)
 }
 
 type directDial struct{}
@@ -79,32 +76,15 @@ func (d directDial) Dial(network string, addr string, config *ssh.ClientConfig) 
 	return DialWithDeadline(network, addr, config)
 }
 
-// DialTimeout acts like Dial but takes a timeout.
-func (d directDial) DialTimeout(network, address string, timeout time.Duration) (net.Conn, error) {
-	return net.DialTimeout(network, address, timeout)
-}
-
 type proxyDial struct {
 	proxyHost string
-}
-
-// DialTimeout acts like Dial but takes a timeout.
-func (d proxyDial) DialTimeout(network, address string, timeout time.Duration) (net.Conn, error) {
-	// Build a proxy connection first.
-	ctx := context.Background()
-	if timeout > 0 {
-		timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		ctx = timeoutCtx
-	}
-	return dialProxy(ctx, d.proxyHost, address)
 }
 
 // Dial first connects to a proxy, then uses the connection to establish a new
 // SSH connection.
 func (d proxyDial) Dial(network string, addr string, config *ssh.ClientConfig) (*ssh.Client, error) {
 	// Build a proxy connection first.
-	pconn, err := dialProxy(context.Background(), d.proxyHost, addr)
+	pconn, err := dialProxy(d.proxyHost, addr)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -126,9 +106,9 @@ func (d proxyDial) Dial(network string, addr string, config *ssh.ClientConfig) (
 // environment variable are set, it returns a function that will dial through
 // said proxy server. If neither variable is set, it will connect to the SSH
 // server directly.
-func DialerFromEnvironment(addr string) Dialer {
+func DialerFromEnvironment() Dialer {
 	// Try and get proxy addr from the environment.
-	proxyAddr := getProxyAddress(addr)
+	proxyAddr := getProxyAddress()
 
 	// If no proxy settings are in environment return regular ssh dialer,
 	// otherwise return a proxy dialer.
@@ -140,7 +120,8 @@ func DialerFromEnvironment(addr string) Dialer {
 	return proxyDial{proxyHost: proxyAddr}
 }
 
-func dialProxy(ctx context.Context, proxyAddr string, addr string) (net.Conn, error) {
+func dialProxy(proxyAddr string, addr string) (net.Conn, error) {
+	ctx := context.Background()
 
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", proxyAddr)
@@ -187,7 +168,7 @@ func dialProxy(ctx context.Context, proxyAddr string, addr string) (net.Conn, er
 	}, nil
 }
 
-func getProxyAddress(addr string) string {
+func getProxyAddress() string {
 	envs := []string{
 		teleport.HTTPSProxy,
 		strings.ToLower(teleport.HTTPSProxy),
@@ -196,21 +177,16 @@ func getProxyAddress(addr string) string {
 	}
 
 	for _, v := range envs {
-		envAddr := os.Getenv(v)
-		if envAddr == "" {
-			continue
+		addr := os.Getenv(v)
+		if addr != "" {
+			proxyaddr, err := parse(addr)
+			if err != nil {
+				log.Debugf("Unable to parse environment variable %q: %q.", v, addr)
+				continue
+			}
+			log.Debugf("Successfully parsed environment variable %q: %q to %q.", v, addr, proxyaddr)
+			return proxyaddr
 		}
-		proxyAddr, err := parse(envAddr)
-		if err != nil {
-			log.Debugf("Unable to parse environment variable %q: %q.", v, envAddr)
-			continue
-		}
-		log.Debugf("Successfully parsed environment variable %q: %q to %q.", v, envAddr, proxyAddr)
-		if !useProxy(addr) {
-			log.Debugf("Matched NO_PROXY override for %q: %q, going to ignore proxy variable.", v, envAddr)
-			return ""
-		}
-		return proxyAddr
 	}
 
 	log.Debugf("No valid environment variables found.")

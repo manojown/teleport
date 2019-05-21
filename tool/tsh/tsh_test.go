@@ -64,8 +64,8 @@ func (s *MainTestSuite) TestMakeClient(c *check.C) {
 	tc, err = makeClient(&conf, true)
 	c.Assert(err, check.IsNil)
 	c.Assert(tc, check.NotNil)
-	c.Assert(tc.Config.SSHProxyAddr, check.Equals, "proxy:3023")
-	c.Assert(tc.Config.WebProxyAddr, check.Equals, "proxy:3080")
+	c.Assert(tc.Config.ProxySSHHostPort(), check.Equals, "proxy:3023")
+	c.Assert(tc.Config.ProxyWebHostPort(), check.Equals, "proxy:3080")
 	localUser, err := client.Username()
 	c.Assert(err, check.IsNil)
 	c.Assert(tc.Config.HostLogin, check.Equals, localUser)
@@ -76,7 +76,6 @@ func (s *MainTestSuite) TestMakeClient(c *check.C) {
 	conf.UserHost = "root@localhost"
 	conf.NodePort = 46528
 	conf.LocalForwardPorts = []string{"80:remote:180"}
-	conf.DynamicForwardedPorts = []string{":8080"}
 	tc, err = makeClient(&conf, true)
 	c.Assert(tc.Config.KeyTTL, check.Equals, time.Minute*time.Duration(conf.MinsToLive))
 	c.Assert(tc.Config.HostLogin, check.Equals, "root")
@@ -86,12 +85,6 @@ func (s *MainTestSuite) TestMakeClient(c *check.C) {
 			SrcPort:  80,
 			DestHost: "remote",
 			DestPort: 180,
-		},
-	})
-	c.Assert(tc.Config.DynamicForwardedPorts, check.DeepEquals, client.DynamicForwardedPorts{
-		{
-			SrcIP:   "127.0.0.1",
-			SrcPort: 8080,
 		},
 	})
 }

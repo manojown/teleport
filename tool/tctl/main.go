@@ -27,7 +27,6 @@ func main() {
 		&common.TokenCommand{},
 		&common.AuthCommand{},
 		&common.ResourceCommand{},
-		&common.StatusCommand{},
 	}
 	common.Run(commands)
 }

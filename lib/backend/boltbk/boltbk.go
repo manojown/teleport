@@ -17,9 +17,7 @@ limitations under the License.
 package boltbk
 
 import (
-	"bytes"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -61,24 +59,6 @@ func GetName() string {
 	return "bolt"
 }
 
-// Exists returns true if backend has been used before
-func Exists(path string) (bool, error) {
-	path, err := filepath.Abs(filepath.Join(path, keysBoltFile))
-	if err != nil {
-		return false, trace.Wrap(err)
-	}
-	f, err := os.Open(path)
-	err = trace.ConvertSystemError(err)
-	if err != nil {
-		if trace.IsNotFound(err) {
-			return false, nil
-		}
-		return false, trace.Wrap(err)
-	}
-	defer f.Close()
-	return true, nil
-}
-
 // New initializes and returns a fully created BoltDB backend. It's
 // a properly implemented Backend.NewFunc, part of a backend API
 func New(params backend.Params) (backend.Backend, error) {
@@ -106,13 +86,11 @@ func New(params backend.Params) (backend.Backend, error) {
 		}
 		return nil, trace.Wrap(err)
 	}
-
-	// Wrap the backend in a input sanitizer and return it.
-	return backend.NewSanitizer(&BoltBackend{
+	return &BoltBackend{
 		locks: make(map[string]time.Time),
 		clock: clockwork.NewRealClock(),
 		db:    db,
-	}), nil
+	}, nil
 }
 
 // Clock returns clock assigned to the backend
@@ -123,124 +101,6 @@ func (b *BoltBackend) Clock() clockwork.Clock {
 // Close closes the backend resources
 func (b *BoltBackend) Close() error {
 	return b.db.Close()
-}
-
-type path struct {
-	bucket  []string
-	key     string
-	realKey string
-}
-
-type fetcher struct {
-	bucket []string
-	paths  []path
-}
-
-func (f *fetcher) fetchBucket(tx *bolt.Tx, bucket []string) error {
-	bkt, err := GetBucket(tx, bucket)
-	if err != nil {
-		berr := boltErr(err)
-		if !trace.IsNotFound(berr) {
-			return trace.Wrap(berr)
-		}
-		return nil
-	}
-	c := bkt.Cursor()
-	for k, val := c.First(); k != nil; k, val = c.Next() {
-		if val != nil {
-			// If bucket path on disk and the requested bucket were an exact match,
-			// return the key as-is.
-			//
-			// However, if this was a partial match, for example pathToBucket is
-			// "/roles/admin/params" but the bucketPrefix is "/roles" then extract
-			// the first suffix (in this case "admin") and use this as the key. This
-			// is consistent with our DynamoDB implementation.
-			var p path
-			if len(f.bucket) == len(bucket) {
-				p.realKey = string(k)
-			} else {
-				p.realKey = bucket[len(f.bucket)]
-			}
-			p.bucket = bucket
-			p.key = string(k)
-			f.paths = append(f.paths, p)
-		} else {
-			// this is a bucket
-			b := append([]string{}, bucket...)
-			b = append(b, string(k))
-			err := f.fetchBucket(tx, b)
-			if err != nil {
-				return trace.Wrap(err)
-			}
-		}
-	}
-	return nil
-}
-
-func (f *fetcher) fetch(tx *bolt.Tx) error {
-	return f.fetchBucket(tx, f.bucket)
-}
-
-func (b *BoltBackend) getItemsRecursive(bucket []string) ([]backend.Item, error) {
-	f := &fetcher{
-		bucket: bucket,
-	}
-
-	err := b.db.View(f.fetch)
-	if err != nil {
-		return nil, trace.Wrap(boltErr(err))
-	}
-
-	// This is a very inefficient approach. It's here to satisfy the
-	// backend.Backend interface since the Bolt backend is slated for removal
-	// in 2.7.0 anyway.
-	items := make([]backend.Item, 0, len(f.paths))
-	for _, p := range f.paths {
-		val, err := b.GetVal(p.bucket, p.key)
-		if err != nil {
-			continue
-		}
-		items = append(items, backend.Item{
-			Key:   p.realKey,
-			Value: val,
-		})
-
-	}
-	return items, nil
-}
-
-// GetItems fetches keys and values and returns them to the caller.
-func (b *BoltBackend) GetItems(path []string, opts ...backend.OpOption) ([]backend.Item, error) {
-	cfg, err := backend.CollectOptions(opts)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	if cfg.Recursive {
-		return b.getItemsRecursive(path)
-	}
-
-	keys, err := b.GetKeys(path)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	// This is a very inefficient approach. It's here to satisfy the
-	// backend.Backend interface since the Bolt backend is slated for removal
-	// in 2.7.0 anyway.
-	items := make([]backend.Item, 0, len(keys))
-	for _, e := range keys {
-		val, err := b.GetVal(path, e)
-		if err != nil {
-			continue
-		}
-
-		items = append(items, backend.Item{
-			Key:   e,
-			Value: val,
-		})
-	}
-
-	return items, nil
 }
 
 func (b *BoltBackend) GetKeys(path []string) ([]string, error) {
@@ -263,10 +123,6 @@ func (b *BoltBackend) GetKeys(path []string) ([]string, error) {
 	return keys, nil
 }
 
-func (bk *BoltBackend) UpsertItems(bucket []string, items []backend.Item) error {
-	return trace.BadParameter("not implemented")
-}
-
 func (b *BoltBackend) UpsertVal(path []string, key string, val []byte, ttl time.Duration) error {
 	return b.upsertVal(path, key, val, ttl)
 }
@@ -282,51 +138,6 @@ func (b *BoltBackend) CreateVal(bucket []string, key string, val []byte, ttl tim
 		return trace.Wrap(err)
 	}
 	err = b.createKey(bucket, key, bytes)
-	return trace.Wrap(err)
-}
-
-// CompareAndSwapVal compares and swap values in atomic operation,
-// succeeds if prevData matches the value stored in the databases,
-// requires prevData as a non-empty value. Returns trace.CompareFailed
-// in case if value did not match
-func (b *BoltBackend) CompareAndSwapVal(bucket []string, key string, newData []byte, prevData []byte, ttl time.Duration) error {
-	if len(prevData) == 0 {
-		return trace.BadParameter("missing prevData parameter, to atomically create item, use CreateVal method")
-	}
-	v := &kv{
-		Created: b.clock.Now().UTC(),
-		Value:   newData,
-		TTL:     ttl,
-	}
-	newEncodedData, err := json.Marshal(v)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-	err = b.db.Update(func(tx *bolt.Tx) error {
-		bkt, err := GetBucket(tx, bucket)
-		if err != nil {
-			if trace.IsNotFound(err) {
-				return trace.CompareFailed("key %q is not found", key)
-			}
-			return trace.Wrap(err)
-		}
-		currentData := bkt.Get([]byte(key))
-		if currentData == nil {
-			_, err := GetBucket(tx, append(bucket, key))
-			if err == nil {
-				return trace.BadParameter("key %q is a bucket", key)
-			}
-			return trace.CompareFailed("%v %v is not found", bucket, key)
-		}
-		var currentVal kv
-		if err := json.Unmarshal(currentData, &currentVal); err != nil {
-			return trace.Wrap(err)
-		}
-		if bytes.Compare(prevData, currentVal.Value) != 0 {
-			return trace.CompareFailed("%q is not matching expected value", key)
-		}
-		return boltErr(bkt.Put([]byte(key), newEncodedData))
-	})
 	return trace.Wrap(err)
 }
 

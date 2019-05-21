@@ -6,8 +6,8 @@ of Linux administration.
 
 ## Installing
 
-To install Teleport using the official binaries from [Teleport Downloads](https://gravitational.com/teleport/download/)
-section on our web site and run:
+To install Teleport using the official binaries from [Github releases](https://github.com/gravitational/teleport/releases)
+simply download the tarball and run:
 
 ```
 $ tar -xzf teleport-binary-release.tar.gz
@@ -117,20 +117,6 @@ Teleport services listen on several ports. This table shows the default port num
 |3025      | Auth       | SSH port used by the Auth Service to serve its API to other nodes in a cluster.
 |3080      | Proxy      | HTTPS connection to authenticate `tsh` users and web users into the cluster. The same connection is used to serve a Web UI.
 
-
-### Filesystem Layout
-
-By default, a Teleport node has the following files present:
-
-Full path                    | Purpose
------------------------------|---------------------------
-`/etc/teleport.yaml`         | Teleport configuration file (optional).
-`/usr/local/bin/teleport`    | Teleport daemon binary.
-`/usr/local/bin/tctl`        | Teleport admin tool. It is only needed for auth servers.
-`/var/lib/teleport`          | Teleport data directory. Nodes keep their keys and certificates there. Auth servers store the audit log and the cluster keys there, but the audit log storage can be further confnigured via `auth_service` section in the config file.
-
-The location of all of them is configurable.
-
 ## Configuration
 
 You should use a [configuration file](#configuration-file) to configure the `teleport` daemon. 
@@ -211,7 +197,8 @@ teleport:
     # by default it's equal to hostname
     nodename: graviton
 
-    # Data directory where Teleport keeps its data
+    # Data directory where Teleport keeps its data, like keys/users for
+    # authentication (if using the default BoltDB back-end)
     data_dir: /var/lib/teleport
 
     # Invitation token used to join a cluster. it is not used on
@@ -240,14 +227,10 @@ teleport:
         output: stderr
         severity: ERROR
 
-    # Type of a storage back-end used for storing Teleport state on a machine. 
-    # (keys, certificates, etc)
+    # Type of storage used for keys. You need to configure this to use etcd
+    # backend if you want to run Teleport in HA configuration.
     storage:
-        # "dir" is the default. Configure this to be a network-based backend 
-        # (like DynamoDB or etcd) if you want to run Teleport in HA configuration.
-        type: dir
-        # defaults to data_dir from above
-        path: /var/lib/teleport
+        type: bolt
 
     # Cipher algorithms that the server supports. This section only needs to be
     # set if you want to override the defaults.
@@ -365,11 +348,6 @@ ssh_service:
     # enables reading ~/.tsh/environment before creating a session. by default
     # set to false, can be set true here or as a command line flag.
     permit_user_env: false
-
-    # configures PAM integration. see below for more details.
-    pam:
-        enabled: no
-        service_name: teleport
 
 # This section configures the 'proxy servie'
 proxy_service:
@@ -750,7 +728,8 @@ turing        d52527f9-b260    10.1.0.5:3022   kernel=3.19.0-56,uptime=up 1 hour
 
 ## Audit Log
 
-Teleport logs every SSH event into its audit log. 
+Teleport logs every SSH event into its audit log. The log is stored on the auth server(s)
+in the `data_dir` location, under `log` subdirectory.
 
 There are two components of the audit log:
 
@@ -759,10 +738,6 @@ There are two components of the audit log:
 2. **Recorded Sessions:** Every SSH shell session is recorded and can be replayed
    later. The recording by default is done by the nodes themselves, but can be configured
    to be done by the proxy.
-
-By default the audit log is stored on the auth server(s) in the `data_dir` location, under 
-`log` subdirectory. Starting with Teleport 2.6 AWS users can configure Teleport to store
-the audit log events in [DynamoDB](#using-dynamodb) and interactive sessions in AWS S3.
 
 Refer to the "Audit Log" chapter in the [Teleport Architecture](architecture#audit-log) to 
 learn more about how the audit Log and session recording are designed.
@@ -821,6 +796,11 @@ exec            | Remote command has been executed via SSH, like `tsh ssh root@n
 scp             | Remote file copy has been executed. The following fields will be logged: `{"path": "/path/to/file.txt", "len": 32344, "action": "read" }`
 resize          | Terminal has been resized.
 user.login      | A user logged into web UI or via tsh. The following fields will be logged: `{"user": "alice@example.com", "method": "local"}`.
+
+!!! tip "Note":
+    The commercial Teleport edition called "Teleport Enterprise" supports native
+    audit log exporting into external systems like Splunk, AlertLogic and others.
+    Take a look at [Teleport Enterprise](enterprise.md) section to learn more.
 
 ### Recorded Sessions
 
@@ -950,25 +930,6 @@ $ ssh-add -L
     desktops like Ubuntu, does not support SSH certificates. We recommend using
     the `ssh-agent` command from `openssh-client` package.
 
-### OpenSSH Rate Limiting
-
-When using configuring a Teleport proxy in "recording mode" be aware of
-OpenSSH built-in rate limiting. On large number of proxy connections you
-may encounter errors like:
-
-```bash
-channel 0: open failed: connect failed: ssh: handshake failed: EOF
-```
-
-See `MaxStartups` setting in `man sshd_config`. This setting means that by
-default OpenSSH only allows 10 unauthenticated connections at a time and starts
-dropping connections 30% of the time when the number of connections goes over
-10 and when it hits 100 authentication connections, all new connections are
-dropped.
-
-To increase the concurrency level, increase the value to something like
-MaxStartups 50:30:100. This allows 50 concurrent connections and a max of 100.
-
 ## Resources
 
 A Teleport administrator has two tools to configure a Teleport cluster: the
@@ -1044,113 +1005,50 @@ spec:
 
 Here's the list of resources currently exposed via `tctl`:
 
-Resource Kind   | Description
-----------------|--------------
-user            | A user record in the internal Teleport user DB.
-node            | A registered SSH node. The same record is displayed via `tctl nodes ls`
-cluster         | A trusted cluster. See [here](#trusted-clusters) for more details on connecting clusters together.
-role            | A role assumed by users. The open source Teleport only includes one role: "admin", but Enterprise teleport users can define their own roles.
-saml            | A SAML auth connector. ([Teleport Enterprise](ssh_sso/) only).
-oidc            | An OIDC auth connector. ([Teleport Enterprise](ssh_sso/) only).
-github          | A Github auth connector. See [here](#github-auth-connector) for details on configuring it.
-
-
-### Examples:
-
-```bash
-# list all SAML connectors:
-$ tctl get saml
-
-# dump a SAML connector called "okta":
-$ tctl get saml/okta
-
-# delete a SAML connector called "okta":
-$ tctl rm saml/okta
-
-# delete a local user called "admin":
-$ tctl rm users/admin
-```
+Resource Kind      | Description
+-------------------|--------------
+user               | A user record in the internal Teleport user DB.
+node               | A registered SSH node. The same record is displayed via `tctl nodes ls`
+trusted_cluster    | A trusted cluster. See [here](#trusted-clusters) for more details on connecting clusters together.
+role               | A role assumed by users. The open source Teleport only includes one role: "admin", but Enterprise teleport users can define their own roles.
+github             | A Github auth connector. See [here](#github-auth-connector) for details on configuring it.
 
 ## Trusted Clusters
 
-As explained in the [architecture document](architecture/#core-concepts),
-Teleport can partition compute infrastructure into multiple clusters.
-A cluster is a group of SSH nodes connected to the cluster's _auth server_
-acting as a certificate authority (CA) for all users and nodes.
+Teleport allows to partition your infrastructure into multiple clusters. Some clusters can be
+located behind firewalls without any open ports. They can also have their own restrictions on
+which users have access.
 
-To retrieve an SSH certificate, users must authenticate with a cluster through a
-_proxy server_. So, if users want to connect to nodes belonging to different
-clusters, they would normally have to use different `--proxy` flag for each
-cluster. This is not always convenient.
+A Teleport Cluster has a name and is managed by a
+`teleport` daemon with "auth service" enabled.
 
-The concept of _trusted clusters_ allows Teleport administrators to connect
-multiple clusters together and establish trust between them. Trusted clusters
-allow users of one cluster to seamlessly SSH into the nodes of another cluster
-without having to "hop" between proxy servers. Moreover, users don't even need
-to have a direct connection to other clusters' proxy servers. The user
-experience looks like this:
+Let's assume we need to access servers behind a firewall and we only want Teleport
+user "john" to have access to them. We already have our primary Teleport cluster and our
+users set up. Say this primary cluster is called `main`, and the behind-the-firewall cluster
+is called `east` as shown on this diagram:
 
-```bash
-# login using the "main" cluster credentials:
-$ tsh login --proxy=main.example.com
-
-# SSH into some host inside the "main" cluster:
-$ tsh ssh host
-
-# SSH into the host located in another cluster called "east"
-# The connection is established through main.example.com:
-$ tsh --cluster=east ssh host
-
-# See what other clusters are available
-$ tsh clusters
-```
-
-Trusted clusters also have their own restrictions on user access, i.e.  the
-_permissions mapping_ takes place. 
-
-### Connectivity
-
-The design of trusted clusters allows Teleport users to connect to compute
-infrastructure located behind firewalls without any open TCP ports. The real
-world usage examples of this capability include:
-
-* Managed service providers (MSP) remotely managing infrastructure of their clients.
-* Device manufacturers remotely maintaining computing appliances
-  deployed on premises.
-* Large cloud software vendors manage multiple data centers using a common proxy.
-
-Let's take a look at how a connection is established between "main" trusted cluster 
-and its _trusting_ cluster called "east":
-
-![Tunnels](img/tunnel.svg)
+![Tunels](img/tunnel.svg)
 
 This setup works as follows:
 
-1. "East" creates an outbound reverse SSH tunnel to "main" and keeps this connection open.
-2. From east's perspective, "main" is the _trusted cluster_ because "east" must
-   allow users from "main" to access its nodes.
-3. When a user tries to connect to a node inside "east" using _main.example.com_ 
-   the reverse tunnel from step 1 is used to establish this connection (green line).
-
-!!! tip "Load Balancers":
-    The scheme above also works even if the "main" cluster uses multiple
-    proxies behind a load balancer (LB) or a DNS entry with multiple values.
-    This works by "east" establishing a tunnel to _every_ proxy in "main",
-    assuming that an LB uses round-robin or a similar non-sticky balancing
-    algorithm.
+1. "East" creates an outbound reverse SSH tunnel to "main" and keeps it open.
+2. "East" and "main" must trust each other, they are "trusted clusters" because
+   "main" must authenticate "east" (cluster-to-cluster authentication) when the
+   tunnel is established, and "east" must trust users connecting from "main"
+   (user authentication).
+3. Users of "main" must use `tsh --cluster=east` flag if they want to connect to any nodes in "east".
+4. Users of "main" can see other trusted clusters connected to "main" by running `tsh clusters`
 
 ### Example Configuration
 
-Connecting two clusters together is similar to [adding a node](#adding-nodes-to-the-cluster) 
-to a cluster:
+Creating trust between two clusters is easy. Here are the steps:
 
-1. The _trusted_ cluster "main" needs to have a cluster join token. A token can
-   be statically defined via `/etc/teleport.yaml` configuration file or dynamically
-   created with the `tctl` CLI tool.
-2. The administrator of the _trusting_ cluster "east" must create a trusted
-   cluster [resource](#resources) with a `tctl` CLI tool.
+1. The main cluster needs to define a "cluster join token" in its config file.
+   This token is used for establishing the _initial_ trust between "main" and
+   new clusters.
+2. The administrator of the eastern cluster must create a "trusted cluster" [resource](#resources).
 
-Lets define a static cluster join token using the configuration file:
+Below is the snippet from the auth server configuration for the "main" cluster:
 
 ```bash
 # fragment of /etc/teleport.yaml:
@@ -1161,14 +1059,17 @@ auth_service:
 ```
 
 The snippet above states that another Teleport cluster can establish a reverse
-tunnel to "main" if it knows the secret token.
+tunnel to "main" if it knows the secret, the cluster join token is declared in the
+`tokens` section.
 
 !!! tip "Tip":
     The permission to establish a reverse tunnel is the only action "east" is
-    permitted to perform. Trusted clusters work only one way: users from "east" cannot
+    permitted to. Trusted clusters work only one way: users from "east" cannot
     connect to the nodes in "main".
 
-Now, the administrator of "east" must create the following resource file:
+Now, with the main cluster prepared to allow remote clusters to connect to it,
+lets configure "east". The administrator of "east" must create the following
+resource file:
 
 ```bash
 # cluster.yaml
@@ -1185,13 +1086,13 @@ spec:
   token: secret-token-to-add-new-clusters
   # the address in 'host:port' form of the reverse tunnel listening port on the
   # "master" proxy server:
-  tunnel_addr: main.example.com:3024
+  tunnel_addr: proxy.main:3024
   # the address in 'host:port' form of the web listening port on the
   # "master" proxy server:
-  web_proxy_addr: main.example.com:3080
+  web_proxy_addr: proxy.main:3080
 ```
 
-Then, use `tctl create` to add the file:
+... and create it:
 
 ```bash
 $ tctl create cluster.yaml
@@ -1203,10 +1104,10 @@ list of available clusters.
 !!! warning "HTTPS configuration":
     If the `web_proxy_addr` endpoint of the main cluster uses a self-signed or
     invalid HTTPS certificate, you will get an error: _"the trusted cluster
-    uses misconfigured HTTP/TLS certificate"_. For ease of testing the teleport
-    daemon of "east" can be started with `--insecure` CLI flag to accept
-    self-signed certificates. Make sure to configure HTTPS properly and remove
-    the insecure flag for production use.
+    uses misconfigured HTTP/TLS certificate"_. For ease of testing the
+    teleport daemon of "east" can be started with `--insecure` CLI flag to
+    accept self-signed certificates. Make sure to configure HTTPS properly and
+    remove the insecure flag for production use.
 
 ### Using Trusted Clusters
 
@@ -1237,26 +1138,6 @@ db2.east  3879d133-fe81-3212 10.0.5.3:3022  role=db-slave
 # SSH into any node in "east":
 $ tsh --cluster=east ssh root@db1.east
 ```
-
-### Disabling Trust
-
-To temporarily disable trust between clusters, i.e. to disconnect the "east"
-cluster from "main", edit the YAML definition of the trusted cluster resource
-and set `enabled` to "false", then update it:
-
-```bash
-$ tctl create --force cluster.yaml
-
-```
-
-### Advanced Configuration
-
-Take a look at [Trusted Clusters Guide](trustedclusters) to learn more about
-advanced topics:
-
-* Using dynamic cluster join tokens instead of pre-defined static tokens for
-  enhanced security.
-* Defining role-mapping between clusters (Teleport Enterprise only).
 
 ## Github OAuth 2.0
 
@@ -1343,30 +1224,6 @@ value is `host:port`, Teleport will prepend `http`.
     `localhost` and `127.0.0.1` are invalid values for the proxy host. If for
     some reason your proxy runs locally, you'll need to provide some other DNS
     name or a private IP address for it.
-
-## PAM Integration
-
-Teleport SSH daemon can be configured to integrate with [PAM](https://en.wikipedia.org/wiki/Linux_PAM)
-This allows Teleport to create user sessions using PAM session profiles.
-
-To enable PAM on a given Linux machine, update `/etc/teleport.yaml` with:
-
-```bash
-teleport:
-   ssh_service:
-      pam:
-         # "no" by default
-         enabled: yes
-         # use /etc/pam.d/sshd configuration (the default)
-         service_name: "sshd"
-```
-
-Please note that most Linux distributions come with a number of PAM services in
-`/etc/pam.d` and Teleport will try to use `sshd` by default, which will be
-removed if you uninstall `openssh-server` package. We recommend creating your
-own PAM service file like `/etc/pam.d/teleport` and specifying it as
-`service_name` above.
-
 
 ## Using Teleport with OpenSSH
 
@@ -1470,59 +1327,6 @@ To allow access for all users:
   * Update `sshd` configuration (usually `/etc/ssh/sshd_config`) to point to this
   file: `TrustedUserCAKeys /etc/ssh/teleport-user-ca.pub`
 
-## Certificate Rotation
-
-Take a look at the [Certificates chapter](architecture.md#certificates) in the
-architecture document to learn how the certificate rotation works. This section
-will show you how to implement certificate rotation in practice.
-
-The easiest way to start the rotation is to execute this command on a cluster's
-_auth server_:
-
-```bash
-$ tctl auth rotate
-```
-
-This will trigger a rotation process for both hosts and users whith a _grace
-period_ of 48 hours.
-
-This can be customized, i.e.
-
-```bash
-# rotate only user certificates with a grace period of 200 hours:
-$ tctl auth rotate --type=user --grace-period=200h
-
-# rotate only host certificates with a grace period of 8 hours:
-$ tctl auth rotate --type=host --grace-period=8h
-```
-
-The rotation takes time, especially for hosts, because each node in a cluster
-needs to be notified that a rotation is taking place and request a new
-certificate for itself before the grace period ends. If the grace period is 
-set to "0h" (zero hours) it means that all previously issued certificates
-become invalid immediately.
-
-!!! warning "Warning":
-    Be careful when choosing a grace period when rotating host certificates.
-    The grace period needs to be long enough for all nodes in a cluster to
-    request a new certificate. If some nodes go offline during the rotation and
-    come back only after the grace period has ended, they will be forced to
-    leave the cluster, i.e. no users will no longer be allowed to SSH into
-    them. 
-
-To check the status of certificate rotation:
-
-```bash
-$ tctl status
-```
-
-!!! danger "Danger":
-    Certificate rotation can only be used with clusters running version 2.6 of
-    Teleport or newer. If trusted clusters are used, make sure _all_ connected 
-    clusters are running version 2.6+. If one of the trusted clusters is running
-    an older version of Teleport the trust/connection to that cluster will be
-    lost.
-
 ## Integrating with Ansible
 
 Ansible uses the OpenSSH client by default. This makes it compatible with Teleport without any extra work, except configuring OpenSSH client to work with Teleport Proxy:
@@ -1545,13 +1349,11 @@ But if high availability cannot be provided by the infrastructue (perhaps
 you're running Teleport on a bare metal cluster), you can configure Teleport
 to run in a highly available fashion.
 
-### Auth Server HA
+#### Run multiple instances of Teleport Auth Server
 
-Run multiple instances of Teleport Auth Server.
-
-For this to work you must switch to a highly available secrets back-end first.
-Also, you must tell each node in a cluster that there are
-more than one auth server available. The are two ways to do this:
+  For this to work you must switch to a highly available secrets back-end first.
+  Also, you must tell each node in a cluster that there are
+  more than one auth server available. The are two ways to do this:
 
   * Use a load balancer to create a single auth API access point (AP) and
     specify this AP in `auth_servers` section of Teleport configuration for
@@ -1563,9 +1365,7 @@ more than one auth server available. The are two ways to do this:
 attention needs to be paid to keep their configuration identical. Settings
 like `cluster_name`, `tokens`, `storage`, etc must be the same.
 
-### Teleport Proxy HA
-
-Run multiple instances of Teleport Proxy.
+#### Run multiple instances of Teleport Proxy
 
 The Teleport Proxy is stateless which makes running multiple instances trivial.
 If using the [default configuration](#ports), configure your load balancer to
@@ -1604,7 +1404,7 @@ To configure Teleport for using etcd as a storage back-end:
 * Deploy several auth servers connected to etcd back-end.
 * Deploy several proxy nodes that have `auth_servers` pointed to list of auth servers to connect to.
 
-```bash
+```yaml
 teleport:
   storage:
      type: etcd
@@ -1632,7 +1432,7 @@ teleport:
 If you are running Teleport on AWS, you can use [DynamoDB](https://aws.amazon.com/dynamodb/)
 as a storage back-end to achieve high availability.
 
-To configure Teleport to use DynamoDB as a storage back-end for storing the cluster state:
+To configure Teleport to use DynamoDB as a storage back-end:
 
 * Make sure you have AWS access key and a secret key which give you access to
   DynamoDB account. If you're using (as recommended) an IAM role for this, the policy
@@ -1642,39 +1442,18 @@ To configure Teleport to use DynamoDB as a storage back-end for storing the clus
 * Deploy several auth servers connected to DynamoDB storage back-end.
 * Deploy several proxy nodes that have `auth_servers` pointed to list of Auth servers to connect to.
 
-```bash
+```yaml
 teleport:
   storage:
     type: dynamodb
     region: eu-west-1
     table_name: teleport.state
-
-    # Authentication settings are optional (see below)
     access_key: BKZA3H2LOKJ1QJ3YF21A
     secret_key: Oc20333k293SKwzraT3ah3Rv1G3/97POQb3eGziSZ
-
-    # Audit log configuration (starting with Teleport 2.6)
-    audit_table_name: teleport.events
-    audit_sessions_uri: s3://example.com/teleport.events
 ```
 
-* Replace `region` and `table_name` with your own settings. Teleport will
-  create the table automatically.
-* The AWS authentication setting below can be omitted if the machine itself is
-  running on an EC2 instance with an IAM role.
-* Audit log settings above are optional. If specified, Teleport will store the
-  audit log in DyamoDB and the session recordings **must** be stored in an S3
-  bucket, i.e. both `audit_xxx` settings must be present. If they are not set,
-  Teleport will default to a local file system for the audit log, i.e.
-  `/var/lib/teleport/log` on an auth server.
-* If DynamoDB is used for the audit log, the logged events will be stored with
-  a TTL of 1 year. Currently this TTL is not configurable.
-
-!!! warning "Access to DynamoDB":
-    Make sure that the IAM role assigned to Teleport is configured with the
-    sufficient access to MongoDB. Below is the example of the IAM policy you
-    can use:
-
+Replace `region` and `table_name` with your own settings. Teleport will create the table automatically.
+Also, here's the example of the IAM policy to grant access to DynamoDB:
 
 ```json
 {

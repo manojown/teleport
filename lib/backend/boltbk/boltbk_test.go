@@ -28,7 +28,7 @@ import (
 func TestBolt(t *testing.T) { TestingT(t) }
 
 type BoltSuite struct {
-	bk    backend.Backend
+	bk    *BoltBackend
 	suite test.BackendSuite
 }
 
@@ -39,14 +39,14 @@ func (s *BoltSuite) SetUpSuite(c *C) {
 }
 
 func (s *BoltSuite) SetUpTest(c *C) {
-	var err error
-
 	dir := c.MkDir()
-	s.bk, err = New(backend.Params{
+	bk, err := New(backend.Params{
 		"path": dir,
 	})
 	c.Assert(err, IsNil)
-	c.Assert(s.bk, NotNil)
+	c.Assert(bk, NotNil)
+
+	s.bk, _ = bk.(*BoltBackend)
 
 	s.suite.ChangesC = make(chan interface{})
 	s.suite.B = s.bk
@@ -58,14 +58,6 @@ func (s *BoltSuite) TearDownTest(c *C) {
 
 func (s *BoltSuite) TestBasicCRUD(c *C) {
 	s.suite.BasicCRUD(c)
-}
-
-func (s *BoltSuite) TestBatchCRUD(c *C) {
-	s.suite.BatchCRUD(c)
-}
-
-func (s *BoltSuite) TestCompareAndSwap(c *C) {
-	s.suite.CompareAndSwap(c)
 }
 
 func (s *BoltSuite) TestExpiration(c *C) {

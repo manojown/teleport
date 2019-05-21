@@ -20,9 +20,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -76,33 +76,6 @@ func (c *Client) TLSConfig() *tls.Config {
 // DialContext is a function that dials to the specified address
 type DialContext func(in context.Context, network, addr string) (net.Conn, error)
 
-// EncodeClusterName encodes cluster name in the SNI hostname
-func EncodeClusterName(clusterName string) string {
-	// hex is used to hide "." that will prevent wildcard *. entry to match
-	return fmt.Sprintf("%v.%v", hex.EncodeToString([]byte(clusterName)), teleport.APIDomain)
-}
-
-// DecodeClusterName decodes cluster name, returns NotFound
-// if no cluster name is encoded (empty subdomain),
-// so servers can detect cases when no server name passed
-// returns BadParameter if encoding does not match
-func DecodeClusterName(serverName string) (string, error) {
-	if serverName == teleport.APIDomain {
-		return "", trace.NotFound("no cluster name is encoded")
-	}
-	const suffix = "." + teleport.APIDomain
-	if !strings.HasSuffix(serverName, suffix) {
-		return "", trace.BadParameter("unrecognized name, expected suffix %v, got %q", teleport.APIDomain, serverName)
-	}
-	clusterName := strings.TrimSuffix(serverName, suffix)
-
-	decoded, err := hex.DecodeString(clusterName)
-	if err != nil {
-		return "", trace.BadParameter("failed to decode cluster name: %v", err)
-	}
-	return string(decoded), nil
-}
-
 // NewAddrDialer returns new dialer from a list of addresses
 func NewAddrDialer(addrs []utils.NetAddr) DialContext {
 	dialer := net.Dialer{
@@ -124,26 +97,10 @@ func NewAddrDialer(addrs []utils.NetAddr) DialContext {
 	}
 }
 
-// ClientTimeout sets idle and dial timeouts of the HTTP transport
-// used by the client.
-func ClientTimeout(timeout time.Duration) roundtrip.ClientParam {
-	return func(c *roundtrip.Client) error {
-		transport, ok := (c.HTTPClient().Transport).(*http.Transport)
-		if !ok {
-			return nil
-		}
-		transport.IdleConnTimeout = timeout
-		transport.ResponseHeaderTimeout = timeout
-		return nil
-	}
-}
-
 // NewTLSClientWithDialer returns new TLS client that uses mutual TLS authenticate
 // and dials the remote server using dialer
 func NewTLSClientWithDialer(dialContext DialContext, cfg *tls.Config, params ...roundtrip.ClientParam) (*Client, error) {
-	if cfg.ServerName == "" {
-		cfg.ServerName = teleport.APIDomain
-	}
+	cfg.ServerName = teleport.APIDomain
 	transport := &http.Transport{
 		// notice that below roundtrip.Client is passed
 		// teleport.APIEndpoint as an address for the API server, this is
@@ -153,16 +110,10 @@ func NewTLSClientWithDialer(dialContext DialContext, cfg *tls.Config, params ...
 		DialContext:           dialContext,
 		ResponseHeaderTimeout: defaults.DefaultDialTimeout,
 		TLSClientConfig:       cfg,
-
-		// Increase the size of the connection pool. This substantially improves the
-		// performance of Teleport under load as it reduces the number of TLS
-		// handshakes performed.
-		MaxIdleConns:        defaults.HTTPMaxIdleConns,
-		MaxIdleConnsPerHost: defaults.HTTPMaxIdleConnsPerHost,
-
+		MaxIdleConnsPerHost:   defaults.HTTPIdleConnsPerHost,
 		// IdleConnTimeout defines the maximum amount of time before idle connections
 		// are closed. Leaving this unset will lead to connections open forever and
-		// will cause memory leaks in a long running process.
+		// will cause memory leaks in a long running process
 		IdleConnTimeout: defaults.HTTPIdleTimeout,
 	}
 	// this logic is necessary to force client to always send certificate
@@ -176,14 +127,11 @@ func NewTLSClientWithDialer(dialContext DialContext, cfg *tls.Config, params ...
 		}
 	}
 
-	clientParams := append(
-		[]roundtrip.ClientParam{
-			roundtrip.HTTPClient(&http.Client{Transport: transport}),
-			roundtrip.SanitizerEnabled(true),
-		},
-		params...,
-	)
-	roundtripClient, err := roundtrip.NewClient("https://"+teleport.APIDomain, CurrentVersion, clientParams...)
+	params = append(params, roundtrip.HTTPClient(&http.Client{
+		Transport: transport,
+	}))
+
+	roundtripClient, err := roundtrip.NewClient("https://"+teleport.APIDomain, CurrentVersion, params...)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -214,7 +162,6 @@ func NewClient(addr string, dialer Dialer, params ...roundtrip.ClientParam) (*Cl
 		roundtrip.HTTPClient(&http.Client{
 			Transport: transport,
 		}),
-		roundtrip.SanitizerEnabled(true),
 		// TODO (ekontsevoy) this tracer pollutes the logs making it harder to work
 		// on issues that have nothing to do with the auth API, consider activating it
 		// via special environment variable?
@@ -231,6 +178,27 @@ func NewClient(addr string, dialer Dialer, params ...roundtrip.ClientParam) (*Cl
 	}, nil
 }
 
+// DELETE IN: 2.6.0
+// GetDialer and AccessPoint SSH subsystem are no longer used in Teleport
+// as of 2.5.0 and should be removed.
+// GetDialer returns dialer that will connect to auth server API
+func (c *Client) GetDialer() AccessPointDialer {
+	return func(ctx context.Context) (conn net.Conn, err error) {
+		conn, err = c.dialContext(ctx, "tcp", teleport.APIDomain)
+		if err != nil {
+			return nil, trace.Wrap(err)
+		}
+		return tls.Client(conn, c.tlsConfig), nil
+	}
+}
+
+// GetAgent creates an SSH key agent (similar object to what CLI uses), this
+// key agent fetches user keys directly from the auth server using a custom channel
+// created via "ReqWebSessionAgent" reguest
+func (c *Client) GetAgent() (AgentCloser, error) {
+	panic("not implemented")
+}
+
 func (c *Client) GetTransport() *http.Transport {
 	return c.transport
 }
@@ -238,13 +206,13 @@ func (c *Client) GetTransport() *http.Transport {
 // PostJSON is a generic method that issues http POST request to the server
 func (c *Client) PostJSON(
 	endpoint string, val interface{}) (*roundtrip.Response, error) {
-	return httplib.ConvertResponse(c.Client.PostJSON(context.TODO(), endpoint, val))
+	return httplib.ConvertResponse(c.Client.PostJSON(endpoint, val))
 }
 
 // PutJSON is a generic method that issues http PUT request to the server
 func (c *Client) PutJSON(
 	endpoint string, val interface{}) (*roundtrip.Response, error) {
-	return httplib.ConvertResponse(c.Client.PutJSON(context.TODO(), endpoint, val))
+	return httplib.ConvertResponse(c.Client.PutJSON(endpoint, val))
 }
 
 // PostForm is a generic method that issues http POST request to the server
@@ -253,34 +221,17 @@ func (c *Client) PostForm(
 	vals url.Values,
 	files ...roundtrip.File) (*roundtrip.Response, error) {
 
-	return httplib.ConvertResponse(c.Client.PostForm(context.TODO(), endpoint, vals, files...))
+	return httplib.ConvertResponse(c.Client.PostForm(endpoint, vals, files...))
 }
 
 // Get issues http GET request to the server
 func (c *Client) Get(u string, params url.Values) (*roundtrip.Response, error) {
-	return httplib.ConvertResponse(c.Client.Get(context.TODO(), u, params))
+	return httplib.ConvertResponse(c.Client.Get(u, params))
 }
 
 // Delete issues http Delete Request to the server
 func (c *Client) Delete(u string) (*roundtrip.Response, error) {
-	return httplib.ConvertResponse(c.Client.Delete(context.TODO(), u))
-}
-
-// ProcessKubeCSR processes CSR request against Kubernetes CA, returns
-// signed certificate if sucessfull.
-func (c *Client) ProcessKubeCSR(req KubeCSR) (*KubeCSRResponse, error) {
-	if err := req.CheckAndSetDefaults(); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	out, err := c.PostJSON(c.Endpoint("kube", "csr"), req)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	var re KubeCSRResponse
-	if err := json.Unmarshal(out.Bytes(), &re); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return &re, nil
+	return httplib.ConvertResponse(c.Client.Delete(u))
 }
 
 // GetSessions returns a list of active sessions in the cluster
@@ -360,19 +311,6 @@ func (c *Client) GetDomainName() (string, error) {
 	return domain, nil
 }
 
-// GetClusterCACert returns the CAs for the local cluster without signing keys.
-func (c *Client) GetClusterCACert() (*LocalCAResponse, error) {
-	out, err := c.Get(c.Endpoint("cacert"), url.Values{})
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	var localCA LocalCAResponse
-	if err := json.Unmarshal(out.Bytes(), &localCA); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return &localCA, nil
-}
-
 func (c *Client) Close() error {
 	return nil
 }
@@ -384,32 +322,6 @@ func (c *Client) WaitForDelivery(context.Context) error {
 // CreateCertAuthority inserts new cert authority
 func (c *Client) CreateCertAuthority(ca services.CertAuthority) error {
 	return trace.BadParameter("not implemented")
-}
-
-// RotateCertAuthority starts or restarts certificate authority rotation process.
-func (c *Client) RotateCertAuthority(req RotateRequest) error {
-	caType := "all"
-	if req.Type != "" {
-		caType = string(req.Type)
-	}
-	_, err := c.PostJSON(c.Endpoint("authorities", caType, "rotate"), req)
-	return trace.Wrap(err)
-}
-
-// RotateExternalCertAuthority rotates external certificate authority,
-// this method is used to update only public keys and certificates of the
-// the certificate authorities of trusted clusters.
-func (c *Client) RotateExternalCertAuthority(ca services.CertAuthority) error {
-	if err := ca.Check(); err != nil {
-		return trace.Wrap(err)
-	}
-	data, err := services.GetCertAuthorityMarshaler().MarshalCertAuthority(ca)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-	_, err = c.PostJSON(c.Endpoint("authorities", string(ca.GetType()), "rotate", "external"),
-		&rotateExternalCertAuthorityRawReq{CA: data})
-	return trace.Wrap(err)
 }
 
 // UpsertCertAuthority updates or inserts new cert authority
@@ -426,14 +338,8 @@ func (c *Client) UpsertCertAuthority(ca services.CertAuthority) error {
 	return trace.Wrap(err)
 }
 
-// CompareAndSwapCertAuthority updates existing cert authority if the existing cert authority
-// value matches the value stored in the backend.
-func (c *Client) CompareAndSwapCertAuthority(new, existing services.CertAuthority) error {
-	return trace.BadParameter("this function is not supported on the client")
-}
-
 // GetCertAuthorities returns a list of certificate authorities
-func (c *Client) GetCertAuthorities(caType services.CertAuthType, loadKeys bool, opts ...services.MarshalOption) ([]services.CertAuthority, error) {
+func (c *Client) GetCertAuthorities(caType services.CertAuthType, loadKeys bool) ([]services.CertAuthority, error) {
 	if err := caType.Check(); err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -460,7 +366,7 @@ func (c *Client) GetCertAuthorities(caType services.CertAuthType, loadKeys bool,
 
 // GetCertAuthority returns certificate authority by given id. Parameter loadSigningKeys
 // controls if signing keys are loaded
-func (c *Client) GetCertAuthority(id services.CertAuthID, loadSigningKeys bool, opts ...services.MarshalOption) (services.CertAuthority, error) {
+func (c *Client) GetCertAuthority(id services.CertAuthID, loadSigningKeys bool) (services.CertAuthority, error) {
 	if err := id.Check(); err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -471,6 +377,11 @@ func (c *Client) GetCertAuthority(id services.CertAuthID, loadSigningKeys bool, 
 		return nil, trace.Wrap(err)
 	}
 	return services.GetCertAuthorityMarshaler().UnmarshalCertAuthority(out.Bytes())
+}
+
+// GetAnyCertAuthority returns certificate authority by given id whether it's activated or not
+func (c *Client) GetAnyCertAuthority(id services.CertAuthID) (services.CertAuthority, error) {
+	return nil, trace.BadParameter("not implemented")
 }
 
 // DeleteCertAuthority deletes cert authority by ID
@@ -606,57 +517,27 @@ func (c *Client) UpsertNode(s services.Server) error {
 	return trace.Wrap(err)
 }
 
-// UpsertNodes bulk inserts nodes.
-func (c *Client) UpsertNodes(namespace string, servers []services.Server) error {
-	if namespace == "" {
-		return trace.BadParameter("missing node namespace")
-	}
-
-	bytes, err := services.GetServerMarshaler().MarshalServers(servers)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-	args := &upsertNodesReq{
-		Namespace: namespace,
-		Nodes:     bytes,
-	}
-	_, err = c.PutJSON(c.Endpoint("namespaces", namespace, "nodes"), args)
-	return trace.Wrap(err)
-}
-
 // GetNodes returns the list of servers registered in the cluster.
-func (c *Client) GetNodes(namespace string, opts ...services.MarshalOption) ([]services.Server, error) {
+func (c *Client) GetNodes(namespace string) ([]services.Server, error) {
 	if namespace == "" {
 		return nil, trace.BadParameter(MissingNamespaceError)
 	}
-	cfg, err := services.CollectOptions(opts)
+	out, err := c.Get(c.Endpoint("namespaces", namespace, "nodes"), url.Values{})
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-
-	out, err := c.Get(c.Endpoint("namespaces", namespace, "nodes"), url.Values{
-		"skip_validation": []string{fmt.Sprintf("%t", cfg.SkipValidation)},
-	})
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
 	var items []json.RawMessage
 	if err := json.Unmarshal(out.Bytes(), &items); err != nil {
 		return nil, trace.Wrap(err)
 	}
 	re := make([]services.Server, len(items))
 	for i, raw := range items {
-		s, err := services.GetServerMarshaler().UnmarshalServer(
-			raw,
-			services.KindNode,
-			opts...)
+		s, err := services.GetServerMarshaler().UnmarshalServer(raw, services.KindNode)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
 		re[i] = s
 	}
-
 	return re, nil
 }
 
@@ -726,7 +607,7 @@ func (c *Client) UpsertTunnelConnection(conn services.TunnelConnection) error {
 }
 
 // GetTunnelConnections returns tunnel connections for a given cluster
-func (c *Client) GetTunnelConnections(clusterName string, opts ...services.MarshalOption) ([]services.TunnelConnection, error) {
+func (c *Client) GetTunnelConnections(clusterName string) ([]services.TunnelConnection, error) {
 	if clusterName == "" {
 		return nil, trace.BadParameter("missing cluster name parameter")
 	}
@@ -750,7 +631,7 @@ func (c *Client) GetTunnelConnections(clusterName string, opts ...services.Marsh
 }
 
 // GetAllTunnelConnections returns all tunnel connections
-func (c *Client) GetAllTunnelConnections(opts ...services.MarshalOption) ([]services.TunnelConnection, error) {
+func (c *Client) GetAllTunnelConnections() ([]services.TunnelConnection, error) {
 	out, err := c.Get(c.Endpoint("tunnelconnections"), url.Values{})
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -808,7 +689,7 @@ func (c *Client) GetUserLoginAttempts(user string) ([]services.LoginAttempt, err
 }
 
 // GetRemoteClusters returns a list of remote clusters
-func (c *Client) GetRemoteClusters(opts ...services.MarshalOption) ([]services.RemoteCluster, error) {
+func (c *Client) GetRemoteClusters() ([]services.RemoteCluster, error) {
 	out, err := c.Get(c.Endpoint("remoteclusters"), url.Values{})
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -992,6 +873,34 @@ func (c *Client) CheckPassword(user string, password []byte, otpToken string) er
 	return trace.Wrap(err)
 }
 
+// SignIn checks if the web access password is valid, and if it is valid
+// returns a secure web session id.
+func (c *Client) SignIn(user string, password []byte) (services.WebSession, error) {
+	out, err := c.PostJSON(
+		c.Endpoint("users", user, "web", "signin"),
+		signInReq{
+			Password: string(password),
+		},
+	)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	return services.GetWebSessionMarshaler().UnmarshalWebSession(out.Bytes())
+}
+
+// PreAuthenticatedSignIn is for 2-way authentication methods like U2F where the password is
+// already checked before issuing the second factor challenge
+func (c *Client) PreAuthenticatedSignIn(user string) (services.WebSession, error) {
+	out, err := c.Get(
+		c.Endpoint("users", user, "web", "signin", "preauth"),
+		url.Values{},
+	)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	return services.GetWebSessionMarshaler().UnmarshalWebSession(out.Bytes())
+}
+
 // GetU2FSignRequest generates request for user trying to authenticate with U2F token
 func (c *Client) GetU2FSignRequest(user string, password []byte) (*u2f.SignRequest, error) {
 	out, err := c.PostJSON(
@@ -1035,6 +944,23 @@ func (c *Client) CreateWebSession(user string) (services.WebSession, error) {
 		return nil, trace.Wrap(err)
 	}
 	return services.GetWebSessionMarshaler().UnmarshalWebSession(out.Bytes())
+}
+
+// DELETE IN: 2.6.0
+// ExchangeCerts exchanges TLS certificates for established host certificate authorities
+func (c *Client) ExchangeCerts(req ExchangeCertsRequest) (*ExchangeCertsResponse, error) {
+	out, err := c.PostJSON(
+		c.Endpoint("exchangecerts"),
+		req,
+	)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	var re ExchangeCertsResponse
+	if err := json.Unmarshal(out.Bytes(), &re); err != nil {
+		return nil, trace.Wrap(err)
+	}
+	return &re, nil
 }
 
 // AuthenticateWebUser authenticates web user, creates and  returns web session
@@ -1170,6 +1096,55 @@ func (c *Client) GenerateHostCert(
 	return []byte(cert), nil
 }
 
+// DELETE IN: 2.6.0
+// This code is obsolete due to TLS refactoring
+// GenerateUserCert takes the public key in the OpenSSH `authorized_keys` plain
+// text format, signs it using User Certificate Authority signing key and
+// returns the resulting certificate.
+func (c *Client) GenerateUserCert(key []byte, user string, ttl time.Duration, compatibility string) ([]byte, error) {
+	out, err := c.PostJSON(c.Endpoint("ca", "user", "certs"),
+		generateUserCertReq{
+			Key:           key,
+			User:          user,
+			TTL:           ttl,
+			Compatibility: compatibility,
+		})
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	var cert string
+	if err := json.Unmarshal(out.Bytes(), &cert); err != nil {
+		return nil, trace.Wrap(err)
+	}
+	return []byte(cert), nil
+}
+
+// DELETE IN: 2.6.0
+// This code is obsolete due to TLS refactoring
+// GenerateUserCertBundle takes the public key in the OpenSSH `authorized_keys`
+// plain text format, signs it using User Certificate Authority signing key and
+// returns the resulting certificate. It also includes the host certificate that
+// can be added to the known_hosts file.
+func (c *Client) GenerateUserCertBundle(key []byte, user string, ttl time.Duration, compatibility string) ([]byte, []services.CertAuthorityV1, error) {
+	out, err := c.PostJSON(c.Endpoint("ca", "user", "certs", "bundle"),
+		generateUserCertReq{
+			Key:           key,
+			User:          user,
+			TTL:           ttl,
+			Compatibility: compatibility,
+		})
+	if err != nil {
+		return nil, nil, trace.Wrap(err)
+	}
+
+	var br sshUserCertBundleResponse
+	if err := json.Unmarshal(out.Bytes(), &br); err != nil {
+		return nil, nil, trace.Wrap(err)
+	}
+
+	return br.Cert, br.HostSigners, nil
+}
+
 // CreateSignupToken creates one time token for creating account for the user
 // For each token it creates username and otp generator
 func (c *Client) CreateSignupToken(user services.UserV1, ttl time.Duration) (string, error) {
@@ -1203,27 +1178,6 @@ func (c *Client) GetSignupTokenData(token string) (user string, otpQRCode []byte
 	}
 
 	return tokenData.User, tokenData.QRImg, nil
-}
-
-// GenerateUserCert takes the public key in the OpenSSH `authorized_keys` plain
-// text format, signs it using User Certificate Authority signing key and
-// returns the resulting certificate.
-func (c *Client) GenerateUserCert(key []byte, user string, ttl time.Duration, compatibility string) ([]byte, error) {
-	out, err := c.PostJSON(c.Endpoint("ca", "user", "certs"),
-		generateUserCertReq{
-			Key:           key,
-			User:          user,
-			TTL:           ttl,
-			Compatibility: compatibility,
-		})
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	var cert string
-	if err := json.Unmarshal(out.Bytes(), &cert); err != nil {
-		return nil, trace.Wrap(err)
-	}
-	return []byte(cert), nil
 }
 
 // GetSignupU2FRegisterRequest generates sign request for user trying to sign up with invite tokenx
@@ -1653,6 +1607,32 @@ func (c *Client) EmitAuditEvent(eventType string, fields events.EventFields) err
 	return nil
 }
 
+// PostSessionChunk allows clients to submit session stream chunks to the audit log
+// (part of evets.IAuditLog interface)
+//
+// The data is POSTed to HTTP server as a simple binary body (no encodings of any
+// kind are needed)
+func (c *Client) PostSessionChunk(namespace string, sid session.ID, reader io.Reader) error {
+	if namespace == "" {
+		return trace.BadParameter(MissingNamespaceError)
+	}
+	r, err := http.NewRequest("POST", c.Endpoint("namespaces", namespace, "sessions", string(sid), "stream"), reader)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	r.Header.Set("Content-Type", "application/octet-stream")
+	c.Client.SetAuthHeader(r.Header)
+	re, err := c.Client.HTTPClient().Do(r)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	// we **must** consume response by reading all of its body, otherwise the http
+	// client will allocate a new connection for subsequent requests
+	defer re.Body.Close()
+	responseBytes, _ := ioutil.ReadAll(re.Body)
+	return trace.ReadError(re.StatusCode, responseBytes)
+}
+
 // PostSessionSlice allows clients to submit session stream chunks to the audit log
 // (part of evets.IAuditLog interface)
 //
@@ -1698,24 +1678,6 @@ func (c *Client) GetSessionChunk(namespace string, sid session.ID, offsetBytes, 
 	return response.Bytes(), nil
 }
 
-// UploadSessionRecording uploads session recording to the audit server
-func (c *Client) UploadSessionRecording(r events.SessionRecording) error {
-	file := roundtrip.File{
-		Name:     "recording",
-		Filename: "recording",
-		Reader:   r.Recording,
-	}
-	values := url.Values{
-		"sid":       []string{string(r.SessionID)},
-		"namespace": []string{r.Namespace},
-	}
-	_, err := c.PostForm(c.Endpoint("namespaces", r.Namespace, "sessions", string(r.SessionID), "recording"), values, file)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-	return nil
-}
-
 // Returns events that happen during a session sorted by time
 // (oldest first).
 //
@@ -1724,16 +1686,13 @@ func (c *Client) UploadSessionRecording(r events.SessionRecording) error {
 //
 // This function is usually used in conjunction with GetSessionReader to
 // replay recorded session streams.
-func (c *Client) GetSessionEvents(namespace string, sid session.ID, afterN int, includePrintEvents bool) (retval []events.EventFields, err error) {
+func (c *Client) GetSessionEvents(namespace string, sid session.ID, afterN int) (retval []events.EventFields, err error) {
 	if namespace == "" {
 		return nil, trace.BadParameter(MissingNamespaceError)
 	}
 	query := make(url.Values)
 	if afterN > 0 {
 		query.Set("after", strconv.Itoa(afterN))
-	}
-	if includePrintEvents {
-		query.Set("print", fmt.Sprintf("%v", includePrintEvents))
 	}
 	response, err := c.Get(c.Endpoint("namespaces", namespace, "sessions", string(sid), "events"), query)
 	if err != nil {
@@ -2207,6 +2166,9 @@ type IdentityService interface {
 	// CreateUserWithU2FToken creates user account with provided token and U2F sign response
 	CreateUserWithU2FToken(token string, password string, u2fRegisterResponse u2f.RegisterResponse) (services.WebSession, error)
 
+	// PreAuthenticatedSignIn is used get web session for a user that is already authenticated
+	PreAuthenticatedSignIn(user string) (services.WebSession, error)
+
 	// GetUser returns user by name
 	GetUser(name string) (services.User, error)
 
@@ -2224,6 +2186,10 @@ type IdentityService interface {
 
 	// CheckPassword checks if the suplied web access password is valid.
 	CheckPassword(user string, password []byte, otpToken string) error
+
+	// SignIn checks if the web access password is valid, and if it is valid
+	// returns a secure web session id.
+	SignIn(user string, password []byte) (services.WebSession, error)
 
 	// CreateUserWithOTP creates account with provided token and password.
 	// Account username and OTP key are taken from token data.
@@ -2300,28 +2266,19 @@ type ClientI interface {
 	session.Service
 	services.ClusterConfiguration
 
-	// RotateCertAuthority starts or restarts certificate authority rotation process.
-	RotateCertAuthority(req RotateRequest) error
-
-	// RotateExternalCertAuthority rotates external certificate authority,
-	// this method is used to update only public keys and certificates of the
-	// the certificate authorities of trusted clusters.
-	RotateExternalCertAuthority(ca services.CertAuthority) error
-
 	// ValidateTrustedCluster validates trusted cluster token with
 	// main cluster, in case if validation is successfull, main cluster
 	// adds remote cluster
 	ValidateTrustedCluster(*ValidateTrustedClusterRequest) (*ValidateTrustedClusterResponse, error)
 
-	// GetDomainName returns auth server cluster name
 	GetDomainName() (string, error)
-
-	// GetClusterCACert returns the CAs for the local cluster without signing keys.
-	GetClusterCACert() (*LocalCAResponse, error)
-
 	// GenerateServerKeys generates new host private keys and certificates (signed
 	// by the host certificate authority) for a node
 	GenerateServerKeys(GenerateServerKeysRequest) (*PackedKeys, error)
+	// DELETE IN: 2.6.0
+	// AccessPointDialer is no longer used for communication with auth server
+	// GetDialer returns dialer that will connect to auth server API
+	GetDialer() AccessPointDialer
 	// AuthenticateWebUser authenticates web user, creates and  returns web session
 	// in case if authentication is successfull
 	AuthenticateWebUser(req AuthenticateUserRequest) (services.WebSession, error)
@@ -2329,7 +2286,7 @@ type ClientI interface {
 	// short lived certificates as a result
 	AuthenticateSSHUser(req AuthenticateSSHRequest) (*SSHLoginResponse, error)
 
-	// ProcessKubeCSR processes CSR request against Kubernetes CA, returns
-	// signed certificate if sucessfull.
-	ProcessKubeCSR(req KubeCSR) (*KubeCSRResponse, error)
+	// DELETE IN: 2.6.0
+	// ExchangeCerts exchanges TLS certificates between host certificate authorities of trusted clusters
+	ExchangeCerts(req ExchangeCertsRequest) (*ExchangeCertsResponse, error)
 }

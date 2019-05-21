@@ -41,9 +41,8 @@ var _ = fmt.Printf
 
 func (s *NativeSuite) SetUpSuite(c *C) {
 	utils.InitLoggerForTests()
-	a, err := New(PrecomputeKeys(1))
-	c.Assert(err, IsNil)
-	s.suite = &test.AuthSuite{A: a}
+	PrecomputedNum = 1
+	s.suite = &test.AuthSuite{A: New()}
 }
 
 func (s *NativeSuite) TestGenerateKeypairEmptyPass(c *C) {
@@ -60,17 +59,6 @@ func (s *NativeSuite) TestGenerateHostCert(c *C) {
 
 func (s *NativeSuite) TestGenerateUserCert(c *C) {
 	s.suite.GenerateUserCert(c)
-}
-
-// TestDisablePrecompute makes sure that keygen works
-// when no keys are precomputed
-func (s *NativeSuite) TestDisablePrecompute(c *C) {
-	a, err := New(PrecomputeKeys(0))
-	c.Assert(err, IsNil)
-
-	caPrivateKey, _, err := a.GenerateKeyPair("")
-	c.Assert(err, IsNil)
-	c.Assert(caPrivateKey, NotNil)
 }
 
 // TestBuildPrincipals makes sure that the list of principals for a host

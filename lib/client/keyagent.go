@@ -110,11 +110,6 @@ func NewLocalAgent(keyDir string, proxyHost string, username string) (a *LocalKe
 	return a, nil
 }
 
-// UpdateProxyHost changes the proxy host that the local agent operates on.
-func (a *LocalKeyAgent) UpdateProxyHost(proxyHost string) {
-	a.proxyHost = proxyHost
-}
-
 // LoadKey adds a key into the Teleport ssh agent as well as the system ssh
 // agent.
 func (a *LocalKeyAgent) LoadKey(key Key) (*agent.AddedKey, error) {
@@ -246,10 +241,6 @@ func (a *LocalKeyAgent) SaveCerts(certAuthorities []auth.TrustedCerts) error {
 
 func (a *LocalKeyAgent) GetCerts() (*x509.CertPool, error) {
 	return a.keyStore.GetCerts(a.proxyHost)
-}
-
-func (a *LocalKeyAgent) GetCertsPEM() ([]byte, error) {
-	return a.keyStore.GetCertsPEM(a.proxyHost)
 }
 
 // UserRefusedHosts returns 'true' if a user refuses connecting to remote hosts

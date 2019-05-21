@@ -28,7 +28,7 @@ ssh_service:
   enabled: yes
 ```
 
-### Configure Okta
+### Confiugre Okta
 
 #### Create App
 

@@ -1,28 +1,21 @@
 # Gravitational Teleport
 
-Gravitational Teleport is a modern security gateway for remotely accessing:
-* Clusters of Linux servers via SSH or SSH-over-HTTPS in a browser.
-* Kubernetes clusters.
-
-It is intended to be used instead or together with `sshd` for organizations who
-need:
+Gravitational Teleport is a modern SSH server for remotely accessing clusters
+of Linux servers via SSH or HTTPS. It is intended to be used instead of `sshd`
+for organizations who need:
 
 * SSH audit with session recording/replay.
-* Kubernetes API Access with audit and `kubectl exec` recording/replay.
-* Easily manage trust between teams, organizations and data centers.
-* Have SSH or Kubernetes access to behind-firewall clusters without any open ports.
+* Easily manage SSH trust between teams, organizations and data centers.
+* SSH into behind-firewall clusters without any open ports.
 * Role-based access control (RBAC) for SSH protocol.
-* Unified RBAC for SSH and Kubernetes.
 
 In addition to its hallmark features, Teleport is interesting for smaller teams
-because it facilitates easy adoption of the best infrastructure security
-practices like:
+because it facilitates easy adoption of the best SSH practices like:
 
 - No need to distribute keys: Teleport uses certificate-based access with automatic certificate expiration time.
-- 2nd factor authentication (2FA) for SSH and Kubernetes.
+- 2nd factor authentication (2FA) for SSH.
 - Collaboratively troubleshoot issues through session sharing.
-- Single sign-on (SSO) for SSH/Kubernetes and your organization identities via 
-  Github Auth, OpenID Connect or SAML with endpoints like Okta or Active Directory.
+- Single sign-on (SSO) for SSH and your organization identities via OpenID Connect or SAML with endpoints like Okta or Active Directory.
 - Cluster introspection: every SSH node and its status can be queried via CLI and Web UI.
 
 Teleport is built on top of the high-quality [Golang SSH](https://godoc.org/golang.org/x/crypto/ssh) 
@@ -39,7 +32,7 @@ implementation and it is _fully compatible with OpenSSH_ and can be used with
 
 ## Installing and Running
 
-Download the [latest binary release](https://gravitational.com/teleport/download/), 
+Download the [latest binary release](https://github.com/gravitational/teleport/releases), 
 unpack the .tar.gz and run `sudo ./install`. This will copy Teleport binaries into 
 `/usr/local/bin`.
 
@@ -51,14 +44,6 @@ $ sudo teleport start
 
 In a production environment Teleport must run as root. But to play, just do `chown $USER /var/lib/teleport` 
 and run it under `$USER`, in this case you will not be able to login as someone else though.
-
-If you wish to deploy Teleport inside a Docker container:
-
-```
-# This command will pull the Teleport container image for version 2.7.3
-# Replace 2.7.3 with the version you need:
-$ docker pull quay.io/gravitational/teleport:2.7.3
-```
 
 ## Building Teleport
 
@@ -88,8 +73,6 @@ NOTE: The Go compiler is somewhat sensitive to amount of memory: you will need
 at least 1GB of virtual memory to compile Teleport. 512MB instance without swap
 will not work.
 
-NOTE: This will build the latest version of Teleport, regardless of whether it is stable. If you want to build the latest stable release, `git checkout` to that tag (e.g. `git checkout v2.5.7`) before running `make full`.
-
 ### Rebuilding Web UI
 
 To enable speedy iterations on the Web UI, teleport can load the web UI assets 
@@ -106,23 +89,12 @@ $ DEBUG=1 ./build/teleport start -d
 Keep the server running in this mode, and make your UI changes in `/dist` directory.
 Refer to [web/README.md](web/README.md) for instructions on how to update the Web UI.
 
-### Updating Documentation
-
-TL;DR version:
-
-```
-make docs
-make run-docs
-```
-
-For more details, take a look at [docs/README](docs/README.md)
-
 ## Why did We Build Teleport?
 
-Mature tech companies with significant infrastructure footprints tend to
-implement most of these patterns internally. Teleport allows smaller companies
-without significant in-house SSH expertise to easily adopt them, as well.
-Teleport comes with an accessible Web UI and a very permissive [Apache 2.0](https://github.com/gravitational/teleport/blob/master/LICENSE)
+Mature tech companies with significant infrastructure footprints tend to implement most
+of these patterns internally. Teleport allows smaller companies without 
+significant in-house SSH expertise to easily adopt them, as well. Teleport comes with an 
+accessible Web UI and a very permissive [Apache 2.0](https://github.com/gravitational/teleport/blob/master/LICENSE)
 license to facilitate adoption and use.
 
 Being a complete standalone tool, Teleport can be used as a software library
@@ -145,19 +117,15 @@ You can also reach the Gravitational team through their [website](https://gravit
 ## Is Teleport Secure and Production Ready?
 
 Teleport has completed several security audits from the nationally recognized
-technology security companies. [Some](https://gravitational.com/blog/teleport-release-2-2/) of 
-[them](https://gravitational.com/blog/teleport-security-audit/) have been made public. 
+technology security companies. Some of them have been [made public](https://gravitational.com/blog/teleport-release-2-2/). 
 We are comfortable with the use of Teleport from a security perspective.
-
-You can see the list of companies who use Teleport in production on the Teleport 
-[product page](https://gravitational.com/teleport#customerlist).
 
 However, Teleport is still a relatively young product so you may experience
 usability issues.  We are actively supporting Teleport and addressing any
 issues that are submitted to this repo. Ask questions, send pull requests,
 report issues and don't be shy! :)
 
-The latest stable Teleport build can be found in [Releases](https://gravitational.com/teleport/download/)
+The latest stable Teleport build can be found in [Releases](https://github.com/gravitational/teleport/releases)
 
 ## Known Issues
 
@@ -167,7 +135,7 @@ The latest stable Teleport build can be found in [Releases](https://gravitationa
 
 Teleport was created by [Gravitational Inc](https://gravitational.com). We have
 built Teleport by borrowing from our previous experiences at Rackspace. It has 
-been extracted from [Telekube](https://gravitational.com/telekube/), our
+been extracted from [Telekube](https://gravitational.com/product), our
 Kubernetes distribution optimized for deploying and remotely controlling complex 
 applications into multiple environments _at the same time_:
 

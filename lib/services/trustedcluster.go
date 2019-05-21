@@ -140,82 +140,72 @@ func (r RoleMap) Equals(o RoleMap) bool {
 
 // String prints user friendly representation of role mapping
 func (r RoleMap) String() string {
-	values, err := r.parse()
+	directMatch, wildcardMatch, err := r.parse()
 	if err != nil {
 		return fmt.Sprintf("<failed to parse: %v", err)
 	}
-	if len(values) != 0 {
-		return fmt.Sprintf("%v", values)
+	if len(wildcardMatch) != 0 {
+		directMatch[Wildcard] = wildcardMatch
+	}
+	if len(directMatch) != 0 {
+		return fmt.Sprintf("%v", directMatch)
 	}
 	return "<empty>"
 }
 
-func (r RoleMap) parse() (map[string][]string, error) {
+func (r RoleMap) parse() (map[string][]string, []string, error) {
+	var wildcardMatch []string
 	directMatch := make(map[string][]string)
 	for i := range r {
 		roleMap := r[i]
 		if roleMap.Remote == "" {
-			return nil, trace.BadParameter("missing 'remote' parameter for role_map")
-		}
-		_, err := utils.ReplaceRegexp(roleMap.Remote, "", "")
-		if trace.IsBadParameter(err) {
-			return nil, trace.BadParameter("failed to parse 'remote' parameter for role_map: %v", err.Error())
+			return nil, nil, trace.BadParameter("missing 'remote' parameter for role_map")
 		}
 		if len(roleMap.Local) == 0 {
-			return nil, trace.BadParameter("missing 'local' parameter for 'role_map'")
+			return nil, nil, trace.BadParameter("missing 'local' parameter for 'role_map'")
 		}
 		for _, local := range roleMap.Local {
 			if local == "" {
-				return nil, trace.BadParameter("missing 'local' property of 'role_map' entry")
+				return nil, nil, trace.BadParameter("missing 'local' property of 'role_map' entry")
 			}
 			if local == Wildcard {
-				return nil, trace.BadParameter("wilcard value is not supported for 'local' property of 'role_map' entry")
+				return nil, nil, trace.BadParameter("wilcard value is not supported for 'local' property of 'role_map' entry")
 			}
 		}
-		_, ok := directMatch[roleMap.Remote]
-		if ok {
-			return nil, trace.BadParameter("remote role '%v' match is already specified", roleMap.Remote)
+		if roleMap.Remote == Wildcard {
+			if wildcardMatch != nil {
+				return nil, nil, trace.BadParameter("only one wildcard local role matcher is allowed")
+			}
+			wildcardMatch = roleMap.Local
+		} else {
+			_, ok := directMatch[roleMap.Remote]
+			if ok {
+				return nil, nil, trace.BadParameter("remote role '%v' match is already specified", roleMap.Remote)
+			}
+			directMatch[roleMap.Remote] = roleMap.Local
 		}
-		directMatch[roleMap.Remote] = roleMap.Local
 	}
-	return directMatch, nil
+	return directMatch, wildcardMatch, nil
 }
 
 // Map maps local roles to remote roles
 func (r RoleMap) Map(remoteRoles []string) ([]string, error) {
-	_, err := r.parse()
+	directMatch, wildcardMatch, err := r.parse()
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
 	var outRoles []string
-	// when no remote roles is specified, assume that
-	// there is a single empty remote role (that should match wildcards)
-	if len(remoteRoles) == 0 {
-		remoteRoles = []string{""}
+	if len(remoteRoles) == 0 && len(wildcardMatch) != 0 {
+		outRoles = append(outRoles, wildcardMatch...)
+		return outRoles, nil
 	}
-	for _, mapping := range r {
-		expression := mapping.Remote
-		for _, remoteRole := range remoteRoles {
-			// never map default implicit role, it is always
-			// added by default
-			if remoteRole == teleport.DefaultImplicitRole {
-				continue
-			}
-			for _, replacementRole := range mapping.Local {
-				replacement, err := utils.ReplaceRegexp(expression, replacementRole, remoteRole)
-				switch {
-				case err == nil:
-					// empty replacement can occur when $2 expand refers
-					// to non-existing capture group in match expression
-					if replacement != "" {
-						outRoles = append(outRoles, replacement)
-					}
-				case trace.IsNotFound(err):
-					continue
-				default:
-					return nil, trace.Wrap(err)
-				}
-			}
+	for _, remoteRole := range remoteRoles {
+		match, ok := directMatch[remoteRole]
+		if ok {
+			outRoles = append(outRoles, match...)
+		}
+		if wildcardMatch != nil {
+			outRoles = append(outRoles, wildcardMatch...)
 		}
 	}
 	return outRoles, nil
@@ -223,7 +213,7 @@ func (r RoleMap) Map(remoteRoles []string) ([]string, error) {
 
 // Check checks RoleMap for errors
 func (r RoleMap) Check() error {
-	_, err := r.parse()
+	_, _, err := r.parse()
 	return trace.Wrap(err)
 }
 
@@ -401,9 +391,9 @@ func (c *TrustedClusterV2) CanChangeStateTo(t TrustedCluster) error {
 
 	if c.GetEnabled() == t.GetEnabled() {
 		if t.GetEnabled() == true {
-			return trace.AlreadyExists("trusted cluster is already enabled")
+			return trace.BadParameter("trusted cluster is already enabled")
 		}
-		return trace.AlreadyExists("trusted cluster state is already disabled")
+		return trace.BadParameter("trusted cluster state is already disabled")
 	}
 
 	return nil

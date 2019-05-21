@@ -19,13 +19,11 @@ package dynamo
 
 import (
 	"fmt"
-	"net/http"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/gravitational/teleport/lib/backend"
-	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -127,16 +125,16 @@ func GetName() string {
 // It's an implementation of backend API's NewFunc
 func New(params backend.Params) (backend.Backend, error) {
 	l := log.WithFields(log.Fields{trace.Component: BackendName})
-	l.Info("Initializing backend.")
+	l.Info("initializing backend")
 
 	var cfg *DynamoConfig
 	err := utils.ObjectToStruct(params, &cfg)
 	if err != nil {
 		log.Error(err)
-		return nil, trace.BadParameter("invalid DynamoDB configuration: %v", err)
+		return nil, trace.BadParameter("DynamoDB configuration is invalid", err)
 	}
 
-	defer l.Debug("AWS session is created.")
+	defer log.Debug("AWS session created")
 
 	if err := cfg.CheckAndSetDefaults(); err != nil {
 		return nil, trace.Wrap(err)
@@ -164,17 +162,6 @@ func New(params backend.Params) (backend.Backend, error) {
 		sess.Config.Credentials = creds
 	}
 
-	// Increase the size of the connection pool. This substantially improves the
-	// performance of Teleport under load as it reduces the number of TLS
-	// handshakes performed.
-	httpClient := &http.Client{
-		Transport: &http.Transport{
-			MaxIdleConns:        defaults.HTTPMaxIdleConns,
-			MaxIdleConnsPerHost: defaults.HTTPMaxIdleConnsPerHost,
-		},
-	}
-	sess.Config.HTTPClient = httpClient
-
 	// create DynamoDB service:
 	b.svc = dynamodb.New(sess)
 
@@ -198,9 +185,7 @@ func New(params backend.Params) (backend.Backend, error) {
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-
-	// Wrap backend in a input sanitizer and return it.
-	return backend.NewSanitizer(b), nil
+	return b, nil
 }
 
 type tableStatus int
@@ -299,12 +284,12 @@ func (b *DynamoDBBackend) createTable(tableName string, rangeKey string) error {
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	b.Infof("Waiting until table %q is created.", tableName)
+	log.Infof("[DynamoDB] waiting until table '%s' is created", tableName)
 	err = b.svc.WaitUntilTableExists(&dynamodb.DescribeTableInput{
 		TableName: aws.String(tableName),
 	})
 	if err == nil {
-		b.Infof("Table %q has been created.", tableName)
+		log.Infof("[DynamoDB] Table '%s' has been created", tableName)
 	}
 	return trace.Wrap(err)
 }
@@ -359,6 +344,7 @@ func (b *DynamoDBBackend) getRecords(path string) ([]record, error) {
 	for _, item := range out.Items {
 		var r record
 		dynamodbattribute.UnmarshalMap(item, &r)
+
 		if strings.Compare(path, r.FullPath[:len(path)]) == 0 && len(path) < len(r.FullPath) {
 			if r.isExpired() {
 				b.deleteKey(r.FullPath)
@@ -396,11 +382,11 @@ func removeDuplicates(elements []record) []record {
 	result := []record{}
 
 	for v := range elements {
-		if encountered[elements[v].FullPath] == true {
+		if encountered[elements[v].key] == true {
 			// Do not add duplicate.
 		} else {
 			// Record this element as an encountered element.
-			encountered[elements[v].FullPath] = true
+			encountered[elements[v].key] = true
 			// Append to result slice.
 			result = append(result, elements[v])
 		}
@@ -410,7 +396,7 @@ func removeDuplicates(elements []record) []record {
 }
 
 // GetItems is a function that retuns keys in batch
-func (b *DynamoDBBackend) GetItems(path []string, opts ...backend.OpOption) ([]backend.Item, error) {
+func (b *DynamoDBBackend) GetItems(path []string) ([]backend.Item, error) {
 	fullPath := b.fullPath(path...)
 	records, err := b.getRecords(fullPath)
 	if err != nil {
@@ -479,59 +465,10 @@ func (b *DynamoDBBackend) CreateVal(path []string, key string, val []byte, ttl t
 	return b.createKey(fullPath, val, ttl, false)
 }
 
-func (b *DynamoDBBackend) UpsertItems(bucket []string, items []backend.Item) error {
-	return trace.BadParameter("not implemented")
-}
-
 // UpsertVal update or create a key with defined value (refresh TTL if already exist)
 func (b *DynamoDBBackend) UpsertVal(path []string, key string, val []byte, ttl time.Duration) error {
 	fullPath := b.fullPath(append(path, key)...)
 	return b.createKey(fullPath, val, ttl, true)
-}
-
-// CompareAndSwapVal compares and swap values in atomic operation
-func (b *DynamoDBBackend) CompareAndSwapVal(path []string, key string, val []byte, prevVal []byte, ttl time.Duration) error {
-	if len(prevVal) == 0 {
-		return trace.BadParameter("missing prevVal parameter, to atomically create item, use CreateVal method")
-	}
-	fullPath := b.fullPath(append(path, key)...)
-	r := record{
-		HashKey:   hashKey,
-		FullPath:  fullPath,
-		Value:     val,
-		TTL:       ttl,
-		Timestamp: time.Now().UTC().Unix(),
-	}
-	if ttl != backend.Forever {
-		r.Expires = aws.Int64(b.clock.Now().UTC().Add(ttl).Unix())
-	}
-	av, err := dynamodbattribute.MarshalMap(r)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-	input := dynamodb.PutItemInput{
-		Item:      av,
-		TableName: aws.String(b.Tablename),
-	}
-	input.SetConditionExpression("#v = :prev")
-	input.SetExpressionAttributeNames(map[string]*string{
-		"#v": aws.String("Value"),
-	})
-	input.SetExpressionAttributeValues(map[string]*dynamodb.AttributeValue{
-		":prev": &dynamodb.AttributeValue{
-			B: prevVal,
-		},
-	})
-	_, err = b.svc.PutItem(&input)
-	err = convertError(err)
-	if err != nil {
-		// in this case let's use more specific compare failed error
-		if trace.IsAlreadyExists(err) {
-			return trace.CompareFailed(err.Error())
-		}
-		return trace.Wrap(err)
-	}
-	return nil
 }
 
 const delayBetweenLockAttempts = 100 * time.Millisecond
@@ -583,10 +520,6 @@ func (b *DynamoDBBackend) DeleteBucket(path []string, key string) error {
 	out, err := b.svc.Query(&input)
 	if err != nil {
 		return trace.Wrap(err)
-	}
-
-	if len(out.Items) == 0 {
-		return trace.NotFound("bucket %v %v is not found", path, key)
 	}
 
 	// TODO: manage paginated result

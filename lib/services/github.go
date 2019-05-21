@@ -51,8 +51,7 @@ type GithubConnector interface {
 	// SetTeamsToLogins sets the mapping of Github teams to allowed logins
 	SetTeamsToLogins([]TeamMapping)
 	// MapClaims returns the list of allows logins based on the retrieved claims
-	// returns list of logins and kubernetes groups
-	MapClaims(GithubClaims) ([]string, []string)
+	MapClaims(GithubClaims) []string
 	// GetDisplay returns the connector display name
 	GetDisplay() string
 	// SetDisplay sets the connector display name
@@ -105,9 +104,7 @@ type TeamMapping struct {
 	// Team is a team within the organization a user belongs to
 	Team string `json:"team"`
 	// Logins is a list of allowed logins for this org/team
-	Logins []string `json:"logins,omitempty"`
-	// KubeGroups is a list of allowed kubernetes groups for this org/team
-	KubeGroups []string `json:"kubernetes_groups,omitempty"`
+	Logins []string `json:"logins"`
 }
 
 // GithubClaims represents Github user information obtained during OAuth2 flow
@@ -206,10 +203,9 @@ func (c *GithubConnectorV3) SetDisplay(display string) {
 	c.Spec.Display = display
 }
 
-// MapClaims returns a list of logins based on the provided claims,
-// returns a list of logins and list of kubernetes groups
-func (c *GithubConnectorV3) MapClaims(claims GithubClaims) ([]string, []string) {
-	var logins, kubeGroups []string
+// MapClaims returns a list of logins based on the provided claims
+func (c *GithubConnectorV3) MapClaims(claims GithubClaims) []string {
+	var logins []string
 	for _, mapping := range c.GetTeamsToLogins() {
 		teams, ok := claims.OrganizationToTeams[mapping.Organization]
 		if !ok {
@@ -220,11 +216,10 @@ func (c *GithubConnectorV3) MapClaims(claims GithubClaims) ([]string, []string) 
 			// see if the user belongs to this team
 			if team == mapping.Team {
 				logins = append(logins, mapping.Logins...)
-				kubeGroups = append(kubeGroups, mapping.KubeGroups...)
 			}
 		}
 	}
-	return utils.Deduplicate(logins), utils.Deduplicate(kubeGroups)
+	return utils.Deduplicate(logins)
 }
 
 var githubConnectorMarshaler GithubConnectorMarshaler = &TeleportGithubConnectorMarshaler{}
@@ -324,12 +319,6 @@ var TeamMappingSchema = `{
     "organization": {"type": "string"},
     "team": {"type": "string"},
     "logins": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "kubernetes_groups": {
       "type": "array",
       "items": {
         "type": "string"

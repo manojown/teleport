@@ -53,8 +53,7 @@ func (s *AuthServer) CreateGithubAuthRequest(req services.GithubAuthRequest) (*s
 	req.RedirectURL = client.AuthCodeURL(req.StateToken, "", "")
 	log.WithFields(logrus.Fields{trace.Component: "github"}).Debugf(
 		"Redirect URL: %v.", req.RedirectURL)
-	req.SetTTL(s.GetClock(), defaults.GithubAuthRequestTTL)
-	err = s.Identity.CreateGithubAuthRequest(req)
+	err = s.Identity.CreateGithubAuthRequest(req, defaults.GithubAuthRequestTTL)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -200,21 +199,19 @@ func (s *AuthServer) validateGithubAuthCallback(q url.Values) (*GithubAuthRespon
 		response.Cert = certs.ssh
 		response.TLSCert = certs.tls
 
-		// Return the host CA for this cluster only.
-		authority, err := s.GetCertAuthority(services.CertAuthID{
-			Type:       services.HostCA,
-			DomainName: s.clusterName.GetClusterName(),
-		}, false)
+		authorities, err := s.GetCertAuthorities(services.HostCA, false)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
-		response.HostSigners = append(response.HostSigners, authority)
+		for _, authority := range authorities {
+			response.HostSigners = append(response.HostSigners, authority)
+		}
 	}
 	return response, nil
 }
 
 func (s *AuthServer) createGithubUser(connector services.GithubConnector, claims services.GithubClaims) error {
-	logins, kubeGroups := connector.MapClaims(claims)
+	logins := connector.MapClaims(claims)
 	if len(logins) == 0 {
 		return trace.BadParameter(
 			"user %q does not belong to any teams configured in %q connector",
@@ -232,7 +229,7 @@ func (s *AuthServer) createGithubUser(connector services.GithubConnector, claims
 		},
 		Spec: services.UserSpecV2{
 			Roles:   modules.GetModules().RolesFromLogins(logins),
-			Traits:  modules.GetModules().TraitsFromLogins(logins, kubeGroups),
+			Traits:  modules.GetModules().TraitsFromLogins(logins),
 			Expires: s.clock.Now().UTC().Add(defaults.OAuth2TTL),
 			GithubIdentities: []services.ExternalIdentity{{
 				ConnectorID: connector.GetName(),

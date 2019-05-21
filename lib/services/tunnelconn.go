@@ -3,6 +3,7 @@ package services
 import (
 	"encoding/json"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -230,16 +231,13 @@ func GetTunnelConnectionSchema() string {
 
 // UnmarshalTunnelConnection unmarshals reverse tunnel from JSON or YAML,
 // sets defaults and checks the schema
-func UnmarshalTunnelConnection(data []byte, opts ...MarshalOption) (TunnelConnection, error) {
+func UnmarshalTunnelConnection(data []byte) (TunnelConnection, error) {
 	if len(data) == 0 {
+		debug.PrintStack()
 		return nil, trace.BadParameter("missing tunnel connection data")
 	}
-	cfg, err := collectOptions(opts)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
 	var h ResourceHeader
-	err = utils.FastUnmarshal(data, &h)
+	err := json.Unmarshal(data, &h)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -247,14 +245,8 @@ func UnmarshalTunnelConnection(data []byte, opts ...MarshalOption) (TunnelConnec
 	case V2:
 		var r TunnelConnectionV2
 
-		if cfg.SkipValidation {
-			if err := utils.FastUnmarshal(data, &r); err != nil {
-				return nil, trace.BadParameter(err.Error())
-			}
-		} else {
-			if err := utils.UnmarshalWithSchema(GetTunnelConnectionSchema(), &r, data); err != nil {
-				return nil, trace.BadParameter(err.Error())
-			}
+		if err := utils.UnmarshalWithSchema(GetTunnelConnectionSchema(), &r, data); err != nil {
+			return nil, trace.BadParameter(err.Error())
 		}
 
 		if err := r.CheckAndSetDefaults(); err != nil {

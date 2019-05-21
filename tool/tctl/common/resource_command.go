@@ -72,7 +72,6 @@ func (g *ResourceCommand) Initialize(app *kingpin.Application, config *service.C
 		services.KindUser:            g.createUser,
 		services.KindTrustedCluster:  g.createTrustedCluster,
 		services.KindGithubConnector: g.createGithubConnector,
-		services.KindCertAuthority:   g.createCertAuthority,
 	}
 	g.config = config
 
@@ -197,33 +196,12 @@ func (u *ResourceCommand) createTrustedCluster(client auth.ClientI, raw services
 
 	out, err := client.UpsertTrustedCluster(tc)
 	if err != nil {
-		// If force is used and UpsertTrustedCluster returns trace.AlreadyExists,
-		// this means the user tried to upsert a cluster whose exact match already
-		// exists in the backend, nothing needs to occur other than happy message
-		// that the trusted cluster has been created.
-		if u.force && trace.IsAlreadyExists(err) {
-			out = tc
-		} else {
-			return trace.Wrap(err)
-		}
+		return trace.Wrap(err)
 	}
 	if out.GetName() != tc.GetName() {
 		fmt.Printf("WARNING: trusted cluster %q resource has been renamed to match remote cluster name %q\n", name, out.GetName())
 	}
-	fmt.Printf("trusted cluster %q has been %v\n", out.GetName(), UpsertVerb(exists, u.force))
-	return nil
-}
-
-// createCertAuthority creates certificate authority
-func (u *ResourceCommand) createCertAuthority(client auth.ClientI, raw services.UnknownResource) error {
-	certAuthority, err := services.GetCertAuthorityMarshaler().UnmarshalCertAuthority(raw.Raw)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-	if err := client.UpsertCertAuthority(certAuthority); err != nil {
-		return trace.Wrap(err)
-	}
-	fmt.Printf("certificate authority '%s' has been updated\n", certAuthority.GetName())
+	fmt.Printf("trusted cluster %q has been %v\n", out.GetName(), UpsertVerb(exists))
 	return nil
 }
 
@@ -246,7 +224,7 @@ func (u *ResourceCommand) createGithubConnector(client auth.ClientI, raw service
 		return trace.Wrap(err)
 	}
 	fmt.Printf("github connector %q has been %s\n",
-		connector.GetName(), UpsertVerb(exists, u.force))
+		connector.GetName(), UpsertVerb(exists))
 	return nil
 }
 
@@ -257,6 +235,16 @@ func (u *ResourceCommand) createUser(client auth.ClientI, raw services.UnknownRe
 		return trace.Wrap(err)
 	}
 	userName := user.GetName()
+	// see if a user with such name exists:
+	_, err = client.GetUser(userName)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	// only 'update' is supported (resources API do not support generating
+	// invitation tokens, 2FA and sign-up URLs)
+	if u.force == false {
+		return trace.BadParameter("you must use 'tctl users add' to create new users")
+	}
 	if err := client.UpsertUser(user); err != nil {
 		return trace.Wrap(err)
 	}
@@ -388,7 +376,7 @@ func (g *ResourceCommand) getCollection(client auth.ClientI) (c ResourceCollecti
 		}
 		return &serverCollection{servers: servers}, nil
 	case services.KindProxy:
-		servers, err := client.GetProxies()
+		servers, err := client.GetAuthServers()
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
@@ -455,18 +443,10 @@ const (
 	formatJSON = "json"
 )
 
-func UpsertVerb(exists bool, force bool) string {
-	switch {
-	case exists == true && force == true:
-		return "created"
-	case exists == false && force == true:
-		return "created"
-	case exists == true && force == false:
+func UpsertVerb(exists bool) string {
+	if exists {
 		return "updated"
-	case exists == false && force == false:
+	} else {
 		return "created"
 	}
-
-	// Can never reach here, but the compiler complains.
-	return "unknown"
 }

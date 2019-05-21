@@ -39,11 +39,6 @@ type Trust interface {
 	// UpsertCertAuthority updates or inserts a new certificate authority
 	UpsertCertAuthority(ca CertAuthority) error
 
-	// CompareAndSwapCertAuthority updates the cert authority value
-	// if existing value matches existing parameter,
-	// returns nil if succeeds, trace.CompareFailed otherwise
-	CompareAndSwapCertAuthority(new, existing CertAuthority) error
-
 	// DeleteCertAuthority deletes particular certificate authority
 	DeleteCertAuthority(id CertAuthID) error
 
@@ -52,11 +47,17 @@ type Trust interface {
 
 	// GetCertAuthority returns certificate authority by given id. Parameter loadSigningKeys
 	// controls if signing keys are loaded
-	GetCertAuthority(id CertAuthID, loadSigningKeys bool, opts ...MarshalOption) (CertAuthority, error)
+	GetCertAuthority(id CertAuthID, loadSigningKeys bool) (CertAuthority, error)
+
+	// DELETE IN: 2.6.0
+	// GetAnyCertAuthority returns activated or deactivated certificate authority
+	// by given id whether it is activated or not. Signing keys are never loaded.
+	// This method is used in migrations.
+	GetAnyCertAuthority(id CertAuthID) (ca CertAuthority, error error)
 
 	// GetCertAuthorities returns a list of authorities of a given type
 	// loadSigningKeys controls whether signing keys should be loaded or not
-	GetCertAuthorities(caType CertAuthType, loadSigningKeys bool, opts ...MarshalOption) ([]CertAuthority, error)
+	GetCertAuthorities(caType CertAuthType, loadSigningKeys bool) ([]CertAuthority, error)
 
 	// ActivateCertAuthority moves a CertAuthority from the deactivated list to
 	// the normal list.

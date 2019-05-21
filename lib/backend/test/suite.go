@@ -19,19 +19,15 @@ limitations under the License.
 package test
 
 import (
-	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gravitational/teleport/lib/backend"
-	"github.com/gravitational/teleport/lib/fixtures"
 
 	"github.com/gravitational/trace"
 	. "gopkg.in/check.v1"
 )
-
-var _ = fmt.Printf
 
 func TestBackend(t *testing.T) { TestingT(t) }
 
@@ -113,79 +109,29 @@ func (s *BackendSuite) BasicCRUD(c *C) {
 	c.Assert(s.B.UpsertVal([]string{"a", "c"}, "xkey", []byte("val3"), 0), IsNil)
 	c.Assert(s.B.UpsertVal([]string{"a", "c"}, "ykey", []byte("val4"), 0), IsNil)
 	c.Assert(s.B.DeleteBucket([]string{"a"}, "c"), IsNil)
-	c.Assert(s.B.DeleteBucket([]string{"a"}, "c"), NotNil)
-
 	_, err = s.B.GetVal([]string{"a", "c"}, "xkey")
 	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
 	_, err = s.B.GetVal([]string{"a", "c"}, "ykey")
 	c.Assert(trace.IsNotFound(err), Equals, true, Commentf("%#v", err))
 }
 
-// CompareAndSwap tests compare and swap functionality
-func (s *BackendSuite) CompareAndSwap(c *C) {
-	bucket := []string{"test", "cas"}
-
-	// compare and swap on non existing operation will fail
-	err := s.B.CompareAndSwapVal(bucket, "one", []byte("1"), []byte("2"), backend.Forever)
-	fixtures.ExpectCompareFailed(c, err)
-
-	err = s.B.CreateVal(bucket, "one", []byte("1"), backend.Forever)
-	c.Assert(err, IsNil)
-
-	// success CAS!
-	err = s.B.CompareAndSwapVal(bucket, "one", []byte("2"), []byte("1"), backend.Forever)
-	c.Assert(err, IsNil)
-
-	val, err := s.B.GetVal(bucket, "one")
-	c.Assert(err, IsNil)
-	c.Assert(string(val), Equals, "2")
-
-	// value has been updated - not '1' any more
-	err = s.B.CompareAndSwapVal(bucket, "one", []byte("3"), []byte("1"), backend.Forever)
-	fixtures.ExpectCompareFailed(c, err)
-
-	// existing value has not been changed by the failed CAS operation
-	val, err = s.B.GetVal(bucket, "one")
-	c.Assert(err, IsNil)
-	c.Assert(string(val), Equals, "2")
-}
-
-// BatchCRUD tests batch CRUD operations.
+// BatchCRUD tests batch CRUD operations if supported by the backend
 func (s *BackendSuite) BatchCRUD(c *C) {
+	getter, ok := s.B.(backend.ItemsGetter)
+	if !ok {
+		c.Skip("backend does not support batch get")
+		return
+	}
 	c.Assert(s.B.UpsertVal([]string{"a", "b"}, "bkey", []byte("val1"), 0), IsNil)
 	c.Assert(s.B.UpsertVal([]string{"a", "b"}, "akey", []byte("val2"), 0), IsNil)
 
-	items, err := s.B.GetItems([]string{"a", "b"})
+	items, err := getter.GetItems([]string{"a", "b"})
 	c.Assert(err, IsNil)
 	c.Assert(len(items), Equals, 2)
 	c.Assert(string(items[0].Value), Equals, "val2")
 	c.Assert(items[0].Key, Equals, "akey")
 	c.Assert(string(items[1].Value), Equals, "val1")
 	c.Assert(items[1].Key, Equals, "bkey")
-
-	c.Assert(s.B.UpsertVal([]string{"a", "b", "sub1"}, "subkey11", []byte("val11"), 0), IsNil)
-	c.Assert(s.B.UpsertVal([]string{"a", "b", "sub1"}, "subkey12", []byte("val12"), 0), IsNil)
-	c.Assert(s.B.UpsertVal([]string{"a", "b", "sub2", "sub3"}, "subkey31", []byte("val31"), 0), IsNil)
-
-	items, err = s.B.GetItems([]string{"a", "b"}, backend.WithRecursive())
-	c.Assert(err, IsNil)
-	c.Assert(len(items), Equals, 5)
-
-	c.Assert(string(items[0].Value), Equals, "val2")
-	c.Assert(items[0].Key, Equals, "akey")
-	c.Assert(string(items[1].Value), Equals, "val1")
-	c.Assert(items[1].Key, Equals, "bkey")
-
-	// both keys are equal, so order is not strictly defined,
-	// compare it as a map
-	v := map[string]string{}
-	v[string(items[2].Value)] = items[2].Key
-	v[string(items[3].Value)] = items[3].Key
-	c.Assert(v, DeepEquals, map[string]string{"val11": "sub1", "val12": "sub1"})
-
-	c.Assert(string(items[4].Value), Equals, "val31")
-	c.Assert(items[4].Key, Equals, "sub2")
-
 }
 
 // Directories checks directories access
@@ -207,16 +153,10 @@ func (s *BackendSuite) Expiration(c *C) {
 	c.Assert(s.B.UpsertVal(bucket, "bkey", []byte("val1"), time.Second), IsNil)
 	c.Assert(s.B.UpsertVal(bucket, "akey", []byte("val2"), 0), IsNil)
 
-	var keys []string
-	var err error
-	for i := 0; i < 4; i++ {
-		time.Sleep(time.Second)
-		keys, err = s.B.GetKeys(bucket)
-		c.Assert(err, IsNil)
-		if len(keys) == 1 {
-			break
-		}
-	}
+	time.Sleep(2 * time.Second)
+
+	keys, err := s.B.GetKeys(bucket)
+	c.Assert(err, IsNil)
 	c.Assert(keys, DeepEquals, []string{"akey"})
 }
 
