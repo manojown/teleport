@@ -14,6 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package kube contains subpackages with utility functions
+// package kube contains subpackages with utility functions
 // and proxies to intercept and authenticate Kubernetes API traffic
 package kube

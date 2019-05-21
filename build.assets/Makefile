@@ -2,11 +2,24 @@
 # This Makefile is used for producing official Teleport releases
 #
 BBOX=teleport-buildbox:latest
+
+DOCSBOX=teleport-docsbox:latest
+DOCSHOST=teleport-docs
+DOCSDIR=/teleport
+
 HOSTNAME=buildbox
 SRCDIR=/gopath/src/github.com/gravitational/teleport
-DOCKERFLAGS=--rm=true -v "$$(pwd)/../":$(SRCDIR) -v /tmp:/tmp -w $(SRCDIR) -h $(HOSTNAME)
+DOCKERFLAGS := --rm=true -v "$$(pwd)/../":$(SRCDIR) -v /tmp:/tmp -w $(SRCDIR) -h $(HOSTNAME)
 ADDFLAGS=-ldflags -w
 NOROOT=-u $$(id -u):$$(id -g)
+KUBECONFIG ?=
+TEST_KUBE ?=
+
+ifneq ("$(KUBECONFIG)","")
+DOCKERFLAGS := $(DOCKERFLAGS) -v $(KUBECONFIG):/mnt/kube/config -e KUBECONFIG=/mnt/kube/config -e TEST_KUBE=$(TEST_KUBE)
+endif
+export
+
 
 #
 # Build 'teleport' release inside a docker container
@@ -25,7 +38,7 @@ build-binaries: bbox
 		make -C $(SRCDIR) ADDFLAGS='$(ADDFLAGS)' all
 
 #
-# Builds a Docker container which is used for building official Teleport 
+# Builds a Docker container which is used for building official Teleport
 # binaries and docs
 #
 .PHONY:bbox
@@ -33,7 +46,26 @@ bbox:
 	docker build --build-arg UID=$$(id -u) --build-arg GID=$$(id -g) --tag $(BBOX) .
 
 #
-# Runs tests inside a build container 
+# Builds a Docker container for building mkdocs documentation
+#
+.PHONY:
+docsbox:
+	docker build --build-arg UID=$$(id -u) \
+		         --build-arg GID=$$(id -g) \
+		         --build-arg USER=jenkins \
+	             --build-arg WORKDIR=$(DOCSDIR) \
+		         --tag $(DOCSBOX) -f docs.dockerfile .
+
+#
+# Removes the docker image
+#
+.PHONY:clean
+clean:
+	docker image rm --force $(BBOX)
+	docker image rm --force $(DOCSBOX)
+
+#
+# Runs tests inside a build container
 #
 .PHONY:test
 test: bbox
@@ -46,29 +78,45 @@ test: bbox
 .PHONY:integration
 integration: bbox
 	docker run $(DOCKERFLAGS) $(NOROOT) -t $(BBOX) \
- 		/bin/bash -c "make -C $(SRCDIR) FLAGS='-cover' integration"
+		/bin/bash -c "make -C $(SRCDIR) FLAGS='-cover' integration"
 
 #
 # Builds docs
 #
 .PHONY:docs
-docs: bbox
-	docker run $(DOCKERFLAGS) -ti $(NOROOT) \
-		-e HOME=$(SRCDIR)/build.assets $(BBOX) \
+docs: docsbox
+	docker run --rm=true -ti $(NOROOT) \
+		-v $$(pwd)/..:$(DOCSDIR) \
+		-v /tmp:/tmp \
+		-w $(DOCSDIR) \
+		-h $(DOCSHOST) $(DOCSBOX) \
 		./docs/build.sh
 	@echo "\nSUCCESS: Teleport docs ----> build/docs\n"
+
+#
+# allows to enter into bash shell of docs container
+#
+.PHONY:
+enter-docs: docsbox
+	docker run --rm=true $(NOROOT) \
+		-v $$(pwd)/..:$(DOCSDIR) \
+		-v /tmp:/tmp \
+		-w $(DOCSDIR) \
+		-h $(DOCSHOST) \
+		-ti $(DOCSBOX) /bin/bash
 
 #
 # Runs docs website on localhost
 #
 .PHONY:run-docs
-run-docs: bbox
-	@echo -e "\n\n----> LIVE EDIT HERE: http://localhost:6600/admin-guide/\n"
-	docker run $(DOCKERFLAGS) -ti $(NOROOT) \
+run-docs: docsbox
+	docker run -ti $(NOROOT) \
+		-v $$(pwd)/..:$(DOCSDIR) \
+		-v /tmp:/tmp \
 		-e HOME=$(SRCDIR)/build.assets \
 		-p 6600:6600 \
-		-w $(SRCDIR) \
-		$(BBOX) docs/run.sh
+		-w $(DOCSDIR) \
+		$(DOCSBOX) docs/run.sh
 
 #
 # Starts shell inside the build container
@@ -82,7 +130,14 @@ enter: bbox
 # Create a teleport package using the build container
 #
 .PHONY:release
-release: 
+release: bbox
 	docker run $(DOCKERFLAGS) -i $(NOROOT) $(BBOX) \
-		/usr/bin/make release -e ADDFLAGS="$(ADDFLAGS)"
+		/usr/bin/make release -e ADDFLAGS="$(ADDFLAGS)" OS=linux
 
+#
+# Create a Windows Teleport package using the build container.
+#
+.PHONY:release-windows
+release-windows: bbox
+	docker run $(DOCKERFLAGS) -i $(NOROOT) $(BBOX) \
+		/usr/bin/make release -e ADDFLAGS="$(ADDFLAGS)" OS=windows

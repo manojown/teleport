@@ -17,7 +17,7 @@ limitations under the License.
 import React from 'react';
 import { withDocTitle } from './documentTitle';
 
-export const MSG_INFO_LOGIN_SUCCESS = 'Login successful';
+export const MSG_INFO_LOGIN_SUCCESS = 'Login was successful, you can close this window and continue using tsh.';
 export const MSG_ERROR_LOGIN_FAILED = 'Login unsuccessful. Please try again, if the problem persists, contact your system administrator.';
 export const MSG_ERROR_DEFAULT = 'Internal Error';
 export const MSG_ERROR_NOT_FOUND = '404 Not Found';
@@ -43,7 +43,7 @@ const InfoPage = withDocTitle("Info", ({ params }) => {
     return <SuccessfulLogin/>
   }
 
-  return null;
+  return <InfoBox />
 })
 
 const ErrorPage = withDocTitle("Error", ({ params, location }) => {
@@ -72,8 +72,12 @@ const Box = props => (
   </div>
 )
 
+const InfoBox = props => (
+  <Box iconClass="fa fa-smile-o" {...props}/>
+)
+
 const ErrorBox = props => (
-  <Box iconClass="fa fa-exclamation-triangle" {...props} />
+  <Box iconClass="fa fa-frown-o" {...props} />
 )
 
 const ErrorBoxDetails = ({ message='' }) => (
@@ -123,22 +127,10 @@ const LoginFailed = ({ message }) => (
 )
 
 const SuccessfulLogin = () => (
-  <Box iconClass="fa fa-check-circle m-b-md" >
+  <InfoBox>
     <h1>{MSG_INFO_LOGIN_SUCCESS}</h1>
-    <p className="m-t" style={successfulLoginStyles}>
-      You have successfully signed into your account.
-      You can close this window and continue using the product.
-    </p>
-  </Box>
+  </InfoBox>
 )
-
-const successfulLoginStyles = {
-  textAlign: "center",
-  maxWidth: "500px",
-  marginLeft: "auto",
-  marginRight: "auto",
-}
-
 
 export {
   ErrorPage,

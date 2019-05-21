@@ -20,7 +20,6 @@ package web
 
 import (
 	"compress/gzip"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -35,7 +34,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gravitational/roundtrip"
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/client"
@@ -48,15 +46,16 @@ import (
 	"github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/utils"
 	"github.com/gravitational/teleport/lib/web/ui"
+
+	"github.com/gravitational/roundtrip"
 	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
 	"github.com/julienschmidt/httprouter"
 	"github.com/mailgun/lemma/secret"
 	"github.com/mailgun/ttlmap"
-	_ "github.com/mattn/go-sqlite3"
 	log "github.com/sirupsen/logrus"
-
 	"github.com/tstranex/u2f"
+	"golang.org/x/crypto/ssh"
 )
 
 // Handler is HTTP web proxy handler
@@ -102,6 +101,12 @@ type Config struct {
 	ProxySSHAddr utils.NetAddr
 	// ProxyWebAddr points to the web (HTTPS) address of the proxy
 	ProxyWebAddr utils.NetAddr
+
+	// CipherSuites is the list of cipher suites Teleport suppports.
+	CipherSuites []uint16
+
+	// ProxySettings is a settings communicated to proxy
+	ProxySettings client.ProxySettings
 }
 
 type RewritingHandler struct {
@@ -120,7 +125,7 @@ func (r *RewritingHandler) Close() error {
 // NewHandler returns a new instance of web proxy handler
 func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 	const apiPrefix = "/" + teleport.WebAPIVersion
-	lauth, err := newSessionCache(cfg.ProxyClient, []utils.NetAddr{cfg.AuthServers})
+	lauth, err := newSessionCache(cfg.ProxyClient, []utils.NetAddr{cfg.AuthServers}, cfg.CipherSuites)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -134,10 +139,6 @@ func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 		if err := o(h); err != nil {
 			return nil, trace.Wrap(err)
 		}
-	}
-
-	if h.sessionStreamPollPeriod == 0 {
-		h.sessionStreamPollPeriod = sessionStreamPollPeriod
 	}
 
 	if h.clock == nil {
@@ -167,9 +168,6 @@ func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 	// list available sites
 	h.GET("/webapi/sites", h.WithAuth(h.getSites))
 
-	h.GET("/webapi/editcluster", h.WithAuth(h.getCluster))
-	h.PUT("/webapi/editcluster", h.WithAuth(h.saveCluster))
-
 	// Site specific API
 
 	// get namespaces
@@ -179,17 +177,19 @@ func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 	h.GET("/webapi/sites/:site/namespaces/:namespace/nodes", h.WithClusterAuth(h.siteNodesGet))
 
 	// active sessions handlers
-	h.GET("/webapi/sites/:site/namespaces/:namespace/connect", h.WithClusterAuth(h.siteNodeConnect))                       // connect to an active session (via websocket)
-	h.GET("/webapi/sites/:site/namespaces/:namespace/sessions", h.WithClusterAuth(h.siteSessionsGet))                      // get active list of sessions
-	h.POST("/webapi/sites/:site/namespaces/:namespace/sessions", h.WithClusterAuth(h.siteSessionGenerate))                 // create active session metadata
-	h.GET("/webapi/sites/:site/namespaces/:namespace/sessions/:sid", h.WithClusterAuth(h.siteSessionGet))                  // get active session metadata
-	h.PUT("/webapi/sites/:site/namespaces/:namespace/sessions/:sid", h.WithClusterAuth(h.siteSessionUpdate))               // update active session metadata (parameters)
-	h.GET("/webapi/sites/:site/namespaces/:namespace/sessions/:sid/events/stream", h.WithClusterAuth(h.siteSessionStream)) // get active session's byte stream (from events)
+	h.GET("/webapi/sites/:site/namespaces/:namespace/connect", h.WithClusterAuth(h.siteNodeConnect))       // connect to an active session (via websocket)
+	h.GET("/webapi/sites/:site/namespaces/:namespace/sessions", h.WithClusterAuth(h.siteSessionsGet))      // get active list of sessions
+	h.POST("/webapi/sites/:site/namespaces/:namespace/sessions", h.WithClusterAuth(h.siteSessionGenerate)) // create active session metadata
+	h.GET("/webapi/sites/:site/namespaces/:namespace/sessions/:sid", h.WithClusterAuth(h.siteSessionGet))  // get active session metadata
 
 	// recorded sessions handlers
 	h.GET("/webapi/sites/:site/events", h.WithClusterAuth(h.siteEventsGet))                                            // get recorded list of sessions (from events)
 	h.GET("/webapi/sites/:site/namespaces/:namespace/sessions/:sid/events", h.WithClusterAuth(h.siteSessionEventsGet)) // get recorded session's timing information (from events)
 	h.GET("/webapi/sites/:site/namespaces/:namespace/sessions/:sid/stream", h.siteSessionStreamGet)                    // get recorded session's bytes (from events)
+
+	// scp file transfer
+	h.GET("/webapi/sites/:site/namespaces/:namespace/nodes/:server/:login/scp", h.WithClusterAuth(h.transferFile))
+	h.POST("/webapi/sites/:site/namespaces/:namespace/nodes/:server/:login/scp", h.WithClusterAuth(h.transferFile))
 
 	// OIDC related callback handlers
 	h.GET("/webapi/oidc/login/web", httplib.MakeHandler(h.oidcLoginWeb))
@@ -502,6 +502,7 @@ func (h *Handler) ping(w http.ResponseWriter, r *http.Request, p httprouter.Para
 
 	return client.PingResponse{
 		Auth:          defaultSettings,
+		Proxy:         h.cfg.ProxySettings,
 		ServerVersion: teleport.Version,
 	}, nil
 }
@@ -515,43 +516,39 @@ func (h *Handler) pingWithConnector(w http.ResponseWriter, r *http.Request, p ht
 		return nil, trace.Wrap(err)
 	}
 
+	response := &client.PingResponse{
+		Proxy:         h.cfg.ProxySettings,
+		ServerVersion: teleport.Version,
+	}
+
 	if connectorName == teleport.Local {
 		as, err := localSettings(h.cfg.ProxyClient, cap)
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
-
-		return &client.PingResponse{
-			Auth:          as,
-			ServerVersion: teleport.Version,
-		}, nil
+		response.Auth = as
+		return response, nil
 	}
 
 	// first look for a oidc connector with that name
 	oidcConnector, err := authClient.GetOIDCConnector(connectorName, false)
 	if err == nil {
-		return &client.PingResponse{
-			Auth:          oidcSettings(oidcConnector, cap),
-			ServerVersion: teleport.Version,
-		}, nil
+		response.Auth = oidcSettings(oidcConnector, cap)
+		return response, nil
 	}
 
 	// if no oidc connector was found, look for a saml connector
 	samlConnector, err := authClient.GetSAMLConnector(connectorName, false)
 	if err == nil {
-		return &client.PingResponse{
-			Auth:          samlSettings(samlConnector, cap),
-			ServerVersion: teleport.Version,
-		}, nil
+		response.Auth = samlSettings(samlConnector, cap)
+		return response, nil
 	}
 
 	// look for github connector
 	githubConnector, err := authClient.GetGithubConnector(connectorName, false)
 	if err == nil {
-		return &client.PingResponse{
-			Auth:          githubSettings(githubConnector, cap),
-			ServerVersion: teleport.Version,
-		}, nil
+		response.Auth = githubSettings(githubConnector, cap)
+		return response, nil
 	}
 
 	return nil, trace.BadParameter("invalid connector name %v", connectorName)
@@ -630,7 +627,6 @@ func (h *Handler) getWebConfig(w http.ResponseWriter, r *http.Request, p httprou
 
 	webCfg := ui.WebConfig{
 		Auth:            authSettings,
-		ServerVersion:   teleport.Version,
 		CanJoinSessions: canJoinSessions,
 	}
 
@@ -658,7 +654,7 @@ func (h *Handler) oidcLoginWeb(w http.ResponseWriter, r *http.Request, p httprou
 
 	csrfToken, err := csrf.ExtractTokenFromCookie(r)
 	if err != nil {
-		log.Warningf("unable to extract CSRF token from cookie", err)
+		log.Warningf("unable to extract CSRF token from cookie: %v", err)
 		return nil, trace.AccessDenied("access denied")
 	}
 
@@ -830,7 +826,7 @@ func (h *Handler) oidcCallback(w http.ResponseWriter, r *http.Request, p httprou
 	if response.Req.CreateWebSession {
 		err = csrf.VerifyToken(response.Req.CSRFToken, r)
 		if err != nil {
-			log.Warningf("[OIDC] unable to verify CSRF token", err)
+			log.Warningf("[OIDC] unable to verify CSRF token: %v", err)
 			return nil, trace.AccessDenied("access denied")
 		}
 
@@ -1301,89 +1297,13 @@ func convertSites(rs []reversetunnel.RemoteSite) []site {
 // {"sites": {"name": "localhost", "last_connected": "RFC3339 time", "status": "active"}}
 //
 func (m *Handler) getSites(w http.ResponseWriter, r *http.Request, p httprouter.Params, c *SessionContext) (interface{}, error) {
-
-	// fmt.Println("========================")
-	// fmt.Println("sadasdasd", convertSites(m.cfg.Proxy.GetSites()))
-	// fmt.Println("========================")
-
 	return getSitesResponse{
 		Sites: convertSites(m.cfg.Proxy.GetSites()),
 	}, nil
 }
 
-type clusrterEdit struct {
-	HostName string `json:"hostname"`
-	Alias    string `json:"alias"`
-}
-
-type ClusterResponse struct {
-	Clusters []clusrterEdit `json:"sites"`
-}
-
-//get Cluster /Manoj
-func (m *Handler) getCluster(w http.ResponseWriter, r *http.Request, p httprouter.Params, c *SessionContext) (interface{}, error) {
-	var clusterResponse []clusrterEdit
-	// var clusrteredit clusrterEdit
-	db, err := sql.Open("sqlite3", "/var/lib/teleport/alias.db")
-	checkErr(err)
-	rows, err := db.Query("SELECT * FROM clusters")
-	checkErr(err)
-
-	var hostname string
-	var alias string
-	fmt.Println("rows is", rows)
-	for rows.Next() {
-		err = rows.Scan(&hostname, &alias)
-		checkErr(err)
-		eachOne := clusrterEdit{hostname, alias}
-		// fmt.Println("clusrteredit clusrteredit", eachOne)
-		clusterResponse = append(clusterResponse, eachOne)
-
-	}
-	rows.Close()
-	db.Close()
-
-	return ClusterResponse{
-		Clusters: clusterResponse,
-	}, nil
-}
-
-type successMessage struct {
-	Message string `json:"message"`
-}
-
-// save Cluster aliases /Manoj
-func (m *Handler) saveCluster(w http.ResponseWriter, r *http.Request, p httprouter.Params, c *SessionContext) (interface{}, error) {
-	db, err := sql.Open("sqlite3", "/var/lib/teleport/alias.db")
-	checkErr(err)
-
-	stmt, err := db.Prepare("INSERT  OR REPLACE INTO clusters(hostname, alias) values(?,?)")
-	checkErr(err)
-
-	decoder := json.NewDecoder(r.Body)
-	var cluster clusrterEdit
-	decoder.Decode(&cluster)
-
-	checkErr(err)
-
-	res, err := stmt.Exec(cluster.HostName, cluster.Alias)
-	fmt.Println(res)
-	checkErr(err)
-	db.Close()
-	return successMessage{
-		Message: "Cluster alias save successfully",
-	}, nil
-}
-
 type getSiteNamespacesResponse struct {
 	Namespaces []services.Namespace `json:"namespaces"`
-}
-
-func checkErr(err error) {
-	if err != nil {
-
-		panic(err)
-	}
 }
 
 /* getSiteNamespaces returns a list of namespaces for a given site
@@ -1413,16 +1333,19 @@ type nodeWithSessions struct {
 	Sessions []session.Session `json:"sessions"`
 }
 
-func (h *Handler) siteNodesGet(w http.ResponseWriter, r *http.Request, p httprouter.Params, c *SessionContext, site reversetunnel.RemoteSite) (interface{}, error) {
-	clt, err := site.GetClient()
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
+func (h *Handler) siteNodesGet(w http.ResponseWriter, r *http.Request, p httprouter.Params, ctx *SessionContext, site reversetunnel.RemoteSite) (interface{}, error) {
 	namespace := p.ByName("namespace")
 	if !services.IsValidNamespace(namespace) {
 		return nil, trace.BadParameter("invalid namespace %q", namespace)
 	}
-	servers, err := clt.GetNodes(namespace)
+
+	// Get a client to the Auth Server with the logged in users identity. The
+	// identity of the logged in user is used to fetch the list of nodes.
+	clt, err := ctx.GetUserClient(site)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+	servers, err := clt.GetNodes(namespace, services.SkipValidation())
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -1486,51 +1409,8 @@ func (h *Handler) siteNodeConnect(
 
 	// start the websocket session with a web-based terminal:
 	log.Infof("[WEB] getting terminal to '%#v'", req)
-	term.Run(w, r)
+	term.Serve(w, r)
 
-	return nil, nil
-}
-
-// sessionStreamEvent is sent over the session stream socket, it contains
-// last events that occurred (only new events are sent)
-type sessionStreamEvent struct {
-	Events  []events.EventFields `json:"events"`
-	Session *session.Session     `json:"session"`
-	Servers []services.ServerV1  `json:"servers"`
-}
-
-// siteSessionStream returns a stream of events related to the session
-//
-// GET /v1/webapi/sites/:site/namespaces/:namespace/sessions/:sid/events/stream?access_token=bearer_token
-//
-// Successful response is a websocket stream that allows read write to the server and returns
-// json events
-//
-func (h *Handler) siteSessionStream(w http.ResponseWriter, r *http.Request, p httprouter.Params, ctx *SessionContext, site reversetunnel.RemoteSite) (interface{}, error) {
-	sessionID, err := session.ParseID(p.ByName("sid"))
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	namespace := p.ByName("namespace")
-	if !services.IsValidNamespace(namespace) {
-		return nil, trace.BadParameter("invalid namespace %q", namespace)
-	}
-
-	connect, err := newSessionStreamHandler(namespace,
-		*sessionID, ctx, site, h.sessionStreamPollPeriod)
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-	// this is to make sure we close web socket connections once
-	// sessionContext that owns them expires
-	ctx.AddClosers(connect)
-	defer func() {
-		connect.Close()
-		ctx.RemoveCloser(connect)
-	}()
-
-	connect.Handler().ServeHTTP(w, r)
 	return nil, nil
 }
 
@@ -1574,48 +1454,6 @@ func (h *Handler) siteSessionGenerate(w http.ResponseWriter, r *http.Request, p 
 
 type siteSessionUpdateReq struct {
 	TerminalParams session.TerminalParams `json:"terminal_params"`
-}
-
-// siteSessionUpdate udpdates the site session
-//
-// PUT /v1/webapi/sites/:site/sessions/:sid
-//
-// Request body:
-//
-// {"terminal_params": {"w": 100, "h": 100}}
-//
-// Response body:
-//
-// {"message": "ok"}
-//
-func (h *Handler) siteSessionUpdate(w http.ResponseWriter, r *http.Request, p httprouter.Params, ctx *SessionContext, site reversetunnel.RemoteSite) (interface{}, error) {
-	sessionID, err := session.ParseID(p.ByName("sid"))
-	if err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	var req *siteSessionUpdateReq
-	if err := httplib.ReadJSON(r, &req); err != nil {
-		return nil, trace.Wrap(err)
-	}
-
-	siteAPI, err := site.GetClient()
-	if err != nil {
-		log.Error(err)
-		return nil, trace.Wrap(err)
-	}
-
-	namespace := p.ByName("namespace")
-	if !services.IsValidNamespace(namespace) {
-		return nil, trace.BadParameter("invalid namespace %q", namespace)
-	}
-
-	err = ctx.UpdateSessionTerminal(siteAPI, namespace, *sessionID, req.TerminalParams)
-	if err != nil {
-		log.Error(err)
-		return nil, trace.Wrap(err)
-	}
-	return ok(), nil
 }
 
 type siteSessionsGetResponse struct {
@@ -1695,7 +1533,6 @@ const maxStreamBytes = 5 * 1024 * 1024
 //
 func (h *Handler) siteEventsGet(w http.ResponseWriter, r *http.Request, p httprouter.Params, ctx *SessionContext, site reversetunnel.RemoteSite) (interface{}, error) {
 	query := r.URL.Query()
-	log.Infof("web.getEvents(%v)", r.URL.RawQuery)
 
 	clt, err := ctx.GetUserClient(site)
 	if err != nil {
@@ -1747,10 +1584,16 @@ type siteSessionStreamGetResponse struct {
 // with Content-Type of application/octet-stream, gzipped with up to 95%
 // compression ratio.
 func (h *Handler) siteSessionStreamGet(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
+	httplib.SetNoCacheHeaders(w.Header())
+	logger := log.WithFields(log.Fields{
+		trace.Component: teleport.ComponentWeb,
+	})
+
 	var site reversetunnel.RemoteSite
 	onError := func(err error) {
-		w.Header().Set("Content-Type", "text/json")
-		trace.WriteError(w, err)
+		logger.Debugf("Unable to retrieve session chunk: %v.", err)
+		w.WriteHeader(trace.ErrorToCode(err))
+		w.Write([]byte(err.Error()))
 	}
 	// authenticate first:
 	ctx, err := h.AuthenticateRequest(w, r, true)
@@ -1850,9 +1693,13 @@ type eventsListGetResponse struct {
 // {"events": [{...}, {...}, ...}
 //
 func (h *Handler) siteSessionEventsGet(w http.ResponseWriter, r *http.Request, p httprouter.Params, ctx *SessionContext, site reversetunnel.RemoteSite) (interface{}, error) {
+	logger := log.WithFields(log.Fields{
+		trace.Component: teleport.ComponentWeb,
+	})
+
 	sessionID, err := session.ParseID(p.ByName("sid"))
 	if err != nil {
-		return nil, trace.Wrap(err)
+		return nil, trace.BadParameter("invalid session ID %q", p.ByName("sid"))
 	}
 
 	clt, err := ctx.GetUserClient(site)
@@ -1867,8 +1714,13 @@ func (h *Handler) siteSessionEventsGet(w http.ResponseWriter, r *http.Request, p
 	if !services.IsValidNamespace(namespace) {
 		return nil, trace.BadParameter("invalid namespace %q", namespace)
 	}
-	e, err := clt.GetSessionEvents(namespace, *sessionID, afterN)
+	e, err := clt.GetSessionEvents(namespace, *sessionID, afterN, true)
 	if err != nil {
+		logger.Debugf("Unable to find events for session %v: %v.", sessionID, err)
+		if trace.IsNotFound(err) {
+			return nil, trace.NotFound("Unable to find events for session %q", sessionID)
+		}
+
 		return nil, trace.Wrap(err)
 	}
 	return eventsListGetResponse{Events: e}, nil
@@ -2072,6 +1924,7 @@ func (h *Handler) AuthenticateRequest(w http.ResponseWriter, r *http.Request, ch
 			logger.Warningf("no auth headers %v", err)
 			return nil, trace.AccessDenied("need auth")
 		}
+
 		if creds.Password != ctx.GetWebSession().GetBearerToken() {
 			logger.Warningf("bad bearer token")
 			return nil, trace.AccessDenied("bad bearer token")
@@ -2134,4 +1987,35 @@ type responseData struct {
 
 func makeResponse(items interface{}) (interface{}, error) {
 	return responseData{Items: items}, nil
+}
+
+// makeTeleportClientConfig creates default teleport client configuration
+// that is used to initiate an SSH terminal session or SCP file transfer
+func makeTeleportClientConfig(ctx *SessionContext) (*client.Config, error) {
+	agent, cert, err := ctx.GetAgent()
+	if err != nil {
+		return nil, trace.BadParameter("failed to get user credentials: %v", err)
+	}
+
+	signers, err := agent.Signers()
+	if err != nil {
+		return nil, trace.BadParameter("failed to get user credentials: %v", err)
+	}
+
+	tlsConfig, err := ctx.ClientTLSConfig()
+	if err != nil {
+		return nil, trace.BadParameter("failed to get client TLS config: %v", err)
+	}
+
+	config := &client.Config{
+		Username:         ctx.user,
+		Agent:            agent,
+		SkipLocalAuth:    true,
+		TLS:              tlsConfig,
+		AuthMethods:      []ssh.AuthMethod{ssh.PublicKeys(signers...)},
+		DefaultPrincipal: cert.ValidPrincipals[0],
+		HostKeyCallback:  func(string, net.Addr, ssh.PublicKey) error { return nil },
+	}
+
+	return config, nil
 }

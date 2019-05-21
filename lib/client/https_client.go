@@ -18,35 +18,47 @@ limitations under the License.
 package client
 
 import (
-	"crypto/tls"
+	"context"
 	"crypto/x509"
 	"net/http"
 	"net/url"
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/httplib"
+	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/roundtrip"
 	"github.com/gravitational/trace"
 )
 
 func NewInsecureWebClient() *http.Client {
+	// Because Teleport clients can't be configured (yet), they take the default
+	// list of cipher suites from Go.
+	tlsConfig := utils.TLSConfig(nil)
+	tlsConfig.InsecureSkipVerify = true
+
 	return &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: tlsConfig,
 		},
 	}
 }
 
 func newClientWithPool(pool *x509.CertPool) *http.Client {
+	// Because Teleport clients can't be configured (yet), they take the default
+	// list of cipher suites from Go.
+	tlsConfig := utils.TLSConfig(nil)
+	tlsConfig.RootCAs = pool
+
 	return &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: pool},
+			TLSClientConfig: tlsConfig,
 		},
 	}
 }
 
 func NewWebClient(url string, opts ...roundtrip.ClientParam) (*WebClient, error) {
+	opts = append(opts, roundtrip.SanitizerEnabled(true))
 	clt, err := roundtrip.NewClient(url, teleport.WebAPIVersion, opts...)
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -60,20 +72,18 @@ type WebClient struct {
 	*roundtrip.Client
 }
 
-func (w *WebClient) PostJSON(
-	endpoint string, val interface{}) (*roundtrip.Response, error) {
-	return httplib.ConvertResponse(w.Client.PostJSON(endpoint, val))
+func (w *WebClient) PostJSON(ctx context.Context, endpoint string, val interface{}) (*roundtrip.Response, error) {
+	return httplib.ConvertResponse(w.Client.PostJSON(ctx, endpoint, val))
 }
 
-func (w *WebClient) PutJSON(
-	endpoint string, val interface{}) (*roundtrip.Response, error) {
-	return httplib.ConvertResponse(w.Client.PutJSON(endpoint, val))
+func (w *WebClient) PutJSON(ctx context.Context, endpoint string, val interface{}) (*roundtrip.Response, error) {
+	return httplib.ConvertResponse(w.Client.PutJSON(ctx, endpoint, val))
 }
 
-func (w *WebClient) Get(endpoint string, val url.Values) (*roundtrip.Response, error) {
-	return httplib.ConvertResponse(w.Client.Get(endpoint, val))
+func (w *WebClient) Get(ctx context.Context, endpoint string, val url.Values) (*roundtrip.Response, error) {
+	return httplib.ConvertResponse(w.Client.Get(ctx, endpoint, val))
 }
 
-func (w *WebClient) Delete(endpoint string) (*roundtrip.Response, error) {
-	return httplib.ConvertResponse(w.Client.Delete(endpoint))
+func (w *WebClient) Delete(ctx context.Context, endpoint string) (*roundtrip.Response, error) {
+	return httplib.ConvertResponse(w.Client.Delete(ctx, endpoint))
 }

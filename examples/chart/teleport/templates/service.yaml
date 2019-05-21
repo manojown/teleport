@@ -3,7 +3,10 @@ kind: Service
 metadata:
   name: {{ template "teleport.fullname" . }}
   labels:
-{{ include "teleport.labels" . | indent 4 }}
+    app: {{ template "teleport.name" . }}
+    chart: {{ template "teleport.chart" . }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
 {{- if .Values.service.labels }}
 {{ toYaml .Values.service.annotations | indent 4 }}
 {{- end }}
@@ -18,9 +21,6 @@ spec:
     - name: {{ $key }}
 {{ toYaml $value | indent 6 }}
   {{- end }}
-{{- if and (semverCompare ">=1.7-0" .Capabilities.KubeVersion.GitVersion) (.Values.service.externalTrafficPolicy) }}
-  externalTrafficPolicy: "{{ .Values.service.externalTrafficPolicy }}"
-{{- end }}
   selector:
     app: {{ template "teleport.name" . }}
     release: {{ .Release.Name }}

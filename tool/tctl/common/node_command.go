@@ -28,6 +28,7 @@ import (
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/service"
+	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/trace"
 )
 
@@ -84,41 +85,27 @@ func (c *NodeCommand) TryRun(cmd string, client auth.ClientI) (match bool, err e
 	return true, trace.Wrap(err)
 }
 
-const trustedClusterTemplate = `kind: trusted_cluster
-version: v2
-metadata:
-   name: %v
-spec:
-   enabled: true
-   token: %v
-   web_proxy_addr: proxy.example.com:3080
-   role_map:
-   - remote: admin
-     local: [admin]`
+const trustedClusterMessage = `The cluster invite token: %v
+This token will expire in %d minutes
 
-const trustedClusterMessage = `Trusted cluster token: %v
-
-Use this cluster in trusted cluster resource, for example:
-
-%v
-
-Please note:
-
-  - This token will expire in %d minutes.
-  - Replace address proxy.example.com:3080 with externally accessible teleport proxy address.
-  - Set proper local and remote role_map property.
+Use this token when defining a trusted cluster resource on a remote cluster.
 `
 
 const nodeMessage = `The invite token: %v
+This token will expire in %d minutes
 
 Run this on the new node to join the cluster:
 
-> teleport start --roles=%s --token=%v --auth-server=%v
+> teleport start \
+   --roles=%s \
+   --token=%v \
+   --ca-pin=%v \
+   --auth-server=%v
 
 Please note:
 
   - This invitation token will expire in %d minutes
-  - %v must be reachable from the new node, see --advertise-ip server flag
+  - %v must be reachable from the new node
 `
 
 // Invite generates a token which can be used to add another SSH node
@@ -134,6 +121,13 @@ func (c *NodeCommand) Invite(client auth.ClientI) error {
 		return trace.Wrap(err)
 	}
 
+	// Calculate the CA pin for this cluster. The CA pin is used by the client
+	// to verify the identity of the Auth Server.
+	caPin, err := calculateCAPin(client)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+
 	authServers, err := client.GetAuthServers()
 	if err != nil {
 		return trace.Wrap(err)
@@ -142,19 +136,21 @@ func (c *NodeCommand) Invite(client auth.ClientI) error {
 		return trace.Errorf("This cluster does not have any auth servers running.")
 	}
 
-	clusterName, err := client.GetClusterName()
-	if err != nil {
-		return trace.Wrap(err)
-	}
-
 	// output format swtich:
 	if c.format == "text" {
-		if roles.Include(teleport.RoleTrustedCluster) {
-			trustedCluster := fmt.Sprintf(trustedClusterTemplate, clusterName.GetClusterName(), token)
-			fmt.Printf(trustedClusterMessage, token, trustedCluster, int(c.ttl.Minutes()))
+		if roles.Include(teleport.RoleTrustedCluster) || roles.Include(teleport.LegacyClusterTokenType) {
+			fmt.Printf(trustedClusterMessage, token, int(c.ttl.Minutes()))
 		} else {
 			fmt.Printf(nodeMessage,
-				token, strings.ToLower(roles.String()), token, authServers[0].GetAddr(), int(c.ttl.Minutes()), authServers[0].GetAddr())
+				token,
+				int(c.ttl.Minutes()),
+				strings.ToLower(roles.String()),
+				token,
+				caPin,
+				authServers[0].GetAddr(),
+				int(c.ttl.Minutes()),
+				authServers[0].GetAddr(),
+			)
 		}
 	} else {
 		// Always return a list, otherwise we'll break users tooling. See #1846 for
@@ -172,7 +168,7 @@ func (c *NodeCommand) Invite(client auth.ClientI) error {
 // ListActive retreives the list of nodes who recently sent heartbeats to
 // to a cluster and prints it to stdout
 func (c *NodeCommand) ListActive(client auth.ClientI) error {
-	nodes, err := client.GetNodes(c.namespace)
+	nodes, err := client.GetNodes(c.namespace, services.SkipValidation())
 	if err != nil {
 		return trace.Wrap(err)
 	}

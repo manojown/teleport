@@ -37,9 +37,9 @@ import (
 	"github.com/gravitational/teleport/lib/utils"
 	"github.com/gravitational/trace"
 
+	oxyforward "github.com/gravitational/oxy/forward"
 	"github.com/gravitational/roundtrip"
 	"github.com/jonboulle/clockwork"
-	oxyforward "github.com/mailgun/oxy/forward"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -53,13 +53,14 @@ type remoteSite struct {
 	domainName  string
 	connections []*remoteConn
 	lastUsed    int
-	lastActive  time.Time
 	srv         *server
 	transport   *http.Transport
 	connInfo    services.TunnelConnection
-	ctx         context.Context
-	cancel      context.CancelFunc
-	clock       clockwork.Clock
+	// lastConnInfo is the last conn
+	lastConnInfo services.TunnelConnection
+	ctx          context.Context
+	cancel       context.CancelFunc
+	clock        clockwork.Clock
 
 	// certificateCache caches host certificates for the forwarding server.
 	certificateCache *certificateCache
@@ -76,6 +77,12 @@ type remoteSite struct {
 	// remoteAccessPoint provides access to a cached subset of the Auth Server API of
 	// the remote cluster this site belongs to.
 	remoteAccessPoint auth.AccessPoint
+
+	// remoteCA is the last remote certificate authority recorded by the client.
+	// It is used to detect CA rotation status changes. If the rotation
+	// state has been changed, the tunnel will reconnect to re-create the client
+	// with new settings.
+	remoteCA services.CertAuthority
 }
 
 func (s *remoteSite) getRemoteClient() (auth.ClientI, bool, error) {
@@ -94,6 +101,10 @@ func (s *remoteSite) getRemoteClient() (auth.ClientI, bool, error) {
 		}
 		tlsConfig := s.srv.ClientTLS.Clone()
 		tlsConfig.RootCAs = pool
+		// encode the name of this cluster to identify this cluster,
+		// connecting to the remote one (it is used to find the right certificate
+		// authority to verify)
+		tlsConfig.ServerName = auth.EncodeClusterName(s.srv.ClusterName)
 		clt, err := auth.NewTLSClientWithDialer(s.authServerContextDialer, tlsConfig)
 		if err != nil {
 			return nil, false, trace.Wrap(err)
@@ -112,6 +123,11 @@ func (s *remoteSite) getRemoteClient() (auth.ClientI, bool, error) {
 
 func (s *remoteSite) authServerContextDialer(ctx context.Context, network, address string) (net.Conn, error) {
 	return s.DialAuthServer()
+}
+
+// GetTunnelsCount always returns 0 for local cluster
+func (s *remoteSite) GetTunnelsCount() int {
+	return s.connectionCount()
 }
 
 func (s *remoteSite) CachingAccessPoint() (auth.AccessPoint, error) {
@@ -193,17 +209,8 @@ func (s *remoteSite) addConn(conn net.Conn, sshConn ssh.Conn) (*remoteConn, erro
 	return rc, nil
 }
 
-func (s *remoteSite) getLatestTunnelConnection() (services.TunnelConnection, error) {
-	conns, err := s.localAccessPoint.GetTunnelConnections(s.domainName)
-	if err != nil {
-		s.Warningf("failed to fetch tunnel statuses: %v", err)
-		return nil, trace.Wrap(err)
-	}
-	return services.LatestTunnelConnection(conns)
-}
-
 func (s *remoteSite) GetStatus() string {
-	connInfo, err := s.getLatestTunnelConnection()
+	connInfo, err := s.getLastConnInfo()
 	if err != nil {
 		return teleport.RemoteClusterStatusOffline
 	}
@@ -216,10 +223,26 @@ func (s *remoteSite) copyConnInfo() services.TunnelConnection {
 	return s.connInfo.Clone()
 }
 
+func (s *remoteSite) setLastConnInfo(connInfo services.TunnelConnection) {
+	s.Lock()
+	defer s.Unlock()
+	s.lastConnInfo = connInfo.Clone()
+}
+
+func (s *remoteSite) getLastConnInfo() (services.TunnelConnection, error) {
+	s.RLock()
+	defer s.RUnlock()
+	if s.lastConnInfo == nil {
+		return nil, trace.NotFound("no last connection found")
+	}
+	return s.lastConnInfo.Clone(), nil
+}
+
 func (s *remoteSite) registerHeartbeat(t time.Time) {
 	connInfo := s.copyConnInfo()
 	connInfo.SetLastHeartbeat(t)
 	connInfo.SetExpiry(s.clock.Now().Add(defaults.ReverseTunnelOfflineThreshold))
+	s.setLastConnInfo(connInfo)
 	err := s.localAccessPoint.UpsertTunnelConnection(connInfo)
 	if err != nil {
 		s.Warningf("failed to register heartbeat: %v", err)
@@ -280,11 +303,29 @@ func (s *remoteSite) GetName() string {
 }
 
 func (s *remoteSite) GetLastConnected() time.Time {
-	connInfo, err := s.getLatestTunnelConnection()
+	connInfo, err := s.getLastConnInfo()
 	if err != nil {
 		return time.Time{}
 	}
 	return connInfo.GetLastHeartbeat()
+}
+
+func (s *remoteSite) compareAndSwapCertAuthority(ca services.CertAuthority) error {
+	s.Lock()
+	defer s.Unlock()
+
+	if s.remoteCA == nil {
+		s.remoteCA = ca
+		return nil
+	}
+
+	rotation := s.remoteCA.GetRotation()
+	if rotation.Matches(ca.GetRotation()) {
+		s.remoteCA = ca
+		return nil
+	}
+	s.remoteCA = ca
+	return trace.CompareFailed("remote certificate authority rotation has been updated")
 }
 
 func (s *remoteSite) periodicSendDiscoveryRequests() {
@@ -307,68 +348,84 @@ func (s *remoteSite) periodicSendDiscoveryRequests() {
 	}
 }
 
-// DELETE IN: 2.6.0
-// attemptCertExchange tries to exchange TLS certificates with remote
-// clusters that have upgraded to 2.5.0
-func (s *remoteSite) attemptCertExchange() error {
-	// this logic is explicitly using the local non cached
-	// client as it has to have write access to the auth server
-	localCA, err := s.localClient.GetCertAuthority(services.CertAuthID{
+// updateCertAuthorities updates local and remote cert authorities
+func (s *remoteSite) updateCertAuthorities() error {
+	// update main cluster cert authorities on the remote side
+	// remote side makes sure that only relevant fields
+	// are updated
+	hostCA, err := s.localClient.GetCertAuthority(services.CertAuthID{
 		Type:       services.HostCA,
 		DomainName: s.srv.ClusterName,
 	}, false)
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	re, err := s.remoteClient.ExchangeCerts(auth.ExchangeCertsRequest{
-		PublicKey: localCA.GetCheckingKeys()[0],
-		TLSCert:   localCA.GetTLSKeyPairs()[0].Cert,
-	})
+	err = s.remoteClient.RotateExternalCertAuthority(hostCA)
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	remoteCA, err := s.localClient.GetCertAuthority(services.CertAuthID{
+
+	userCA, err := s.localClient.GetCertAuthority(services.CertAuthID{
+		Type:       services.UserCA,
+		DomainName: s.srv.ClusterName,
+	}, false)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+	err = s.remoteClient.RotateExternalCertAuthority(userCA)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+
+	// update remote cluster's host cert authoritiy on a local cluster
+	// local proxy is authorized to perform this operation only for
+	// host authorities of remote clusters.
+	remoteCA, err := s.remoteClient.GetCertAuthority(services.CertAuthID{
 		Type:       services.HostCA,
 		DomainName: s.domainName,
 	}, false)
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	_, err = s.localClient.ExchangeCerts(auth.ExchangeCertsRequest{
-		PublicKey: remoteCA.GetCheckingKeys()[0],
-		TLSCert:   re.TLSCert,
-	})
-	return trace.Wrap(err)
-}
 
-// DELETE IN: 2.6.0
-// This logic is only relevant for upgrades from 2.5.0 to 2.6.0
-func (s *remoteSite) periodicAttemptCertExchange() {
-	ticker := time.NewTicker(defaults.NetworkBackoffDuration)
-	defer ticker.Stop()
-	if err := s.attemptCertExchange(); err != nil {
-		s.Warningf("Attempt at cert exchange failed: %v.", err)
-	} else {
-		s.Debugf("Certificate exchange has completed, going to force reconnect.")
-		s.srv.RemoveSite(s.domainName)
-		s.Close()
-		return
+	if remoteCA.GetClusterName() != s.domainName {
+		return trace.BadParameter(
+			"remote cluster sent different cluster name %v instead of expected one %v",
+			remoteCA.GetClusterName(), s.domainName)
+	}
+	err = s.localClient.UpsertCertAuthority(remoteCA)
+	if err != nil {
+		return trace.Wrap(err)
 	}
 
+	return s.compareAndSwapCertAuthority(remoteCA)
+}
+
+func (s *remoteSite) periodicUpdateCertAuthorities() {
+	s.Debugf("Ticking with period %v", s.srv.PollingPeriod)
+	ticker := time.NewTicker(s.srv.PollingPeriod)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			s.Debugf("Context is closing.")
 			return
 		case <-ticker.C:
-			err := s.attemptCertExchange()
+			err := s.updateCertAuthorities()
 			if err != nil {
-				s.Warningf("Could not perform certificate exchange: %v.", trace.DebugReport(err))
-			} else {
-				s.Debugf("Certificate exchange has completed, going to force reconnect.")
-				s.srv.RemoveSite(s.domainName)
-				s.Close()
-				return
+				switch {
+				case trace.IsNotFound(err):
+					s.Debugf("Remote cluster %v does not support cert authorities rotation yet.", s.domainName)
+				case trace.IsCompareFailed(err):
+					s.Infof("Remote cluster has updated certificate authorities, going to force reconnect.")
+					s.srv.RemoveSite(s.domainName)
+					s.Close()
+					return
+				case trace.IsConnectionProblem(err):
+					s.Debugf("Remote cluster %v is offline.", s.domainName)
+				default:
+					s.Warningf("Could not perform cert authorities updated: %v.", trace.DebugReport(err))
+				}
 			}
 		}
 	}
@@ -382,7 +439,7 @@ func (s *remoteSite) isOnline(conn services.TunnelConnection) bool {
 // connections
 func (s *remoteSite) findDisconnectedProxies() ([]services.Server, error) {
 	connInfo := s.copyConnInfo()
-	conns, err := s.localAccessPoint.GetTunnelConnections(s.domainName)
+	conns, err := s.localAccessPoint.GetTunnelConnections(s.domainName, services.SkipValidation())
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -520,10 +577,10 @@ func (s *remoteSite) Dial(from net.Addr, to net.Addr, userAgent agent.Agent) (ne
 		}
 		return s.dialWithAgent(from, to, userAgent)
 	}
-	return s.dial(from, to)
+	return s.DialTCP(from, to)
 }
 
-func (s *remoteSite) dial(from, to net.Addr) (net.Conn, error) {
+func (s *remoteSite) DialTCP(from, to net.Addr) (net.Conn, error) {
 	s.Debugf("Dialing from %v to %v", from, to)
 
 	conn, err := s.connThroughTunnel(chanTransportDialReq, to.String())
@@ -565,6 +622,7 @@ func (s *remoteSite) dialWithAgent(from, to net.Addr, userAgent agent.Agent) (ne
 		Ciphers:         s.srv.Config.Ciphers,
 		KEXAlgorithms:   s.srv.Config.KEXAlgorithms,
 		MACAlgorithms:   s.srv.Config.MACAlgorithms,
+		DataDir:         s.srv.Config.DataDir,
 	}
 	remoteServer, err := forward.New(serverConfig)
 	if err != nil {

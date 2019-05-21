@@ -14,15 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { Store, toImmutable } from 'nuclear-js';
-import moment from 'moment';
-import { TLPT_STORED_SESSINS_FILTER_SET_RANGE } from './actionTypes';
+var { Store, toImmutable } = require('nuclear-js');
+var moment = require('moment');
+
+var { TLPT_STORED_SESSINS_FILTER_SET_RANGE } = require('./actionTypes');
 
 export default Store({
   getInitialState() {
-    const end = moment(new Date()).endOf('day').toDate();
-    const start = moment(end).subtract(3, 'day').startOf('day').toDate();
-    const state = {
+
+    let end = moment(new Date()).endOf('day').toDate();
+    let start = moment(end).subtract(3, 'day').startOf('day').toDate();
+    let state = {
       start,
       end
     }

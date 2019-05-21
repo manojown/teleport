@@ -20,8 +20,7 @@ import { Record, List } from 'immutable';
 
 const Site = Record({
   name: null,
-  status: false,
-  alias:null
+  status: false
 })
 
 export default Store({
@@ -34,9 +33,6 @@ export default Store({
   }
 })
 
-function receiveSites(state, json){   
-  console.log("called receiveSites",state); 
-  console.log("called receiveSites",json); 
-  
+function receiveSites(state, json){    
   return toImmutable(json).map( o => new Site(o) );
 }

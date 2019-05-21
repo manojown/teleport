@@ -18,7 +18,6 @@ package common
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"os/user"
@@ -32,8 +31,9 @@ import (
 	"github.com/gravitational/teleport/lib/service"
 	"github.com/gravitational/teleport/lib/sshutils/scp"
 	"github.com/gravitational/teleport/lib/utils"
+
 	"github.com/gravitational/trace"
-	_ "github.com/mattn/go-sqlite3"
+
 	log "github.com/sirupsen/logrus"
 )
 
@@ -46,17 +46,10 @@ type Options struct {
 	InitOnly bool
 }
 
-func initDB() {
-	db, err := sql.Open("sqlite3", "/var/lib/teleport/alias.db")
-	fmt.Println("error occered while cerate sqllite", err)
-	db.Exec(" CREATE TABLE  IF NOT EXISTS `clusters`(`hostname` VARCHAR(64) PRIMARY KEY NOT NULL,`alias` VARCHAR(64) NULL)")
-	db.Close()
-}
-
 // Run inits/starts the process according to the provided options
 func Run(options Options) (executedCommand string, conf *service.Config) {
 	var err error
-	initDB()
+
 	// configure trace's errors to produce full stack traces
 	isDebug, _ := strconv.ParseBool(os.Getenv(teleport.VerboseLogsEnvVar))
 	if isDebug {
@@ -69,7 +62,7 @@ func Run(options Options) (executedCommand string, conf *service.Config) {
 
 	// define global flags:
 	var ccf config.CommandLineFlags
-	var scpCommand scp.Command
+	var scpFlags scp.Flags
 
 	// define commands:
 	start := app.Command("start", "Starts the Teleport service.")
@@ -93,7 +86,7 @@ func Run(options Options) (executedCommand string, conf *service.Config) {
 		"Full path to the PID file. By default no PID file will be created").StringVar(&ccf.PIDFile)
 	start.Flag("advertise-ip",
 		"IP to advertise to clients if running behind NAT").
-		IPVar(&ccf.AdvertiseIP)
+		StringVar(&ccf.AdvertiseIP)
 	start.Flag("listen-ip",
 		fmt.Sprintf("IP address to bind to [%s]", defaults.BindIP)).
 		Short('l').
@@ -104,6 +97,9 @@ func Run(options Options) (executedCommand string, conf *service.Config) {
 	start.Flag("token",
 		"Invitation token to register with an auth server [none]").
 		StringVar(&ccf.AuthToken)
+	start.Flag("ca-pin",
+		"CA pin to validate the Auth Server").
+		StringVar(&ccf.CAPin)
 	start.Flag("nodename",
 		"Name of this node, defaults to hostname").
 		StringVar(&ccf.NodeName)
@@ -126,14 +122,14 @@ func Run(options Options) (executedCommand string, conf *service.Config) {
 
 	// define a hidden 'scp' command (it implements server-side implementation of handling
 	// 'scp' requests)
-	scpc.Flag("t", "sink mode (data consumer)").Short('t').Default("false").BoolVar(&scpCommand.Sink)
-	scpc.Flag("f", "source mode (data producer)").Short('f').Default("false").BoolVar(&scpCommand.Source)
-	scpc.Flag("v", "verbose mode").Default("false").Short('v').BoolVar(&scpCommand.Verbose)
-	scpc.Flag("r", "recursive mode").Default("false").Short('r').BoolVar(&scpCommand.Recursive)
+	scpc.Flag("t", "sink mode (data consumer)").Short('t').Default("false").BoolVar(&scpFlags.Sink)
+	scpc.Flag("f", "source mode (data producer)").Short('f').Default("false").BoolVar(&scpFlags.Source)
+	scpc.Flag("v", "verbose mode").Default("false").Short('v').BoolVar(&scpFlags.Verbose)
+	scpc.Flag("r", "recursive mode").Default("false").Short('r').BoolVar(&scpFlags.Recursive)
 	scpc.Flag("d", "directory mode").Short('d').Hidden().Bool()
-	scpc.Flag("remote-addr", "address of the remote client").StringVar(&scpCommand.RemoteAddr)
-	scpc.Flag("local-addr", "local address which accepted the request").StringVar(&scpCommand.LocalAddr)
-	scpc.Arg("target", "").StringsVar(&scpCommand.Target)
+	scpc.Flag("remote-addr", "address of the remote client").StringVar(&scpFlags.RemoteAddr)
+	scpc.Flag("local-addr", "local address which accepted the request").StringVar(&scpFlags.LocalAddr)
+	scpc.Arg("target", "").StringsVar(&scpFlags.Target)
 
 	// parse CLI commands+flags:
 	command, err := app.Parse(options.Args)
@@ -155,7 +151,7 @@ func Run(options Options) (executedCommand string, conf *service.Config) {
 			err = OnStart(conf)
 		}
 	case scpc.FullCommand():
-		err = onSCP(&scpCommand)
+		err = onSCP(&scpFlags)
 	case status.FullCommand():
 		err = onStatus()
 	case dump.FullCommand():
@@ -166,22 +162,12 @@ func Run(options Options) (executedCommand string, conf *service.Config) {
 	if err != nil {
 		utils.FatalError(err)
 	}
-	log.Debug("Clean exit.")
 	return command, conf
 }
 
 // OnStart is the handler for "start" CLI command
 func OnStart(config *service.Config) error {
-	srv, err := service.NewTeleport(config)
-	if err != nil {
-		return trace.Wrap(err, "Initialization failed")
-	}
-
-	if err := srv.Start(); err != nil {
-		return trace.Wrap(err, "Startup Failed")
-	}
-
-	return srv.WaitForSignals(context.TODO())
+	return service.Run(context.TODO(), *config, nil)
 }
 
 // onStatus is the handler for "status" CLI command
@@ -219,33 +205,45 @@ func onConfigDump() {
 // user's privileges
 //
 // This is the entry point of "teleport scp" call (the parent process is the teleport daemon)
-func onSCP(cmd *scp.Command) (err error) {
+func onSCP(scpFlags *scp.Flags) (err error) {
 	// when 'teleport scp' is executed, it cannot write logs to stderr (because
 	// they're automatically replayed by the scp client)
 	utils.SwitchLoggingtoSyslog()
-	if len(cmd.Target) == 0 {
+	if len(scpFlags.Target) == 0 {
 		return trace.BadParameter("teleport scp: missing an argument")
 	}
 
 	// get user's home dir (it serves as a default destination)
-	cmd.User, err = user.Current()
+	user, err := user.Current()
 	if err != nil {
 		return trace.Wrap(err)
 	}
 	// see if the target is absolute. if not, use user's homedir to make
 	// it absolute (and if the user doesn't have a homedir, use "/")
-	target := cmd.Target[0]
+	target := scpFlags.Target[0]
 	if !filepath.IsAbs(target) {
-		if !utils.IsDir(cmd.User.HomeDir) {
+		if !utils.IsDir(user.HomeDir) {
 			slash := string(filepath.Separator)
-			cmd.Target[0] = slash + target
+			scpFlags.Target[0] = slash + target
 		} else {
-			cmd.Target[0] = filepath.Join(cmd.User.HomeDir, target)
+			scpFlags.Target[0] = filepath.Join(user.HomeDir, target)
 		}
 	}
-	if !cmd.Source && !cmd.Sink {
+	if !scpFlags.Source && !scpFlags.Sink {
 		return trace.Errorf("remote mode is not supported")
 	}
+
+	scpCfg := scp.Config{
+		Flags:       *scpFlags,
+		User:        user.Username,
+		RunOnServer: true,
+	}
+
+	cmd, err := scp.CreateCommand(scpCfg)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+
 	return trace.Wrap(cmd.Execute(&StdReadWriter{}))
 }
 

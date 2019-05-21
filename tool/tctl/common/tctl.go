@@ -17,9 +17,9 @@ limitations under the License.
 package common
 
 import (
-	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth"
@@ -87,7 +87,7 @@ func Run(commands []CLICommand) {
 		"Base64 encoded configuration string").Hidden().Envar(defaults.ConfigEnvar).StringVar(&ccf.ConfigString)
 
 	// "version" command is always available:
-	ver := app.Command("version", "Print the version.")
+	ver := app.Command("version", "Print cluster version")
 	app.HelpFlag.Short('h')
 
 	// parse CLI commands+flags:
@@ -134,7 +134,7 @@ func connectToAuthService(cfg *service.Config) (client auth.ClientI, err error) 
 		}
 	}
 	// read the host SSH keys and use them to open an SSH connection to the auth service
-	i, err := auth.ReadIdentity(cfg.DataDir, auth.IdentityID{Role: teleport.RoleAdmin, HostUUID: cfg.HostUUID})
+	i, err := auth.ReadLocalIdentity(filepath.Join(cfg.DataDir, teleport.ComponentProcess), auth.IdentityID{Role: teleport.RoleAdmin, HostUUID: cfg.HostUUID})
 	if err != nil {
 		// the "admin" identity is not present? this means the tctl is running NOT on the auth server.
 		if trace.IsNotFound(err) {
@@ -142,7 +142,7 @@ func connectToAuthService(cfg *service.Config) (client auth.ClientI, err error) 
 		}
 		return nil, trace.Wrap(err)
 	}
-	tlsConfig, err := i.TLSConfig()
+	tlsConfig, err := i.TLSConfig(cfg.CipherSuites)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -151,15 +151,14 @@ func connectToAuthService(cfg *service.Config) (client auth.ClientI, err error) 
 		return nil, trace.Wrap(err)
 	}
 
-	// check connectivity by calling something on a clinet:
-	conn, err := client.GetDialer()(context.TODO())
+	// Check connectivity by calling something on the client.
+	_, err = client.GetClusterName()
 	if err != nil {
 		utils.Consolef(os.Stderr, teleport.ComponentClient,
 			"Cannot connect to the auth server: %v.\nIs the auth server running on %v?",
 			err, cfg.AuthServers[0].Addr)
 		os.Exit(1)
 	}
-	conn.Close()
 	return client, nil
 }
 
@@ -184,8 +183,9 @@ func applyConfig(ccf *GlobalCLIFlags, cfg *service.Config) error {
 	}
 	// --debug flag
 	if ccf.Debug {
+		cfg.Debug = ccf.Debug
 		utils.InitLogger(utils.LoggingForCLI, logrus.DebugLevel)
-		logrus.Debugf("DEBUG loggign enabled")
+		logrus.Debugf("DEBUG logging enabled")
 	}
 
 	// read a host UUID for this node

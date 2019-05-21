@@ -29,6 +29,7 @@ import (
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/srv/forward"
+	"github.com/gravitational/teleport/lib/utils/proxy"
 
 	"github.com/gravitational/trace"
 	log "github.com/sirupsen/logrus"
@@ -76,7 +77,6 @@ type localSite struct {
 	domainName  string
 	connections []*remoteConn
 	lastUsed    int
-	lastActive  time.Time
 	srv         *server
 
 	// client provides access to the Auth Server API of the local cluster.
@@ -87,6 +87,11 @@ type localSite struct {
 
 	// certificateCache caches host certificates for the forwarding server.
 	certificateCache *certificateCache
+}
+
+// GetTunnelsCount always returns 1 for local cluster
+func (s *localSite) GetTunnelsCount() int {
+	return 1
 }
 
 func (s *localSite) CachingAccessPoint() (auth.AccessPoint, error) {
@@ -147,13 +152,14 @@ func (s *localSite) Dial(from net.Addr, to net.Addr, userAgent agent.Agent) (net
 		return s.dialWithAgent(from, to, userAgent)
 	}
 
-	return s.dial(from, to)
+	return s.DialTCP(from, to)
 }
 
-func (s *localSite) dial(from net.Addr, to net.Addr) (net.Conn, error) {
+func (s *localSite) DialTCP(from net.Addr, to net.Addr) (net.Conn, error) {
 	s.log.Debugf("Dialing from %v to %v", from, to)
 
-	return net.DialTimeout(to.Network(), to.String(), defaults.DefaultDialTimeout)
+	dialer := proxy.DialerFromEnvironment(to.String())
+	return dialer.DialTimeout(to.Network(), to.String(), defaults.DefaultDialTimeout)
 }
 
 func (s *localSite) dialWithAgent(from net.Addr, to net.Addr, userAgent agent.Agent) (net.Conn, error) {
@@ -184,6 +190,7 @@ func (s *localSite) dialWithAgent(from net.Addr, to net.Addr, userAgent agent.Ag
 		Ciphers:         s.srv.Config.Ciphers,
 		KEXAlgorithms:   s.srv.Config.KEXAlgorithms,
 		MACAlgorithms:   s.srv.Config.MACAlgorithms,
+		DataDir:         s.srv.Config.DataDir,
 	}
 	remoteServer, err := forward.New(serverConfig)
 	if err != nil {

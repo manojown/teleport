@@ -41,12 +41,3 @@ Create the name of the service account to use
     {{ default "default" .Values.serviceAccount.name }}
 {{- end -}}
 {{- end -}}
-
-{{/*  Manage the labels for each entity  */}}
-{{- define "teleport.labels" -}}
-app: {{ template "teleport.name" . }}
-fullname: {{ template "teleport.fullname" . }}
-chart: {{ template "teleport.chart" . }}
-release: {{ .Release.Name }}
-heritage: {{ .Release.Service }}
-{{- end -}}

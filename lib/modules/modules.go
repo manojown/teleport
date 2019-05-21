@@ -19,7 +19,9 @@ limitations under the License.
 package modules
 
 import (
+	"bytes"
 	"fmt"
+	"runtime"
 	"sync"
 
 	"github.com/gravitational/teleport"
@@ -33,14 +35,18 @@ type Modules interface {
 	EmptyRolesHandler() error
 	// DefaultAllowedLogins returns default allowed logins for a new admin role
 	DefaultAllowedLogins() []string
+	// DefaultKubeGroups returns default kuberentes groups for a new admin role
+	DefaultKubeGroups() []string
 	// PrintVersion prints teleport version
 	PrintVersion()
 	// RolesFromLogins returns roles for external user based on the logins
 	// extracted from the connector
 	RolesFromLogins([]string) []string
 	// TraitsFromLogins returns traits for external user based on the logins
-	// extracted from the connector
-	TraitsFromLogins([]string) map[string][]string
+	// and kubernetes groups extracted from the connector
+	TraitsFromLogins([]string, []string) map[string][]string
+	// SupportsKubernetes returns true if this cluster supports kubernetes
+	SupportsKubernetes() bool
 }
 
 // SetModules sets the modules interface
@@ -65,18 +71,25 @@ func (p *defaultModules) EmptyRolesHandler() error {
 	return nil
 }
 
-// DefaultAllowedLogins returns allowed logins for a new admin role
-func (p *defaultModules) DefaultAllowedLogins() []string {
-	return []string{teleport.TraitInternalRoleVariable}
+// DefaultKubeGroups returns default kuberentes groups for a new admin role
+func (p *defaultModules) DefaultKubeGroups() []string {
+	return []string{teleport.TraitInternalKubeGroupsVariable}
 }
 
-// PrintVersion prints teleport version
+// DefaultAllowedLogins returns allowed logins for a new admin role
+func (p *defaultModules) DefaultAllowedLogins() []string {
+	return []string{teleport.TraitInternalLoginsVariable}
+}
+
+// PrintVersion prints the Teleport version.
 func (p *defaultModules) PrintVersion() {
-	ver := fmt.Sprintf("Teleport v%s", teleport.Version)
-	if teleport.Gitref != "" {
-		ver = fmt.Sprintf("%s git:%s", ver, teleport.Gitref)
-	}
-	fmt.Println(ver)
+	var buf bytes.Buffer
+
+	buf.WriteString(fmt.Sprintf("Teleport v%s ", teleport.Version))
+	buf.WriteString(fmt.Sprintf("git:%s ", teleport.Gitref))
+	buf.WriteString(runtime.Version())
+
+	fmt.Println(buf.String())
 }
 
 // RolesFromLogins returns roles for external user based on the logins
@@ -92,10 +105,16 @@ func (p *defaultModules) RolesFromLogins(logins []string) []string {
 // extracted from the connector
 //
 // By default logins are treated as allowed logins user traits.
-func (p *defaultModules) TraitsFromLogins(logins []string) map[string][]string {
+func (p *defaultModules) TraitsFromLogins(logins []string, kubeGroups []string) map[string][]string {
 	return map[string][]string{
-		teleport.TraitLogins: logins,
+		teleport.TraitLogins:     logins,
+		teleport.TraitKubeGroups: kubeGroups,
 	}
+}
+
+// SupportsKubernetes returns true if this cluster supports kubernetes
+func (p *defaultModules) SupportsKubernetes() bool {
+	return true
 }
 
 var (

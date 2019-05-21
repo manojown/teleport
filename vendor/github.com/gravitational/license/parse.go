@@ -17,12 +17,8 @@ limitations under the License.
 package license
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 
 	"github.com/gravitational/license/constants"
@@ -30,13 +26,13 @@ import (
 	"github.com/gravitational/trace"
 )
 
-// ParseString parses the license from the provided string
-func ParseString(pem string) (*License, error) {
+// ParseLicensePEM parses license PEM, parses payload on demand
+func ParseLicensePEM(pem []byte) (*License, error) {
 	certPEM, keyPEM, err := SplitPEM([]byte(pem))
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	certificateBytes, privateBytes, err := parseCertificatePEM(pem)
+	certificateBytes, _, err := parseCertificatePEM(string(pem))
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
@@ -44,40 +40,35 @@ func ParseString(pem string) (*License, error) {
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	payload, err := parsePayloadFromX509(certificate)
+	rawPayload, err := getRawPayloadFromX509(certificate)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	// decrypt encryption key
-	if len(payload.EncryptionKey) != 0 {
-		private, err := x509.ParsePKCS1PrivateKey(privateBytes)
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-		payload.EncryptionKey, err = rsa.DecryptOAEP(sha256.New(), rand.Reader,
-			private, payload.EncryptionKey, nil)
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
+
+	license := License{
+		Cert:       certificate,
+		CertPEM:    certPEM,
+		KeyPEM:     keyPEM,
+		RawPayload: rawPayload,
 	}
-	return &License{
-		Cert:    certificate,
-		Payload: *payload,
-		CertPEM: certPEM,
-		KeyPEM:  keyPEM,
-	}, nil
+
+	return &license, nil
+
 }
 
 // ParseX509 parses the license from the provided x509 certificate
 func ParseX509(cert *x509.Certificate) (*License, error) {
-	payload, err := parsePayloadFromX509(cert)
+	rawPayload, err := getRawPayloadFromX509(cert)
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	return &License{
-		Cert:    cert,
-		Payload: *payload,
-	}, nil
+
+	license := License{
+		Cert:       cert,
+		RawPayload: rawPayload,
+	}
+
+	return &license, nil
 }
 
 // MakeTLSCert takes the provided license and makes a TLS certificate
@@ -101,16 +92,12 @@ func MakeTLSConfig(license License) (*tls.Config, error) {
 	}, nil
 }
 
-// parsePayloadFromX509 parses the extension with license payload from the
+// getRawPayloadFromX509 returns the payload in the extension of the
 // provided x509 certificate
-func parsePayloadFromX509(cert *x509.Certificate) (*Payload, error) {
+func getRawPayloadFromX509(cert *x509.Certificate) ([]byte, error) {
 	for _, ext := range cert.Extensions {
 		if ext.Id.Equal(constants.LicenseASN1ExtensionID) {
-			var p Payload
-			if err := json.Unmarshal(ext.Value, &p); err != nil {
-				return nil, trace.Wrap(err)
-			}
-			return &p, nil
+			return ext.Value, nil
 		}
 	}
 	return nil, trace.NotFound(

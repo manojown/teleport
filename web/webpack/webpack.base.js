@@ -1,5 +1,5 @@
 /*
-Copyright 2018 Gravitational, Inc.
+Copyright 2015 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,207 +15,131 @@ limitations under the License.
 */
 
 var path = require('path');
-var MiniCssExtractPlugin = require("mini-css-extract-plugin");
+var webpack = require('webpack');
 var HtmlWebPackPlugin = require('html-webpack-plugin');
-
+var ExtractTextPlugin = require('extract-text-webpack-plugin');
 var ROOT_PATH = path.join(__dirname, '../');
-var FAVICON_PATH = path.join(ROOT_PATH, 'src/assets/img/favicon.ico');
+var favIconPath = path.join(ROOT_PATH, 'src/assets/img/favicon.ico');
+var extractCss = new ExtractTextPlugin('vendor.[contenthash].css');
 
 module.exports = {
 
   entry: {
-    app: ['./src/boot.js'],
-  },
-
-  optimization: {
-    splitChunks: {
-      cacheGroups: {
-        vendors: {
-          chunks: "all",
-          name: "vendor",
-          test: /([\\/]node_modules[\\/])|(assets\/)/,
-          priority: -10
-        }
-      }
-    }
+    app: ['./src/app/index.jsx'],
+    vendor: ['./src/app/vendor'],
+    styles: ['./src/styles/grv.scss']
   },
 
   output: {
-    // used by loaders to generate various URLs within CSS, JS based off publicPath
     publicPath: '/web/app',
-
     path: path.join(ROOT_PATH, 'dist/app'),
-
-    /*
-    * format of the output file names. [name] stands for 'entry' keys
-    * defined in the 'entry' section
-    **/
     filename: '[name].[hash].js',
-
-    // chunk file name format
-    chunkFilename: '[name].[chunkhash].js'
+    chunkFilename: '[chunkhash].js',
+    sourceMapFilename: '[name].map'
   },
 
+  noParse: [ /xterm.js$/ ],
+  
   resolve: {
-    // some vendor libraries expect below globals to be defined
-    alias: {
-      jquery: path.join(ROOT_PATH, '/src/assets/js/jquery'),
-      jQuery: path.join(ROOT_PATH, '/src/assets/js/jquery'),
-      app: path.join(ROOT_PATH, '/src/app'),
-      assets: path.join(ROOT_PATH, '/src/assets/'),
+
+    alias: {      
+      jquery: path.join(ROOT_PATH, 'src/assets/js/jquery'),
+      jQuery: path.join(ROOT_PATH, 'src/assets/js/jquery')      
     },
 
-    modules: ['node_modules'],
+    root: [ path.join(ROOT_PATH, 'src') ],
 
-    extensions: ['.js', '.jsx']
+    extensions: ['', '.js', '.jsx']
   },
 
-  noParse: function(content) {
-    return /xterm.js$/.test(content);
-  },
+  loaders: {
 
-  rules: {
-    fonts: {
-      test: /fonts\/(.)+\.(woff|woff2|ttf|eot|svg)/,
-      loader: "url-loader",
-      options: {
-        limit: 10000,
-        name: '/assets/fonts/[name].[ext]',
-      }
+    json:{       
+      test: /\.json$/,
+      loader: 'json-loader'      
     },
 
     svg: {
       test: /\.svg$/,
-      loader: 'svg-sprite-loader',
-      exclude: /node_modules/
+      loader: 'svg-sprite'
     },
 
-    css({ dev } = {}){
-      var use = []
-      if (dev) {
-        use = ['style-loader', 'css-loader'];
-      } else {
-        use = [MiniCssExtractPlugin.loader, 'css-loader']
-      }
-
-      return {
-        test: /\.(css)$/,
-        use: use
-      }
-    },
-
-    scss({ dev } = {})
-    {
-      var sassLoader = {
-        loader: 'sass-loader',
-        options: {
-          outputStyle: "compressed",
-          precision: 9
-        } };
-
-      var use = []
-      if (dev) {
-        use = ['style-loader', 'css-loader', sassLoader];
-      } else {
-        use = [MiniCssExtractPlugin.loader, 'css-loader', sassLoader]
-      }
-
-      return {
-        test: /\.(scss)$/,
-        use: use
-      }
-    },
-
-    inlineStyle: {
-      test: /\.scss$/,
-      use: ['style-loader', 'css-loader', 'sass-loader']
+    fonts: {
+      test: /fonts\/(.)+\.(woff|woff2|ttf|eot|svg)/,
+      loader: "url-loader?limit=10000&name=/assets/fonts/[name].[ext]"
     },
 
     images: {
       test: /\.(png|jpg|gif)$/,
-      loader: "file-loader",
-      options: {
-        limit: 10000,
-        name: '/assets/img/img-[hash:6].[ext]',
-      }
+      loader: "file-loader?name=/assets/img/img-[hash:6].[ext]"
     },
 
-    jsx: jsx,
-    jslint: {
-      enforce: "pre",
-      test: /\.(js)|(jsx)$/,
-      exclude: /(node_modules)|(.json$)|(assets)/,
-      loader: "eslint-loader",
+    js: js,
+
+    scss: {
+      test: /\.scss$/,
+      loader: 'style!css!sass?outputStyle=expanded'
     },
+
+    css: {
+      test: /\.scss$/,
+      loader: extractCss.extract(['css','sass'])
+    }
   },
 
   plugins: {
+      
+    extractCss: extractCss,
 
-    // builds index html page, the main entry point for application
-    createIndexHtml() {
-      return createHtmlPluginInstance({
-        filename: '../index.html',
-        favicon: FAVICON_PATH,
-        title: '',
-        inject: true,
-        template: 'src/index.ejs'
-      })
-    },
+    hotReplacement: new webpack.HotModuleReplacementPlugin(),
 
-    // extracts all vendor styles and puts them into separate css file
-    extractAppCss() {
-      return new MiniCssExtractPlugin({
-        filename: "styles.[contenthash].css",
-      })
-    }
-  }
+    devBuild: new webpack.DefinePlugin({ 'process.env.NODE_ENV': JSON.stringify('development') }),
+
+    releaseBuild: new webpack.DefinePlugin({ 'process.env.NODE_ENV': JSON.stringify('production') }),
+
+    testBuild: new webpack.DefinePlugin({ 'process.env.NODE_ENV': JSON.stringify('test') }),
+
+    vendorBundle: new webpack.optimize.CommonsChunkPlugin({
+       names: ['vendor']
+    }),
+
+    createIndexHtml: new HtmlWebPackPlugin({
+      filename: '../index.html',
+      favicon: favIconPath,
+      title: 'Teleport by Gravitational',
+      inject: true,
+      template: 'src/index.ejs'
+    }),
+
+    uglify: uglify
+   }
 };
 
-function jsx(args){
+function js(args){
   args = args || {};
-  var plugins = ["transform-class-properties", "transform-object-rest-spread", "syntax-dynamic-import"];
-  var moduleType = false;
-  var emitWarning = false;
-
+  var loader = 'babel?cacheDirectory!eslint';
   if(args.withHot){
-    plugins.unshift('react-hot-loader/babel');
-    emitWarning = true;
+    loader = 'react-hot!' + loader;
   }
-
-  // use commonjs modules to be able to override exports in tests
-  if(args.test){
-    moduleType = 'commonjs'
-  }
-
-  var presets =   ['react', [ "es2015", { "modules": moduleType } ] ];
 
   return {
-    include: [path.join(ROOT_PATH, 'src')],
+    include: path.join(ROOT_PATH, 'src'),
     test: /\.(js|jsx)$/,
     exclude: /(node_modules)|(assets)/,
-    use: [
-      {
-        loader: 'babel-loader',
-        options: {
-          presets,
-          plugins,
-          // This is a feature of `babel-loader` for webpack (not Babel itself).
-          // It enables caching results in ./node_modules/.cache/babel-loader/
-          // directory for faster rebuilds.
-          cacheDirectory: true,
-        }
-      },
-      {
-        loader: "eslint-loader",
-        options: {
-          emitWarning,
-        }
-      }
-    ]
+    loader: loader
   }
 }
 
-function createHtmlPluginInstance(cfg) {
-  cfg.inject = true;
-  return new HtmlWebPackPlugin(cfg)
+function uglify(args){
+  args = args || {};
+
+  var props = {
+    compress: {  warnings: false  }
+  }
+
+  if(args.onlyVendor){
+    props.include = /vendor/;
+  }
+
+  return new webpack.optimize.UglifyJsPlugin(props)
 }

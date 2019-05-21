@@ -15,27 +15,33 @@ limitations under the License.
 */
 
 import reactor from 'app/reactor';
-import filterGetters from './getters';
+import {filter} from './getters';
 import {fetchSiteEvents} from './../sessions/actions';
 import { TLPT_STORED_SESSINS_FILTER_SET_RANGE } from './actionTypes';
 import Logger from 'app/lib/logger';
+
 const logger = Logger.create('Modules/Sessions');
 
-export function fetchSiteEventsWithinTimeRange(){
-  let { start, end } = reactor.evaluate(filterGetters.filter);
-  return _fetch(start, end);
-}
+const actions = {
 
-export function setTimeRange(start, end){
-  reactor.batch(()=>{
-    reactor.dispatch(TLPT_STORED_SESSINS_FILTER_SET_RANGE, {start, end});
-    _fetch(start, end);
-  });
+  fetchSiteEventsWithinTimeRange(){
+    let { start, end } = reactor.evaluate(filter);
+    return _fetch(start, end);
+  },
+
+  setTimeRange(start, end){
+    reactor.batch(()=>{
+      reactor.dispatch(TLPT_STORED_SESSINS_FILTER_SET_RANGE, {start, end});
+      _fetch(start, end);
+    });
+  }
 }
 
 function _fetch(start, end){
   return fetchSiteEvents(start, end)
-    .fail(err => {
+    .fail(err => {      
       logger.error('fetching filtered set of sessions', err);
     });
 }
+
+export default actions;

@@ -1,8 +1,8 @@
 [Unit]
 Description=Timer getting letsencrypt certificates
-ConditionPathExists=/etc/teleport.d/use-letsencrypt
+ConditionPathExists=/etc/teleport.d/role.auth
 
 [Timer]
-OnBootSec=3min
+OnBootSec=5min
 OnCalendar=hourly
 Persistent=true

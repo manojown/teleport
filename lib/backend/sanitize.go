@@ -1,24 +1,9 @@
-/*
-Copyright 2015-2019 Gravitational, Inc.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package backend
 
 import (
-	"context"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/gravitational/trace"
@@ -31,14 +16,29 @@ const errorMessage = "special characters are not allowed in resource names, plea
 
 // whitelistPattern is the pattern of allowed characters for each key within
 // the path.
-var whitelistPattern = regexp.MustCompile(`^[0-9A-Za-z@_:.\-/]*$`)
+var whitelistPattern = regexp.MustCompile(`^[0-9A-Za-z@_:.-]*$`)
 
-// blacklistPattern matches some unallowed combinations
-var blacklistPattern = regexp.MustCompile(`//`)
+// isStringSafe checks if the passed in string conforms to the whitelist.
+func isStringSafe(s string) bool {
+	if strings.Contains(s, "..") {
+		return false
+	}
+	if strings.Contains(s, string(filepath.Separator)) {
+		return false
+	}
 
-// isKeySafe checks if the passed in key conforms to whitelist
-func isKeySafe(s []byte) bool {
-	return whitelistPattern.Match(s) && !blacklistPattern.Match(s)
+	return whitelistPattern.MatchString(s)
+}
+
+// isSliceSafe checks if the passed in slice conforms to the whitelist.
+func isSliceSafe(slice []string) bool {
+	for _, s := range slice {
+		if !isStringSafe(s) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Sanitizer wraps a Backend implementation to make sure all values requested
@@ -60,97 +60,131 @@ func (s *Sanitizer) Backend() Backend {
 	return s.backend
 }
 
-// GetRange returns query range
-func (s *Sanitizer) GetRange(ctx context.Context, startKey []byte, endKey []byte, limit int) (*GetResult, error) {
-	if !isKeySafe(startKey) {
-		return nil, trace.BadParameter(errorMessage)
-	}
-	return s.backend.GetRange(ctx, startKey, endKey, limit)
-}
-
-// Create creates item if it does not exist
-func (s *Sanitizer) Create(ctx context.Context, i Item) (*Lease, error) {
-	if !isKeySafe(i.Key) {
-		return nil, trace.BadParameter(errorMessage)
-	}
-	return s.backend.Create(ctx, i)
-}
-
-// Put puts value into backend (creates if it does not
-// exists, updates it otherwise)
-func (s *Sanitizer) Put(ctx context.Context, i Item) (*Lease, error) {
-	if !isKeySafe(i.Key) {
+// GetKeys returns a list of keys for a given path.
+func (s *Sanitizer) GetKeys(bucket []string) ([]string, error) {
+	if !isSliceSafe(bucket) {
 		return nil, trace.BadParameter(errorMessage)
 	}
 
-	return s.backend.Put(ctx, i)
+	return s.backend.GetKeys(bucket)
 }
 
-// Update updates value in the backend
-func (s *Sanitizer) Update(ctx context.Context, i Item) (*Lease, error) {
-	if !isKeySafe(i.Key) {
+// GetItems returns a list of items (key value pairs) for a bucket.
+func (s *Sanitizer) GetItems(bucket []string, opts ...OpOption) ([]Item, error) {
+	if !isSliceSafe(bucket) {
 		return nil, trace.BadParameter(errorMessage)
 	}
 
-	return s.backend.Update(ctx, i)
+	return s.backend.GetItems(bucket, opts...)
 }
 
-// Get returns a single item or not found error
-func (s *Sanitizer) Get(ctx context.Context, key []byte) (*Item, error) {
-	if !isKeySafe(key) {
-		return nil, trace.BadParameter(errorMessage)
-	}
-	return s.backend.Get(ctx, key)
-}
-
-// CompareAndSwap compares item with existing item
-// and replaces is with replaceWith item
-func (s *Sanitizer) CompareAndSwap(ctx context.Context, expected Item, replaceWith Item) (*Lease, error) {
-	if !isKeySafe(expected.Key) {
-		return nil, trace.BadParameter(errorMessage)
-	}
-
-	return s.backend.CompareAndSwap(ctx, expected, replaceWith)
-}
-
-// Delete deletes item by key
-func (s *Sanitizer) Delete(ctx context.Context, key []byte) error {
-	if !isKeySafe(key) {
+// CreateVal creates value with a given TTL and key in the bucket. If the
+// value already exists, returns trace.AlreadyExistsError.
+func (s *Sanitizer) CreateVal(bucket []string, key string, val []byte, ttl time.Duration) error {
+	if !isSliceSafe(bucket) {
 		return trace.BadParameter(errorMessage)
 	}
-	return s.backend.Delete(ctx, key)
-}
-
-// DeleteRange deletes range of items
-func (s *Sanitizer) DeleteRange(ctx context.Context, startKey []byte, endKey []byte) error {
-	if !isKeySafe(startKey) {
+	if !isStringSafe(key) {
 		return trace.BadParameter(errorMessage)
 	}
-	if !isKeySafe(endKey) {
-		return trace.BadParameter(errorMessage)
-	}
-	return s.backend.DeleteRange(ctx, startKey, endKey)
+
+	return s.backend.CreateVal(bucket, key, val, ttl)
 }
 
-// KeepAlive keeps object from expiring, updates lease on the existing object,
-// expires contains the new expiry to set on the lease,
-// some backends may ignore expires based on the implementation
-// in case if the lease managed server side
-func (s *Sanitizer) KeepAlive(ctx context.Context, lease Lease, expires time.Time) error {
-	if !isKeySafe(lease.Key) {
+// UpsertVal updates or inserts value with a given TTL into a bucket. Use
+// backend.ForeverTTL for no TTL.
+func (s *Sanitizer) UpsertVal(bucket []string, key string, val []byte, ttl time.Duration) error {
+	if !isSliceSafe(bucket) {
 		return trace.BadParameter(errorMessage)
 	}
-	return s.backend.KeepAlive(ctx, lease, expires)
+	if !isStringSafe(key) {
+		return trace.BadParameter(errorMessage)
+	}
+
+	return s.backend.UpsertVal(bucket, key, val, ttl)
 }
 
-// NewWatcher returns a new event watcher
-func (s *Sanitizer) NewWatcher(ctx context.Context, watch Watch) (Watcher, error) {
-	for _, prefix := range watch.Prefixes {
-		if !isKeySafe(prefix) {
-			return nil, trace.BadParameter(errorMessage)
+// UpsertItems updates or inserts all passed in backend.Items (with a TTL)
+// into the given bucket.
+func (s *Sanitizer) UpsertItems(bucket []string, items []Item) error {
+	if !isSliceSafe(bucket) {
+		return trace.BadParameter(errorMessage)
+	}
+	for _, e := range items {
+		if !isStringSafe(e.Key) {
+			return trace.BadParameter(errorMessage)
 		}
 	}
-	return s.backend.NewWatcher(ctx, watch)
+
+	return s.backend.UpsertItems(bucket, items)
+}
+
+// GetVal returns a value for a given key in the bucket.
+func (s *Sanitizer) GetVal(bucket []string, key string) ([]byte, error) {
+	if !isSliceSafe(bucket) {
+		return nil, trace.BadParameter(errorMessage)
+	}
+	if !isStringSafe(key) {
+		return nil, trace.BadParameter(errorMessage)
+	}
+
+	return s.backend.GetVal(bucket, key)
+}
+
+// CompareAndSwapVal compares and swaps values in atomic operation, succeeds
+// if prevVal matches the value stored in the database, requires prevVal as a
+// non-empty value. Returns trace.CompareFailed in case if value did not match.
+func (s *Sanitizer) CompareAndSwapVal(bucket []string, key string, val []byte, prevVal []byte, ttl time.Duration) error {
+	if !isSliceSafe(bucket) {
+		return trace.BadParameter(errorMessage)
+	}
+	if !isStringSafe(key) {
+		return trace.BadParameter(errorMessage)
+	}
+
+	return s.backend.CompareAndSwapVal(bucket, key, val, prevVal, ttl)
+}
+
+// DeleteKey deletes a key in a bucket.
+func (s *Sanitizer) DeleteKey(bucket []string, key string) error {
+	if !isSliceSafe(bucket) {
+		return trace.BadParameter(errorMessage)
+	}
+	if !isStringSafe(key) {
+		return trace.BadParameter(errorMessage)
+	}
+
+	return s.backend.DeleteKey(bucket, key)
+}
+
+// DeleteBucket deletes the bucket by a given path.
+func (s *Sanitizer) DeleteBucket(path []string, bucket string) error {
+	if !isSliceSafe(path) {
+		return trace.BadParameter(errorMessage)
+	}
+	if !isStringSafe(bucket) {
+		return trace.BadParameter(errorMessage)
+	}
+
+	return s.backend.DeleteBucket(path, bucket)
+}
+
+// AcquireLock grabs a lock that will be released automatically after a TTL.
+func (s *Sanitizer) AcquireLock(token string, ttl time.Duration) error {
+	if !isStringSafe(token) {
+		return trace.BadParameter(errorMessage)
+	}
+
+	return s.backend.AcquireLock(token, ttl)
+}
+
+// ReleaseLock forces lock release before the TTL has expired.
+func (s *Sanitizer) ReleaseLock(token string) error {
+	if !isStringSafe(token) {
+		return trace.BadParameter(errorMessage)
+	}
+
+	return s.backend.ReleaseLock(token)
 }
 
 // Close releases the resources taken up by this backend
@@ -161,10 +195,4 @@ func (s *Sanitizer) Close() error {
 // Clock returns clock used by this backend
 func (s *Sanitizer) Clock() clockwork.Clock {
 	return s.backend.Clock()
-}
-
-// CloseWatchers closes all the watchers
-// without closing the backend
-func (s *Sanitizer) CloseWatchers() {
-	s.backend.CloseWatchers()
 }

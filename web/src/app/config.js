@@ -49,7 +49,6 @@ const cfg = {
     player: '/web/player/cluster/:siteId/sid/:sid',
     webApi: '/v1/webapi/*',
     settingsBase: '/web/settings',
-    editCluster: '/web/editcluster',
     settingsAccount: '/web/settings/account',
   },
 

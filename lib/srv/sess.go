@@ -17,9 +17,10 @@ limitations under the License.
 package srv
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -28,13 +29,12 @@ import (
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/events"
+	"github.com/gravitational/teleport/lib/pam"
 	"github.com/gravitational/teleport/lib/services"
 	rsession "github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/sshutils"
-	"github.com/gravitational/teleport/lib/state"
 
 	"github.com/gravitational/trace"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 )
@@ -110,22 +110,56 @@ func (s *SessionRegistry) Close() {
 	s.log.Debugf("Closing Session Registry.")
 }
 
-// joinShell either joins an existing session or starts a new shell
+// emitSessionJoinEvent emits a session join event to both the Audit Log as
+// well as sending a "x-teleport-event" global request on the SSH connection.
+func (s *SessionRegistry) emitSessionJoinEvent(ctx *ServerContext) {
+	sessionJoinEvent := events.EventFields{
+		events.EventType:       events.SessionJoinEvent,
+		events.SessionEventID:  string(ctx.session.id),
+		events.EventNamespace:  s.srv.GetNamespace(),
+		events.EventLogin:      ctx.Identity.Login,
+		events.EventUser:       ctx.Identity.TeleportUser,
+		events.LocalAddr:       ctx.Conn.LocalAddr().String(),
+		events.RemoteAddr:      ctx.Conn.RemoteAddr().String(),
+		events.SessionServerID: ctx.srv.ID(),
+	}
+
+	// Emit session join event to Audit Log.
+	ctx.session.recorder.GetAuditLog().EmitAuditEvent(events.SessionJoinEvent, sessionJoinEvent)
+
+	// Notify all members of the party that a new member has joined over the
+	// "x-teleport-event" channel.
+	for _, p := range s.getParties(ctx.session) {
+		eventPayload, err := json.Marshal(sessionJoinEvent)
+		if err != nil {
+			s.log.Warnf("Unable to marshal %v for %v: %v.", events.SessionJoinEvent, p.sconn.RemoteAddr(), err)
+			continue
+		}
+		_, _, err = p.sconn.SendRequest(teleport.SessionEvent, false, eventPayload)
+		if err != nil {
+			s.log.Warnf("Unable to send %v to %v: %v.", events.SessionJoinEvent, p.sconn.RemoteAddr(), err)
+			continue
+		}
+		s.log.Debugf("Sent %v to %v.", events.SessionJoinEvent, p.sconn.RemoteAddr())
+	}
+}
+
+// OpenSession either joins an existing session or starts a new session.
 func (s *SessionRegistry) OpenSession(ch ssh.Channel, req *ssh.Request, ctx *ServerContext) error {
 	if ctx.session != nil {
-		// emit "joined session" event:
-		ctx.session.recorder.alog.EmitAuditEvent(events.SessionJoinEvent, events.EventFields{
-			events.SessionEventID:  string(ctx.session.id),
-			events.EventNamespace:  s.srv.GetNamespace(),
-			events.EventLogin:      ctx.Identity.Login,
-			events.EventUser:       ctx.Identity.TeleportUser,
-			events.LocalAddr:       ctx.Conn.LocalAddr().String(),
-			events.RemoteAddr:      ctx.Conn.RemoteAddr().String(),
-			events.SessionServerID: ctx.srv.ID(),
-		})
 		ctx.Infof("Joining existing session %v.", ctx.session.id)
+
+		// Update the in-memory data structure that a party member has joined.
 		_, err := ctx.session.join(ch, req, ctx)
-		return trace.Wrap(err)
+		if err != nil {
+			return trace.Wrap(err)
+		}
+
+		// Emit session join event to both the Audit Log as well as over the
+		// "x-teleport-event" channel in the SSH connection.
+		s.emitSessionJoinEvent(ctx)
+
+		return nil
 	}
 	// session not found? need to create one. start by getting/generating an ID for it
 	sid, found := ctx.GetEnv(sshutils.SessionEnvVar)
@@ -150,24 +184,51 @@ func (s *SessionRegistry) OpenSession(ch ssh.Channel, req *ssh.Request, ctx *Ser
 	return nil
 }
 
-// leaveSession removes the given party from this session
+// emitSessionLeaveEvent emits a session leave event to both the Audit Log as
+// well as sending a "x-teleport-event" global request on the SSH connection.
+func (s *SessionRegistry) emitSessionLeaveEvent(party *party) {
+	sessionLeaveEvent := events.EventFields{
+		events.EventType:       events.SessionLeaveEvent,
+		events.SessionEventID:  party.id.String(),
+		events.EventUser:       party.user,
+		events.SessionServerID: party.serverID,
+		events.EventNamespace:  s.srv.GetNamespace(),
+	}
+
+	// Emit session leave event to Audit Log.
+	party.s.recorder.GetAuditLog().EmitAuditEvent(events.SessionLeaveEvent, sessionLeaveEvent)
+
+	// Notify all members of the party that a new member has left over the
+	// "x-teleport-event" channel.
+	for _, p := range s.getParties(party.s) {
+		eventPayload, err := json.Marshal(sessionLeaveEvent)
+		if err != nil {
+			s.log.Warnf("Unable to marshal %v for %v: %v.", events.SessionJoinEvent, p.sconn.RemoteAddr(), err)
+			continue
+		}
+		_, _, err = p.sconn.SendRequest(teleport.SessionEvent, false, eventPayload)
+		if err != nil {
+			s.log.Warnf("Unable to send %v to %v: %v.", events.SessionJoinEvent, p.sconn.RemoteAddr(), err)
+			continue
+		}
+		s.log.Debugf("Sent %v to %v.", events.SessionJoinEvent, p.sconn.RemoteAddr())
+	}
+}
+
+// leaveSession removes the given party from this session.
 func (s *SessionRegistry) leaveSession(party *party) error {
 	sess := party.s
 	s.Lock()
 	defer s.Unlock()
 
-	// remove from in-memory representation of the session:
+	// Emit session leave event to both the Audit Log as well as over the
+	// "x-teleport-event" channel in the SSH connection.
+	s.emitSessionLeaveEvent(party)
+
+	// Remove member from in-members representation of party.
 	if err := sess.removeParty(party); err != nil {
 		return trace.Wrap(err)
 	}
-
-	// emit "session leave" event (party left the session)
-	sess.recorder.alog.EmitAuditEvent(events.SessionLeaveEvent, events.EventFields{
-		events.SessionEventID:  string(sess.id),
-		events.EventUser:       party.user,
-		events.SessionServerID: party.serverID,
-		events.EventNamespace:  s.srv.GetNamespace(),
-	})
 
 	// this goroutine runs for a short amount of time only after a session
 	// becomes empty (no parties). It allows session to "linger" for a bit
@@ -191,7 +252,7 @@ func (s *SessionRegistry) leaveSession(party *party) error {
 		s.Unlock()
 
 		// send an event indicating that this session has ended
-		sess.recorder.alog.EmitAuditEvent(events.SessionEndEvent, events.EventFields{
+		sess.recorder.GetAuditLog().EmitAuditEvent(events.SessionEndEvent, events.EventFields{
 			events.SessionEventID: string(sess.id),
 			events.EventUser:      party.user,
 			events.EventNamespace: s.srv.GetNamespace(),
@@ -221,54 +282,84 @@ func (s *SessionRegistry) leaveSession(party *party) error {
 
 // getParties allows to safely return a list of parties connected to this
 // session (as determined by ctx)
-func (s *SessionRegistry) getParties(ctx *ServerContext) (parties []*party) {
-	sess := ctx.session
-	if sess != nil {
-		sess.Lock()
-		defer sess.Unlock()
+func (s *SessionRegistry) getParties(sess *session) []*party {
+	var parties []*party
 
-		parties = make([]*party, 0, len(sess.parties))
-		for _, p := range sess.parties {
-			parties = append(parties, p)
-		}
+	if sess == nil {
+		return parties
 	}
+
+	sess.Lock()
+	defer sess.Unlock()
+
+	for _, p := range sess.parties {
+		parties = append(parties, p)
+	}
+
 	return parties
 }
 
-// notifyWinChange is called when an SSH server receives a command notifying
-// us that the terminal size has changed
+// NotifyWinChange is called to notify all members in the party that the PTY
+// size has changed. The notification is sent as a global SSH request and it
+// is the responsibility of the client to update it's window size upon receipt.
 func (s *SessionRegistry) NotifyWinChange(params rsession.TerminalParams, ctx *ServerContext) error {
 	if ctx.session == nil {
 		s.log.Debugf("Unable to update window size, no session found in context.")
 		return nil
 	}
 	sid := ctx.session.id
-	// report this to the event/audit log:
-	ctx.session.recorder.alog.EmitAuditEvent(events.ResizeEvent, events.EventFields{
+
+	// Build the resize event.
+	resizeEvent := events.EventFields{
+		events.EventType:      events.ResizeEvent,
 		events.EventNamespace: s.srv.GetNamespace(),
 		events.SessionEventID: sid,
 		events.EventLogin:     ctx.Identity.Login,
 		events.EventUser:      ctx.Identity.TeleportUser,
 		events.TerminalSize:   params.Serialize(),
-	})
+	}
+
+	// Report the updated window size to the event log (this is so the sessions
+	// can be replayed correctly).
+	ctx.session.recorder.GetAuditLog().EmitAuditEvent(events.ResizeEvent, resizeEvent)
+
+	// Update the size of the server side PTY.
 	err := ctx.session.term.SetWinSize(params)
 	if err != nil {
 		return trace.Wrap(err)
 	}
 
-	// notify all connected parties about the change in real time
-	// (if they're capable)
-	for _, p := range s.getParties(ctx) {
-		p.onWindowChanged(&params)
+	// If sessions are being recorded at the proxy, sessions can not be shared.
+	// In that situation, PTY size information does not need to be propagated
+	// back to all clients and we can return right away.
+	if ctx.ClusterConfig.GetSessionRecording() == services.RecordAtProxy {
+		return nil
 	}
 
-	go func() {
-		err := s.srv.GetSessionServer().UpdateSession(
-			rsession.UpdateRequest{ID: sid, TerminalParams: &params, Namespace: s.srv.GetNamespace()})
-		if err != nil {
-			s.log.Errorf("Unable to update session %v: %v", sid, err)
+	// Notify all members of the party (except originator) that the size of the
+	// window has changed so the client can update it's own local PTY. Note that
+	// OpenSSH clients will ignore this and not update their own local PTY.
+	for _, p := range s.getParties(ctx.session) {
+		// Don't send the window change notification back to the originator.
+		if p.ctx.ID() == ctx.ID() {
+			continue
 		}
-	}()
+
+		eventPayload, err := json.Marshal(resizeEvent)
+		if err != nil {
+			s.log.Warnf("Unable to marshal resize event for %v: %v.", p.sconn.RemoteAddr(), err)
+			continue
+		}
+
+		// Send the message as a global request.
+		_, _, err = p.sconn.SendRequest(teleport.SessionEvent, false, eventPayload)
+		if err != nil {
+			s.log.Warnf("Unable to resize event to %v: %v.", p.sconn.RemoteAddr(), err)
+			continue
+		}
+		s.log.Debugf("Sent resize event %v to %v.", params, p.sconn.RemoteAddr())
+	}
+
 	return nil
 }
 
@@ -287,131 +378,6 @@ func (s *SessionRegistry) broadcastResult(sid rsession.ID, r ExecResult) error {
 func (s *SessionRegistry) findSession(id rsession.ID) (*session, bool) {
 	sess, found := s.sessions[id]
 	return sess, found
-}
-
-func (r *SessionRegistry) PushTermSizeToParty(sconn *ssh.ServerConn, ch ssh.Channel) error {
-	// the party may not be immediately available for this connection,
-	// keep asking for a full second:
-	for i := 0; i < 10; i++ {
-		party := r.partyForConnection(sconn)
-		if party == nil {
-			time.Sleep(time.Millisecond * 100)
-			continue
-		}
-
-		// this starts a loop which will keep updating the terminal
-		// size for every SSH write back to this connection
-		party.termSizePusher(ch)
-		return nil
-	}
-
-	return trace.Errorf("unable to push term size to party")
-}
-
-// partyForConnection finds an existing party which owns the given connection
-func (r *SessionRegistry) partyForConnection(sconn *ssh.ServerConn) *party {
-	r.Lock()
-	defer r.Unlock()
-
-	for _, session := range r.sessions {
-		session.Lock()
-		defer session.Unlock()
-		parties := session.parties
-		for _, party := range parties {
-			if party.sconn == sconn {
-				return party
-			}
-		}
-	}
-	return nil
-}
-
-// sessionRecorder implements io.Writer to be plugged into the multi-writer
-// associated with every session. It forwards session stream to the audit log
-type sessionRecorder struct {
-	// log holds the structured logger
-	log *logrus.Entry
-
-	// alog is the audit log to store session chunks
-	alog events.IAuditLog
-
-	// sid defines the session to record
-	sid rsession.ID
-
-	// namespace is session namespace
-	namespace string
-}
-
-func newSessionRecorder(alog events.IAuditLog, ctx *ServerContext, sid rsession.ID) (*sessionRecorder, error) {
-	var auditLog events.IAuditLog
-	var err error
-	if alog == nil {
-		auditLog = &events.DiscardAuditLog{}
-	} else {
-		auditLog, err = state.NewCachingAuditLog(state.CachingAuditLogConfig{
-			Namespace: ctx.srv.GetNamespace(),
-			SessionID: string(sid),
-			Server:    alog,
-		})
-		if err != nil {
-			return nil, trace.Wrap(err)
-		}
-	}
-	sr := &sessionRecorder{
-		log: logrus.WithFields(logrus.Fields{
-			trace.Component: teleport.Component(teleport.ComponentSession, ctx.srv.Component()),
-		}),
-		alog:      auditLog,
-		sid:       sid,
-		namespace: ctx.srv.GetNamespace(),
-	}
-	return sr, nil
-}
-
-// Write takes a chunk and writes it into the audit log
-func (r *sessionRecorder) Write(data []byte) (int, error) {
-	// we are copying buffer to prevent data corruption:
-	// io.Copy allocates single buffer and calls multiple writes in a loop
-	// our PostSessionChunk is async and sends reader wrapping buffer
-	// to the channel. This can lead to cases when the buffer is re-used
-	// and data is corrupted unless we copy the data buffer in the first place
-	dataCopy := make([]byte, len(data))
-	copy(dataCopy, data)
-	// post the chunk of bytes to the audit log:
-	chunk := &events.SessionChunk{
-		Data: dataCopy,
-		Time: time.Now().UTC().UnixNano(),
-	}
-	if err := r.alog.PostSessionSlice(events.SessionSlice{
-		Namespace: r.namespace,
-		SessionID: string(r.sid),
-		Chunks:    []*events.SessionChunk{chunk},
-	}); err != nil {
-		r.log.Error(trace.DebugReport(err))
-	}
-	return len(data), nil
-}
-
-// Close closes audit log caching forwarder.
-func (r *sessionRecorder) Close() error {
-	var errors []error
-	err := r.alog.Close()
-	errors = append(errors, err)
-
-	// wait until all events from recorder get flushed, it is important
-	// to do so before we send SessionEndEvent to advise the audit log
-	// to release resources associated with this session.
-	// not doing so will not result in memory leak, but could result
-	// in missing playback events
-	context, cancel := context.WithTimeout(context.TODO(), defaults.ReadHeadersTimeout)
-	defer cancel() // releases resources if slowOperation completes before timeout elapses
-	err = r.alog.WaitForDelivery(context)
-	if err != nil {
-		errors = append(errors, err)
-		r.log.Warnf("Timeout waiting for session to flush events: %v", trace.DebugReport(err))
-	}
-
-	return trace.NewAggregate(errors...)
 }
 
 // session struct describes an active (in progress) SSH session. These sessions
@@ -455,7 +421,7 @@ type session struct {
 
 	closeOnce sync.Once
 
-	recorder *sessionRecorder
+	recorder events.SessionRecorder
 }
 
 // newSession creates a new session with a given ID within a given context.
@@ -524,10 +490,12 @@ func newSession(id rsession.ID, r *SessionRegistry, ctx *ServerContext) (*sessio
 	return sess, nil
 }
 
-// isLingering returns 'true' if every party has left this session
+// isLingering returns true if every party has left this session. Occurs
+// under a lock.
 func (s *session) isLingering() bool {
 	s.Lock()
 	defer s.Unlock()
+
 	return len(s.parties) == 0
 }
 
@@ -560,12 +528,62 @@ func (s *session) Close() error {
 	return nil
 }
 
+func isDiscardAuditLog(alog events.IAuditLog) bool {
+	_, ok := alog.(*events.DiscardAuditLog)
+	return ok
+}
+
 // start starts a new interactive process (or a shell) in the current session
 func (s *session) start(ch ssh.Channel, ctx *ServerContext) error {
 	var err error
 
 	// create a new "party" (connected client)
 	p := newParty(s, ch, ctx)
+
+	// get the audit log from the server and create a session recorder. this will
+	// be a discard audit log if the proxy is in recording mode and a teleport
+	// node so we don't create double recordings.
+	auditLog := s.registry.srv.GetAuditLog()
+	if auditLog == nil || isDiscardAuditLog(auditLog) {
+		s.recorder = &events.DiscardRecorder{}
+	} else {
+		s.recorder, err = events.NewForwardRecorder(events.ForwardRecorderConfig{
+			DataDir:        filepath.Join(ctx.srv.GetDataDir(), teleport.LogsDir),
+			SessionID:      s.id,
+			Namespace:      ctx.srv.GetNamespace(),
+			RecordSessions: ctx.ClusterConfig.GetSessionRecording() != services.RecordOff,
+			Component:      teleport.Component(teleport.ComponentSession, ctx.srv.Component()),
+			ForwardTo:      auditLog,
+		})
+		if err != nil {
+			return trace.Wrap(err)
+		}
+	}
+	s.writer.addWriter("session-recorder", s.recorder, true)
+
+	// If this code is running on a Teleport node and PAM is enabled, then open a
+	// PAM context.
+	var pamContext *pam.PAM
+	if ctx.srv.Component() == teleport.ComponentNode {
+		conf, err := s.registry.srv.GetPAM()
+		if err != nil {
+			return trace.Wrap(err)
+		}
+
+		if conf.Enabled == true {
+			pamContext, err = pam.Open(&pam.Config{
+				ServiceName: conf.ServiceName,
+				Username:    ctx.Identity.Login,
+				Stdin:       ch,
+				Stderr:      s.writer,
+				Stdout:      s.writer,
+			})
+			if err != nil {
+				return trace.Wrap(err)
+			}
+			ctx.Debugf("Opening PAM context for session %v.", s.id)
+		}
+	}
 
 	// allocate a terminal or take the one previously allocated via a
 	// seaprate "allocate TTY" SSH request
@@ -589,18 +607,8 @@ func (s *session) start(ch ssh.Channel, ctx *ServerContext) error {
 
 	params := s.term.GetTerminalParams()
 
-	// get the audit log from the server and create a session recorder. this will
-	// be a discard audit log if the proxy is in recording mode and a teleport
-	// node so we don't create double recordings.
-	auditLog := s.registry.srv.GetAuditLog()
-	s.recorder, err = newSessionRecorder(auditLog, ctx, s.id)
-	if err != nil {
-		return trace.Wrap(err)
-	}
-	s.writer.addWriter("session-recorder", s.recorder, true)
-
 	// emit "new session created" event:
-	s.recorder.alog.EmitAuditEvent(events.SessionStartEvent, events.EventFields{
+	s.recorder.GetAuditLog().EmitAuditEvent(events.SessionStartEvent, events.EventFields{
 		events.EventNamespace:  ctx.srv.GetNamespace(),
 		events.SessionEventID:  string(s.id),
 		events.SessionServerID: ctx.srv.ID(),
@@ -611,9 +619,9 @@ func (s *session) start(ch ssh.Channel, ctx *ServerContext) error {
 		events.TerminalSize:    params.Serialize(),
 	})
 
-	// start asynchronous loop of synchronizing session state with
-	// the session server (terminal size and activity)
-	go s.pollAndSync()
+	// Start a heartbeat that marks this session as active with current members
+	// of party in the backend.
+	go s.heartbeat(ctx)
 
 	doneCh := make(chan bool, 1)
 
@@ -651,11 +659,29 @@ func (s *session) start(ch ssh.Channel, ctx *ServerContext) error {
 		case <-doneCh:
 		}
 
+		// If this code is running on a Teleport node and PAM is enabled, close the context.
+		if ctx.srv.Component() == teleport.ComponentNode {
+			conf, err := s.registry.srv.GetPAM()
+			if err != nil {
+				ctx.Errorf("Unable to get PAM configuration from server: %v", err)
+				return
+			}
+
+			if conf.Enabled == true {
+				err = pamContext.Close()
+				if err != nil {
+					ctx.Errorf("Unable to close PAM context for session: %v: %v", s.id, err)
+					return
+				}
+				ctx.Debugf("Closing PAM context for session: %v.", s.id)
+			}
+		}
+
 		if result != nil {
 			s.registry.broadcastResult(s.id, *result)
 		}
 		if err != nil {
-			s.log.Errorf("Shell exited with error: %v", err)
+			s.log.Infof("Shell exited with error: %v", err)
 		} else {
 			// no error? this means the command exited cleanly: no need
 			// for this session to "linger" after this.
@@ -681,41 +707,25 @@ func (s *session) String() string {
 	return fmt.Sprintf("session(id=%v, parties=%v)", s.id, len(s.parties))
 }
 
-// removeParty removes the party from two places:
-//   1. from in-memory dictionary inside of this session
-//   2. from sessin server's storage
+// removePartyMember removes participant from in-memory representation of
+// party members. Occurs under a lock.
+func (s *session) removePartyMember(party *party) {
+	s.Lock()
+	defer s.Unlock()
+
+	delete(s.parties, party.id)
+}
+
+// removeParty removes the party from the in-memory map that holds all party
+// members.
 func (s *session) removeParty(p *party) error {
 	p.ctx.Infof("Removing party %v from session %v", p, s.id)
 
-	ns := s.getNamespace()
+	// Removes participant from in-memory map of party members.
+	s.removePartyMember(p)
 
-	// in-memory locked remove:
-	lockedRemove := func() {
-		s.Lock()
-		defer s.Unlock()
-		delete(s.parties, p.id)
-		s.writer.deleteWriter(string(p.id))
-	}
-	lockedRemove()
+	s.writer.deleteWriter(string(p.id))
 
-	// remove from the session server (asynchronously)
-	storageRemove := func(db rsession.Service) {
-		dbSession, err := db.GetSession(ns, s.id)
-		if err != nil {
-			s.log.Error("Unable to get session %v: %v", s.id, err)
-			return
-		}
-		if dbSession != nil && dbSession.RemoveParty(p.id) {
-			db.UpdateSession(rsession.UpdateRequest{
-				ID:        dbSession.ID,
-				Parties:   &dbSession.Parties,
-				Namespace: ns,
-			})
-		}
-	}
-	if s.registry.srv.GetSessionServer() != nil {
-		go storageRemove(s.registry.srv.GetSessionServer())
-	}
 	return nil
 }
 
@@ -735,79 +745,80 @@ func (s *session) getNamespace() string {
 	return s.registry.srv.GetNamespace()
 }
 
-// pollAndSync is a loops forever trying to sync terminal size to what's in
-// the session (so all connected parties have the same terminal size) and
-// update the "active" field of the session. If the session are recorded at
-// the proxy, then this function does nothing as it's counterpart in the proxy
-// will do this work.
-func (s *session) pollAndSync() {
+// exportPartyMembers exports participants in the in-memory map of party
+// members. Occurs under a lock.
+func (s *session) exportPartyMembers() []rsession.Party {
+	s.Lock()
+	defer s.Unlock()
+
+	var partyList []rsession.Party
+	for _, p := range s.parties {
+		partyList = append(partyList, rsession.Party{
+			ID:         p.id,
+			User:       p.user,
+			ServerID:   p.serverID,
+			RemoteAddr: p.site,
+			LastActive: p.getLastActive(),
+		})
+	}
+
+	return partyList
+}
+
+// heartbeat will loop as long as the session is not closed and mark it as
+// active and update the list of party members. If the session are recorded at
+// the proxy, then this function does nothing as it's counterpart
+// in the proxy will do this work.
+func (s *session) heartbeat(ctx *ServerContext) {
 	// If sessions are being recorded at the proxy, an identical version of this
 	// goroutine is running in the proxy, which means it does not need to run here.
-	clusterConfig, err := s.registry.srv.GetAccessPoint().GetClusterConfig()
-	if err != nil {
-		s.log.Errorf("Unable to sync terminal size: %v.", err)
+	if ctx.ClusterConfig.GetSessionRecording() == services.RecordAtProxy &&
+		s.registry.srv.Component() == teleport.ComponentNode {
 		return
 	}
-	if clusterConfig.GetSessionRecording() == services.RecordAtProxy &&
-		s.registry.srv.Component() == teleport.ComponentNode {
+
+	// If no session server (endpoint interface for active sessions) is passed in
+	// (for example Teleconsole does this) then nothing to sync.
+	sessionServer := s.registry.srv.GetSessionServer()
+	if sessionServer == nil {
 		return
 	}
 
 	s.log.Debugf("Starting poll and sync of terminal size to all parties.")
 	defer s.log.Debugf("Stopping poll and sync of terminal size to all parties.")
 
-	ns := s.getNamespace()
+	tickerCh := time.NewTicker(defaults.SessionRefreshPeriod)
+	defer tickerCh.Stop()
 
-	sessionServer := s.registry.srv.GetSessionServer()
-	if sessionServer == nil {
-		return
-	}
-	errCount := 0
-	sync := func() error {
-		sess, err := sessionServer.GetSession(ns, s.id)
-		if err != nil || sess == nil {
-			return trace.Wrap(err)
-		}
-		var active = true
-		sessionServer.UpdateSession(rsession.UpdateRequest{
-			Namespace: ns,
-			ID:        sess.ID,
-			Active:    &active,
-			Parties:   nil,
-		})
-		winSize, err := s.term.GetWinSize()
-		if err != nil {
-			return err
-		}
-		termSizeChanged := (int(winSize.Width) != sess.TerminalParams.W ||
-			int(winSize.Height) != sess.TerminalParams.H)
-		if termSizeChanged {
-			s.log.Debugf("Terminal changed from: %v to %v", sess.TerminalParams, winSize)
-			err = s.term.SetWinSize(sess.TerminalParams)
-		}
-		return err
-	}
-
-	tick := time.NewTicker(defaults.TerminalSizeRefreshPeriod)
-	defer tick.Stop()
+	// Loop as long as the session is active, updating the session in the backend.
 	for {
-		if err := sync(); err != nil {
-			s.log.Infof("Unable to sync terminal: %v", err)
-			errCount++
-			// if the error count keeps going up, this means we're stuck in
-			// a bad state: end this goroutine to avoid leaks
-			if errCount > maxTermSyncErrorCount {
-				return
-			}
-		} else {
-			errCount = 0
-		}
 		select {
+		case <-tickerCh.C:
+			partyList := s.exportPartyMembers()
+
+			var active = true
+			err := sessionServer.UpdateSession(rsession.UpdateRequest{
+				Namespace: s.getNamespace(),
+				ID:        s.id,
+				Active:    &active,
+				Parties:   &partyList,
+			})
+			if err != nil {
+				s.log.Warnf("Unable to update session %v as active: %v", s.id, err)
+			}
 		case <-s.closeC:
 			return
-		case <-tick.C:
 		}
 	}
+}
+
+// addPartyMember adds participant to in-memory map of party members. Occurs
+// under a lock.
+func (s *session) addPartyMember(p *party) {
+	s.Lock()
+	defer s.Unlock()
+
+	s.parties[p.id] = p
 }
 
 // addParty is called when a new party joins the session.
@@ -818,9 +829,11 @@ func (s *session) addParty(p *party) error {
 			s.login, p.login, s.id)
 	}
 
-	s.parties[p.id] = p
-	// write last chunk (so the newly joined parties won't stare
-	// at a blank screen)
+	// Adds participant to in-memory map of party members.
+	s.addPartyMember(p)
+
+	// Write last chunk (so the newly joined parties won't stare at a blank
+	// screen).
 	getRecentWrite := func() []byte {
 		s.writer.Lock()
 		defer s.writer.Unlock()
@@ -832,39 +845,14 @@ func (s *session) addParty(p *party) error {
 	}
 	p.Write(getRecentWrite())
 
-	// register this party as one of the session writers
-	// (output will go to it)
+	// Register this party as one of the session writers (output will go to it).
 	s.writer.addWriter(string(p.id), p, true)
 	p.ctx.AddCloser(p)
 	s.term.AddParty(1)
 
-	// update session on the session server
-	storageUpdate := func(db rsession.Service) {
-		dbSession, err := db.GetSession(s.getNamespace(), s.id)
-		if err != nil {
-			s.log.Errorf("Unable to get session %v: %v", s.id, err)
-			return
-		}
-		dbSession.Parties = append(dbSession.Parties, rsession.Party{
-			ID:         p.id,
-			User:       p.user,
-			ServerID:   p.serverID,
-			RemoteAddr: p.site,
-			LastActive: p.getLastActive(),
-		})
-		db.UpdateSession(rsession.UpdateRequest{
-			ID:        dbSession.ID,
-			Parties:   &dbSession.Parties,
-			Namespace: s.getNamespace(),
-		})
-	}
-	if s.registry.srv.GetSessionServer() != nil {
-		go storageUpdate(s.registry.srv.GetSessionServer())
-	}
-
 	s.log.Infof("New party %v joined session: %v", p.String(), s.id)
 
-	// this goroutine keeps pumping party's input into the session
+	// This goroutine keeps pumping party's input into the session.
 	go func() {
 		defer s.term.AddParty(-1)
 		_, err := io.Copy(s.term.PTY(), p)
@@ -995,48 +983,6 @@ func newParty(s *session, ch ssh.Channel, ctx *ServerContext) *party {
 	}
 }
 
-func (p *party) onWindowChanged(params *rsession.TerminalParams) {
-	p.log.Debugf("Window size changed to %v in party: %v", params.Serialize(), p.id)
-
-	p.Lock()
-	defer p.Unlock()
-
-	// this prefix will be appended to the end of every socker write going
-	// to this party:
-	prefix := []byte("\x00" + params.Serialize())
-	if p.termSizeC != nil && len(p.termSizeC) == 0 {
-		p.termSizeC <- prefix
-	}
-}
-
-// This goroutine pushes terminal resize events directly into a connected web client
-func (p *party) termSizePusher(ch ssh.Channel) {
-	var (
-		err error
-		n   int
-	)
-	defer func() {
-		if err != nil {
-			p.log.Error(err)
-		}
-	}()
-
-	for err == nil {
-		select {
-		case newSize := <-p.termSizeC:
-			n, err = ch.Write(newSize)
-			if err == io.EOF {
-				continue
-			}
-			if err != nil || n == 0 {
-				return
-			}
-		case <-p.closeC:
-			return
-		}
-	}
-}
-
 func (p *party) updateActivity() {
 	p.Lock()
 	defer p.Unlock()
@@ -1051,6 +997,7 @@ func (p *party) getLastActive() time.Time {
 
 func (p *party) Read(bytes []byte) (int, error) {
 	p.updateActivity()
+	p.ctx.UpdateClientActivity()
 	return p.ch.Read(bytes)
 }
 

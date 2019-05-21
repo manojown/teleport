@@ -1,5 +1,3 @@
-/*eslint no-useless-escape: "off"*/
-
 module.exports = {
     "events": [
       {

@@ -23,7 +23,6 @@ export class ServerRec extends Record({
   id: '',
   siteId: '',
   hostname: '',
-  alias: '',
   tags: new List(),
   addr: ''
 }) {

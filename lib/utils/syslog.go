@@ -23,23 +23,21 @@ import (
 	"log/syslog"
 	"os"
 
-	"github.com/gravitational/trace"
 	log "github.com/sirupsen/logrus"
 	logrusSyslog "github.com/sirupsen/logrus/hooks/syslog"
 )
 
 // SwitchLoggingtoSyslog tells the logger to send the output to syslog. This
 // code is behind a build flag because Windows does not support syslog.
-func SwitchLoggingtoSyslog() error {
+func SwitchLoggingtoSyslog() {
 	log.StandardLogger().SetHooks(make(log.LevelHooks))
 	hook, err := logrusSyslog.NewSyslogHook("", "", syslog.LOG_WARNING, "")
 	if err != nil {
-		// syslog is not available
+		// syslog not available
 		log.SetOutput(os.Stderr)
-		return trace.Wrap(err)
+	} else {
+		// ... and disable stderr:
+		log.AddHook(hook)
+		log.SetOutput(ioutil.Discard)
 	}
-	log.AddHook(hook)
-	// ... and disable stderr:
-	log.SetOutput(ioutil.Discard)
-	return nil
 }

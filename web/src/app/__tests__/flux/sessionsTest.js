@@ -15,8 +15,7 @@ limitations under the License.
 */
 
 import { reactor, expect, Dfd, cfg, spyOn, api } from './../';
-import getters from 'app/flux/sessions/getters';
-import * as actions from 'app/flux/sessions/actions';
+import {actions, getters} from 'app/flux/sessions';
 import { setSiteId } from 'app/flux/app/actions';
 import { activeSessions } from 'app/__tests__/apiData'
 
@@ -24,7 +23,7 @@ describe('flux/sessions', () => {
   const siteid = 'siteid123';
 
   beforeEach(() => {
-    setSiteId(siteid);
+    setSiteId(siteid);  
     spyOn(api, 'get').andReturn(Dfd())
   });
 
@@ -35,13 +34,13 @@ describe('flux/sessions', () => {
 
   describe('actions', () => {
     describe('fetchActiveSessions', () => {
-      it('should fetch based on the input params', () => {
+      it('should fetch based on the input params', () => {  
         spyOn(cfg.api, 'getFetchSessionsUrl');
         actions.fetchActiveSessions();
 
         const [actualSiteId] = cfg.api.getFetchSessionsUrl.calls[0].arguments;
         expect(api.get.calls.length).toBe(1);
-        expect(actualSiteId).toBe(siteid);
+        expect(actualSiteId).toBe(siteid);                
       })
 
     });
@@ -54,9 +53,9 @@ describe('flux/sessions', () => {
       spyOn(api, 'get');
     });
 
-    it('should get "activeSessionById"', () => {
+    it('should get "activeSessionById"', () => {            
       api.get.andReturn(Dfd().resolve(activeSessions));
-      actions.fetchActiveSessions();
+      actions.fetchActiveSessions();      
       const actual = reactor.evaluateToJS(getters.activeSessionById(sid));
       const expected = {
         'id': '11d76502-0ed7-470c-9ae2-472f3873fa6e',
@@ -80,8 +79,8 @@ describe('flux/sessions', () => {
           }
         ]
       }
-
+            
       expect(actual).toEqual(expected);
-    });
+    });    
   });
 })

@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log/syslog"
 	"os"
 	"strconv"
 	"strings"
@@ -31,7 +30,6 @@ import (
 	"github.com/gravitational/kingpin"
 	"github.com/gravitational/trace"
 	log "github.com/sirupsen/logrus"
-	logrusSyslog "github.com/sirupsen/logrus/hooks/syslog"
 )
 
 type LoggingPurpose int
@@ -51,7 +49,13 @@ func InitLogger(purpose LoggingPurpose, level log.Level) {
 
 	switch purpose {
 	case LoggingForCLI:
-		SwitchLoggingtoSyslog()
+		// If debug logging was asked for on the CLI, then write logs to stderr.
+		// Otherwise discard all logs.
+		if level == log.DebugLevel {
+			log.SetOutput(os.Stderr)
+		} else {
+			log.SetOutput(ioutil.Discard)
+		}
 	case LoggingForDaemon:
 		log.SetOutput(os.Stderr)
 	case LoggingForTests:
@@ -71,20 +75,6 @@ func InitLogger(purpose LoggingPurpose, level log.Level) {
 
 func InitLoggerForTests() {
 	InitLogger(LoggingForTests, log.DebugLevel)
-}
-
-// SwitchLoggingtoSyslog tells the logger to send the output to syslog
-func SwitchLoggingtoSyslog() {
-	log.StandardLogger().SetHooks(make(log.LevelHooks))
-	hook, err := logrusSyslog.NewSyslogHook("", "", syslog.LOG_WARNING, "")
-	if err != nil {
-		// syslog not available
-		log.SetOutput(os.Stderr)
-	} else {
-		// ... and disable stderr:
-		log.AddHook(hook)
-		log.SetOutput(ioutil.Discard)
-	}
 }
 
 // FatalError is for CLI front-ends: it detects gravitational/trace debugging
@@ -139,10 +129,10 @@ func UserMessageFromError(err error) string {
 		// error occured" message.
 		if er, ok := err.(*trace.TraceErr); ok {
 			if er.Message != "" {
-				return fmt.Sprintf("%v: %v", er.Message, er.Err.Error())
+				return fmt.Sprintf("error: %v", er.Message)
 			}
 		}
-		return fmt.Sprintf("A fatal error occurred: %v", err.Error())
+		return fmt.Sprintf("error: %v", err.Error())
 	}
 	return ""
 }

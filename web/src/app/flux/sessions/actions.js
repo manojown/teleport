@@ -21,49 +21,54 @@ import moment from 'moment';
 import appGetters from 'app/flux/app/getters';
 import Logger from 'app/lib/logger';
 import {
-  RECEIVE_ACTIVE_SESSIONS,
-  RECEIVE_SITE_EVENTS,
+  RECEIVE_ACTIVE_SESSIONS,  
+  RECEIVE_SITE_EVENTS,  
 } from './actionTypes';
 
 const logger = Logger.create('Modules/Sessions');
 
-export function fetchStoredSession(sid, siteId) {
-  siteId = siteId || reactor.evaluate(appGetters.siteId);
-  return api.get(cfg.api.getSessionEventsUrl({ siteId, sid })).then(json=>{
-    if (json && json.events) {
-      reactor.dispatch(RECEIVE_SITE_EVENTS, { siteId, json: json.events });
-    }
-  });
-}
+const actions = {
 
-export function fetchSiteEvents(start, end){
-  // default values
-  start = start || moment(new Date()).endOf('day').toDate();
-  end = end || moment(end).subtract(3, 'day').startOf('day').toDate();
-
-  start = start.toISOString();
-  end = end.toISOString();
-
-  let siteId = reactor.evaluate(appGetters.siteId);
-  return api.get(cfg.api.getSiteEventsFilterUrl({ start, end, siteId }))
-    .done(json => {
-      if (json && json.events) {
+  fetchStoredSession(sid, siteId) {
+    siteId = siteId || reactor.evaluate(appGetters.siteId);
+    return api.get(cfg.api.getSessionEventsUrl({ siteId, sid })).then(json=>{
+      if (json && json.events) {        
         reactor.dispatch(RECEIVE_SITE_EVENTS, { siteId, json: json.events });
       }
-    })
-    .fail(err => {
-      logger.error('fetchSiteEvents', err);
     });
+  },
+
+  fetchSiteEvents(start, end){
+    // default values
+    start = start || moment(new Date()).endOf('day').toDate();
+    end = end || moment(end).subtract(3, 'day').startOf('day').toDate();
+
+    start = start.toISOString();
+    end = end.toISOString();
+
+    let siteId = reactor.evaluate(appGetters.siteId);    
+    return api.get(cfg.api.getSiteEventsFilterUrl({ start, end, siteId }))
+      .done(json => {
+        if (json && json.events) {          
+          reactor.dispatch(RECEIVE_SITE_EVENTS, { siteId, json: json.events });
+        }  
+      })
+      .fail(err => {        
+        logger.error('fetchSiteEvents', err);
+      });
+  },
+
+  fetchActiveSessions() {    
+    const siteId = reactor.evaluate(appGetters.siteId);        
+    return api.get(cfg.api.getFetchSessionsUrl(siteId))
+      .done(json => {
+        let sessions = json.sessions || [];                        
+        reactor.dispatch(RECEIVE_ACTIVE_SESSIONS, { siteId, json: sessions });        
+      })
+      .fail(err => {        
+        logger.error('fetchActiveSessions', err);
+      });
+  }
 }
 
-export function fetchActiveSessions() {
-  const siteId = reactor.evaluate(appGetters.siteId);
-  return api.get(cfg.api.getFetchSessionsUrl(siteId))
-    .done(json => {
-      let sessions = json.sessions || [];
-      reactor.dispatch(RECEIVE_ACTIVE_SESSIONS, { siteId, json: sessions });
-    })
-    .fail(err => {
-      logger.error('fetchActiveSessions', err);
-    });
-}
+export default actions;

@@ -4,7 +4,7 @@
 set -e
 set -x
 
-# Source variables from user-data
+# Source variables set up by cloudformation template
 . /etc/teleport.d/conf
 
 aws s3 sync /etc/letsencrypt/ s3://${TELEPORT_S3_BUCKET} --sse=AES256

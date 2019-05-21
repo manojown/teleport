@@ -18,12 +18,19 @@ package client
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"runtime"
 	"time"
 
+	"github.com/gravitational/teleport"
+	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/tlsca"
+	"github.com/gravitational/teleport/lib/utils"
 
 	"github.com/gravitational/trace"
+
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -42,20 +49,50 @@ type Key struct {
 	// ProxyHost (optionally) contains the hostname of the proxy server
 	// which issued this key
 	ProxyHost string
+
+	// TrustedCA is a list of trusted certificate authorities
+	TrustedCA []auth.TrustedCerts
+}
+
+// TLSConfig returns client TLS configuration used
+// to authenticate against API servers
+func (k *Key) ClientTLSConfig() (*tls.Config, error) {
+	// Because Teleport clients can't be configured (yet), they take the default
+	// list of cipher suites from Go.
+	tlsConfig := utils.TLSConfig(nil)
+
+	pool := x509.NewCertPool()
+	for _, ca := range k.TrustedCA {
+		for _, certPEM := range ca.TLSCertificates {
+			if !pool.AppendCertsFromPEM(certPEM) {
+				return nil, trace.BadParameter("failed to parse certificate received from the proxy")
+			}
+		}
+	}
+	tlsConfig.RootCAs = pool
+	tlsCert, err := tls.X509KeyPair(k.TLSCert, k.Priv)
+	if err != nil {
+		return nil, trace.Wrap(err, "failed to parse TLS cert and key")
+	}
+	tlsConfig.Certificates = append(tlsConfig.Certificates, tlsCert)
+	return tlsConfig, nil
+}
+
+// CertUsername returns the name of the teleport user encoded in the certificate
+func (k *Key) CertUsername() (string, error) {
+	pubKey, _, _, _, err := ssh.ParseAuthorizedKey(k.Cert)
+	if err != nil {
+		return "", trace.Wrap(err)
+	}
+	cert, ok := pubKey.(*ssh.Certificate)
+	if !ok {
+		return "", trace.BadParameter("expected SSH certificate, got public key")
+	}
+	return cert.KeyId, nil
 }
 
 // AsAgentKeys converts client.Key struct to a []*agent.AddedKey. All elements
 // of the []*agent.AddedKey slice need to be loaded into the agent!
-//
-// This is done because OpenSSH clients older than OpenSSH 7.3/7.3p1
-// (2016-08-01) have a bug in how they use certificates that have been loaded
-// in an agent. Specifically when you add a certificate to an agent, you can't
-// just embed the private key within the certificate, you have to add the
-// certificate and private key to the agent separately. Teleport works around
-// this behavior to ensure OpenSSH interoperability.
-//
-// For more details see the following: https://bugzilla.mindrot.org/show_bug.cgi?id=2550
-// WARNING: callers expect the returned slice to be __exactly as it is__
 func (k *Key) AsAgentKeys() ([]*agent.AddedKey, error) {
 	// unmarshal certificate bytes into a ssh.PublicKey
 	publicKey, _, _, _, err := ssh.ParseAuthorizedKey(k.Cert)
@@ -72,7 +109,31 @@ func (k *Key) AsAgentKeys() ([]*agent.AddedKey, error) {
 	// put a teleport identifier along with the teleport user into the comment field
 	comment := fmt.Sprintf("teleport:%v", publicKey.(*ssh.Certificate).KeyId)
 
-	// return a certificate (with embedded private key) as well as a private key
+	// On Windows, return the certificate with the private key embedded.
+	if runtime.GOOS == teleport.WindowsOS {
+		return []*agent.AddedKey{
+			&agent.AddedKey{
+				PrivateKey:       privateKey,
+				Certificate:      publicKey.(*ssh.Certificate),
+				Comment:          comment,
+				LifetimeSecs:     0,
+				ConfirmBeforeUse: false,
+			},
+		}, nil
+	}
+
+	// On Unix, return the certificate (with embedded private key) as well as
+	// a private key.
+	//
+	// This is done because OpenSSH clients older than OpenSSH 7.3/7.3p1
+	// (2016-08-01) have a bug in how they use certificates that have been loaded
+	// in an agent. Specifically when you add a certificate to an agent, you can't
+	// just embed the private key within the certificate, you have to add the
+	// certificate and private key to the agent separately. Teleport works around
+	// this behavior to ensure OpenSSH interoperability.
+	//
+	// For more details see the following: https://bugzilla.mindrot.org/show_bug.cgi?id=2550
+	// WARNING: callers expect the returned slice to be __exactly as it is__
 	return []*agent.AddedKey{
 		&agent.AddedKey{
 			PrivateKey:       privateKey,

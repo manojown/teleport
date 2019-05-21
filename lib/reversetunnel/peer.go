@@ -45,6 +45,10 @@ type clusterPeers struct {
 	peers       map[string]*clusterPeer
 }
 
+func (p *clusterPeers) GetTunnelsCount() int {
+	return len(p.peers)
+}
+
 func (p *clusterPeers) pickPeer() (*clusterPeer, error) {
 	var currentPeer *clusterPeer
 	for _, peer := range p.peers {
@@ -53,7 +57,7 @@ func (p *clusterPeers) pickPeer() (*clusterPeer, error) {
 		}
 	}
 	if currentPeer == nil {
-		return nil, trace.NotFound("no active peers found for %v")
+		return nil, trace.NotFound("no active peers found for %v", p.clusterName)
 	}
 	return currentPeer, nil
 }
@@ -123,6 +127,10 @@ func (p *clusterPeers) DialAuthServer() (net.Conn, error) {
 // located in a remote connected site, the connection goes through the
 // reverse proxy tunnel.
 func (p *clusterPeers) Dial(from, to net.Addr, userAgent agent.Agent) (conn net.Conn, err error) {
+	return p.DialTCP(from, to)
+}
+
+func (p *clusterPeers) DialTCP(from, to net.Addr) (conn net.Conn, err error) {
 	return nil, trace.ConnectionProblem(nil, "unable to dial, this proxy has not been discovered yet, try again later")
 }
 
@@ -151,7 +159,7 @@ type clusterPeer struct {
 }
 
 func (s *clusterPeer) CachingAccessPoint() (auth.AccessPoint, error) {
-	return nil, trace.ConnectionProblem(nil, "unable to fetch access point, this proxy %v has not been discovered yet, try again later")
+	return nil, trace.ConnectionProblem(nil, "unable to fetch access point, this proxy %v has not been discovered yet, try again later", s)
 }
 
 func (s *clusterPeer) GetClient() (auth.ClientI, error) {

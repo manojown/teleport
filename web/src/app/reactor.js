@@ -25,16 +25,16 @@ const options = {
 
 const logger = {
   dispatchStart(reactorState, actionType, payload) {
-    window.console.log(`%creactor.dispatch("${actionType}", `, CSS, payload, `)`);
+    console.log(`%creactor.dispatch("${actionType}", `, CSS, payload, `)`);
   },
 
   dispatchError: function (reactorState, error) {
-    window.console.debug('Dispatch error: ' + error)
+    console.debug('Dispatch error: ' + error)
   },
 
   dispatchEnd(reactorState, state, dirtyStores) {
     const stateChanges = state.filter((val, key) => dirtyStores.contains(key));
-    window.console.log('%cupdated store -> ',
+    console.log('%cupdated store -> ',
       CSS,
       stateChanges.toJS())
   }

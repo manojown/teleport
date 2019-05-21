@@ -1,13 +1,15 @@
 package backend
 
 import (
-	"context"
 	"fmt"
+	"testing"
 	"time"
 
 	"github.com/jonboulle/clockwork"
 	"gopkg.in/check.v1"
 )
+
+func TestSanitizer(t *testing.T) { check.TestingT(t) }
 
 type Suite struct {
 }
@@ -29,92 +31,115 @@ func (s *Suite) SetUpTest(c *check.C) {
 
 func (s *Suite) TestSanitizeBucket(c *check.C) {
 	tests := []struct {
-		inKey    []byte
+		inBucket []string
+		inKey    string
 		outError bool
 	}{
 		{
-			inKey:    []byte("a-b/c:d/.e_f/01"),
-			outError: false,
-		},
-		{
-			inKey:    []byte("/namespaces//params"),
+			inBucket: []string{"foo", "bar", "../../../etc/passwd"},
+			inKey:    "",
 			outError: true,
 		},
 		{
-			inKey:    RangeEnd([]byte("a-b/c:d/.e_f/01")),
-			outError: false,
+			inBucket: []string{},
+			inKey:    "../../../etc/passwd",
+			outError: true,
 		},
 		{
-			inKey:    RangeEnd([]byte("/")),
+			inBucket: []string{"foo", "bar", "../../../etc/passwd"},
+			inKey:    "../../../etc/passwd",
+			outError: true,
+		},
+		{
+			inBucket: []string{"foo", "bar"},
+			inKey:    "baz-foo:bar.com",
 			outError: false,
 		},
 	}
 
 	for i, tt := range tests {
-		comment := check.Commentf("Test %v, key: %q", i, string(tt.inKey))
+		comment := check.Commentf("Test %v", i)
 
 		safeBackend := NewSanitizer(&nopBackend{})
 
-		ctx := context.TODO()
-		_, err := safeBackend.Get(ctx, tt.inKey)
-		c.Assert(err != nil, check.Equals, tt.outError, comment)
+		if len(tt.inBucket) != 0 {
+			_, err := safeBackend.GetKeys(tt.inBucket)
+			c.Assert(err != nil, check.Equals, tt.outError, comment)
 
-		_, err = safeBackend.Create(ctx, Item{Key: tt.inKey})
-		c.Assert(err != nil, check.Equals, tt.outError, comment)
+			err = safeBackend.CreateVal(tt.inBucket, tt.inKey, []byte{}, Forever)
+			c.Assert(err != nil, check.Equals, tt.outError, comment)
 
-		_, err = safeBackend.Put(ctx, Item{Key: tt.inKey})
-		c.Assert(err != nil, check.Equals, tt.outError, comment)
+			err = safeBackend.UpsertVal(tt.inBucket, tt.inKey, []byte{}, Forever)
+			c.Assert(err != nil, check.Equals, tt.outError, comment)
 
-		_, err = safeBackend.Update(ctx, Item{Key: tt.inKey})
-		c.Assert(err != nil, check.Equals, tt.outError, comment)
+			_, err = safeBackend.GetVal(tt.inBucket, tt.inKey)
+			c.Assert(err != nil, check.Equals, tt.outError, comment)
 
-		_, err = safeBackend.CompareAndSwap(ctx, Item{Key: tt.inKey}, Item{Key: tt.inKey})
-		c.Assert(err != nil, check.Equals, tt.outError, comment)
+			err = safeBackend.CompareAndSwapVal(tt.inBucket, tt.inKey, []byte{}, []byte{}, Forever)
+			c.Assert(err != nil, check.Equals, tt.outError, comment)
 
-		err = safeBackend.Delete(ctx, tt.inKey)
-		c.Assert(err != nil, check.Equals, tt.outError, comment)
+			err = safeBackend.DeleteKey(tt.inBucket, tt.inKey)
+			c.Assert(err != nil, check.Equals, tt.outError, comment)
 
-		err = safeBackend.DeleteRange(ctx, tt.inKey, tt.inKey)
-		c.Assert(err != nil, check.Equals, tt.outError, comment)
+			err = safeBackend.DeleteBucket(tt.inBucket, tt.inKey)
+			c.Assert(err != nil, check.Equals, tt.outError, comment)
+		}
+
+		if tt.inKey != "" {
+			err := safeBackend.AcquireLock(tt.inKey, Forever)
+			c.Assert(err != nil, check.Equals, tt.outError, comment)
+
+			err = safeBackend.ReleaseLock(tt.inKey)
+			c.Assert(err != nil, check.Equals, tt.outError, comment)
+		}
 	}
+
 }
 
 type nopBackend struct {
 }
 
-func (n *nopBackend) Get(_ context.Context, _ []byte) (*Item, error) {
-	return &Item{}, nil
+func (n *nopBackend) GetKeys(bucket []string) ([]string, error) {
+	return []string{"foo"}, nil
 }
 
-func (n *nopBackend) GetRange(_ context.Context, startKey []byte, endKey []byte, limit int) (*GetResult, error) {
-	return &GetResult{Items: []Item{Item{Key: []byte("foo"), Value: []byte("bar")}}}, nil
+func (n *nopBackend) GetItems(bucket []string, opts ...OpOption) ([]Item, error) {
+	return []Item{Item{Key: "foo", Value: []byte("bar")}}, nil
 }
 
-func (n *nopBackend) Create(_ context.Context, _ Item) (*Lease, error) {
-	return &Lease{}, nil
-}
-
-func (n *nopBackend) Put(_ context.Context, _ Item) (*Lease, error) {
-	return &Lease{}, nil
-}
-
-func (n *nopBackend) Update(_ context.Context, _ Item) (*Lease, error) {
-	return &Lease{}, nil
-}
-
-func (n *nopBackend) CompareAndSwap(_ context.Context, _ Item, _ Item) (*Lease, error) {
-	return &Lease{}, nil
-}
-
-func (n *nopBackend) Delete(_ context.Context, _ []byte) error {
+func (n *nopBackend) CreateVal(bucket []string, key string, val []byte, ttl time.Duration) error {
 	return nil
 }
 
-func (n *nopBackend) DeleteRange(_ context.Context, _ []byte, _ []byte) error {
+func (n *nopBackend) UpsertVal(bucket []string, key string, val []byte, ttl time.Duration) error {
 	return nil
 }
 
-func (n *nopBackend) KeepAlive(_ context.Context, _ Lease, _ time.Time) error {
+func (n *nopBackend) UpsertItems(bucket []string, items []Item) error {
+	return nil
+}
+
+func (n *nopBackend) GetVal(path []string, key string) ([]byte, error) {
+	return []byte("foo"), nil
+}
+
+func (n *nopBackend) CompareAndSwapVal(bucket []string, key string, val []byte, prevVal []byte, ttl time.Duration) error {
+	return nil
+}
+
+func (n *nopBackend) DeleteKey(bucket []string, key string) error {
+	return nil
+}
+
+func (n *nopBackend) DeleteBucket(path []string, bkt string) error {
+	return nil
+}
+
+func (n *nopBackend) AcquireLock(token string, ttl time.Duration) error {
+	return nil
+}
+
+func (n *nopBackend) ReleaseLock(token string) error {
 	return nil
 }
 
@@ -124,15 +149,4 @@ func (n *nopBackend) Close() error {
 
 func (n *nopBackend) Clock() clockwork.Clock {
 	return clockwork.NewFakeClock()
-}
-
-// NewWatcher returns a new event watcher
-func (n *nopBackend) NewWatcher(ctx context.Context, watch Watch) (Watcher, error) {
-	return nil, nil
-}
-
-// CloseWatchers closes all the watchers
-// without closing the backend
-func (n *nopBackend) CloseWatchers() {
-
 }

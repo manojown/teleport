@@ -12,13 +12,13 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
 */
 
 package state
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -184,7 +184,7 @@ func (cs *CachingAuthClient) fetchAll() error {
 	errors = append(errors, err)
 	if err == nil {
 		for _, ns := range namespaces {
-			_, err = cs.GetNodes(ns.Metadata.Name)
+			_, err = cs.GetNodes(ns.Metadata.Name, services.SkipValidation())
 			errors = append(errors, err)
 		}
 	}
@@ -192,9 +192,9 @@ func (cs *CachingAuthClient) fetchAll() error {
 	errors = append(errors, err)
 	_, err = cs.GetReverseTunnels()
 	errors = append(errors, err)
-	_, err = cs.GetCertAuthorities(services.UserCA, false)
+	_, err = cs.GetCertAuthorities(services.UserCA, false, services.SkipValidation())
 	errors = append(errors, err)
-	_, err = cs.GetCertAuthorities(services.HostCA, false)
+	_, err = cs.GetCertAuthorities(services.HostCA, false, services.SkipValidation())
 	errors = append(errors, err)
 	_, err = cs.GetUsers()
 	errors = append(errors, err)
@@ -209,7 +209,7 @@ func (cs *CachingAuthClient) fetchAll() error {
 			continue
 		}
 		clusters[clusterName] = true
-		_, err = cs.GetTunnelConnections(clusterName)
+		_, err = cs.GetTunnelConnections(clusterName, services.SkipValidation())
 		errors = append(errors, err)
 	}
 	return trace.NewAggregate(errors...)
@@ -391,15 +391,15 @@ func nodeKey(namespace, name string) string {
 }
 
 // GetNodes is a part of auth.AccessPoint implementation
-func (cs *CachingAuthClient) GetNodes(namespace string) (nodes []services.Server, err error) {
+func (cs *CachingAuthClient) GetNodes(namespace string, opts ...services.MarshalOption) (nodes []services.Server, err error) {
 	cs.fetch(params{
 		key: nodesKey(namespace),
 		fetch: func() error {
-			nodes, err = cs.ap.GetNodes(namespace)
+			nodes, err = cs.ap.GetNodes(namespace, opts...)
 			return err
 		},
 		useCache: func() error {
-			nodes, err = cs.presence.GetNodes(namespace)
+			nodes, err = cs.presence.GetNodes(namespace, opts...)
 			return err
 		},
 		updateCache: func() (keys []string, cerr error) {
@@ -410,10 +410,10 @@ func (cs *CachingAuthClient) GetNodes(namespace string) (nodes []services.Server
 			}
 			for _, node := range nodes {
 				cs.setTTL(node)
-				if err := cs.presence.UpsertNode(node); err != nil {
-					return nil, trace.Wrap(err)
-				}
 				keys = append(keys, nodeKey(namespace, node.GetName()))
+			}
+			if err := cs.presence.UpsertNodes(namespace, nodes); err != nil {
+				return nil, trace.Wrap(err)
 			}
 			return
 		},
@@ -497,15 +497,15 @@ func (cs *CachingAuthClient) GetProxies() (proxies []services.Server, err error)
 }
 
 // GetCertAuthority is a part of auth.AccessPoint implementation
-func (cs *CachingAuthClient) GetCertAuthority(id services.CertAuthID, loadKeys bool) (ca services.CertAuthority, err error) {
+func (cs *CachingAuthClient) GetCertAuthority(id services.CertAuthID, loadKeys bool, opts ...services.MarshalOption) (ca services.CertAuthority, err error) {
 	cs.fetch(params{
 		key: certKey(id, loadKeys),
 		fetch: func() error {
-			ca, err = cs.ap.GetCertAuthority(id, loadKeys)
+			ca, err = cs.ap.GetCertAuthority(id, loadKeys, opts...)
 			return err
 		},
 		useCache: func() error {
-			ca, err = cs.trust.GetCertAuthority(id, loadKeys)
+			ca, err = cs.trust.GetCertAuthority(id, loadKeys, opts...)
 			return err
 		},
 		updateCache: func() (keys []string, cerr error) {
@@ -540,15 +540,15 @@ func certKey(id services.CertAuthID, loadKeys bool) string {
 }
 
 // GetCertAuthorities is a part of auth.AccessPoint implementation
-func (cs *CachingAuthClient) GetCertAuthorities(ct services.CertAuthType, loadKeys bool) (cas []services.CertAuthority, err error) {
+func (cs *CachingAuthClient) GetCertAuthorities(ct services.CertAuthType, loadKeys bool, opts ...services.MarshalOption) (cas []services.CertAuthority, err error) {
 	cs.fetch(params{
 		key: certsKey(ct, loadKeys),
 		fetch: func() error {
-			cas, err = cs.ap.GetCertAuthorities(ct, loadKeys)
+			cas, err = cs.ap.GetCertAuthorities(ct, loadKeys, services.SkipValidation())
 			return err
 		},
 		useCache: func() error {
-			cas, err = cs.trust.GetCertAuthorities(ct, loadKeys)
+			cas, err = cs.trust.GetCertAuthorities(ct, loadKeys, services.SkipValidation())
 			return err
 		},
 		updateCache: func() (keys []string, cerr error) {
@@ -576,6 +576,34 @@ func usersKey() string {
 
 func userKey(username string) string {
 	return strings.Join([]string{"users", username}, "/")
+}
+
+// GetUser is a part of auth.AccessPoint implementation.
+func (cs *CachingAuthClient) GetUser(name string) (user services.User, err error) {
+	cs.fetch(params{
+		key: userKey(name),
+		fetch: func() error {
+			user, err = cs.ap.GetUser(name)
+			return err
+		},
+		useCache: func() error {
+			user, err = cs.identity.GetUser(name)
+			return err
+		},
+		updateCache: func() (keys []string, cerr error) {
+			if err := cs.identity.DeleteUser(name); err != nil {
+				if !trace.IsNotFound(err) {
+					return nil, trace.Wrap(err)
+				}
+			}
+			cs.setTTL(user)
+			if err := cs.identity.UpsertUser(user); err != nil {
+				return nil, trace.Wrap(err)
+			}
+			return
+		},
+	})
+	return
 }
 
 // GetUsers is a part of auth.AccessPoint implementation
@@ -612,14 +640,14 @@ func (cs *CachingAuthClient) GetUsers() (users []services.User, err error) {
 // GetTunnelConnections is a part of auth.AccessPoint implementation
 // GetTunnelConnections are not using recent cache as they are designed
 // to be called periodically and always return fresh data
-func (cs *CachingAuthClient) GetTunnelConnections(clusterName string) (conns []services.TunnelConnection, err error) {
+func (cs *CachingAuthClient) GetTunnelConnections(clusterName string, opts ...services.MarshalOption) (conns []services.TunnelConnection, err error) {
 	err = cs.try(func() error {
-		conns, err = cs.ap.GetTunnelConnections(clusterName)
+		conns, err = cs.ap.GetTunnelConnections(clusterName, opts...)
 		return err
 	})
 	if err != nil {
 		if trace.IsConnectionProblem(err) {
-			return cs.presence.GetTunnelConnections(clusterName)
+			return cs.presence.GetTunnelConnections(clusterName, opts...)
 		}
 		return conns, err
 	}
@@ -640,9 +668,9 @@ func (cs *CachingAuthClient) GetTunnelConnections(clusterName string) (conns []s
 // GetAllTunnelConnections is a part of auth.AccessPoint implementation
 // GetAllTunnelConnections are not using recent cache, as they are designed
 // to be called periodically and always return fresh data
-func (cs *CachingAuthClient) GetAllTunnelConnections() (conns []services.TunnelConnection, err error) {
+func (cs *CachingAuthClient) GetAllTunnelConnections(opts ...services.MarshalOption) (conns []services.TunnelConnection, err error) {
 	err = cs.try(func() error {
-		conns, err = cs.ap.GetAllTunnelConnections()
+		conns, err = cs.ap.GetAllTunnelConnections(opts...)
 		return err
 	})
 	if err != nil {
@@ -819,11 +847,19 @@ func (cs *CachingAuthClient) try(f func() error) error {
 		return trace.ConnectionProblem(fmt.Errorf("backoff"), "backing off due to recent errors")
 	}
 	accessPointRequests.Inc()
-	err := trace.ConvertSystemError(f())
+	err := f()
+	if err != nil {
+		// EOF in this context means connection problem
+		if trace.Unwrap(err) == io.EOF {
+			err = trace.ConnectionProblem(trace.Unwrap(err), "EOF")
+		} else {
+			err = trace.ConvertSystemError(err)
+		}
+	}
 	accessPointLatencies.Observe(mdiff(start))
 	if trace.IsConnectionProblem(err) {
 		cs.setLastErrorTime(time.Now())
-		cs.Warningf("Connection problem: failed connect to the auth servers, using local cache.")
+		cs.Warningf("Connection problem (%v) failed connect to the auth servers, using local cache.", err)
 	}
 	return err
 }

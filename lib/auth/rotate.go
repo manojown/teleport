@@ -1,5 +1,5 @@
 /*
-Copyright 2018-2019 Gravitational, Inc.
+Copyright 2018 Gravitational, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -199,16 +199,13 @@ func (a *AuthServer) RotateCertAuthority(req RotateRequest) error {
 	if err := req.CheckAndSetDefaults(a.clock); err != nil {
 		return trace.Wrap(err)
 	}
-	clusterName, err := a.GetClusterName()
-	if err != nil {
-		return trace.Wrap(err)
-	}
+	clusterName := a.clusterName.GetClusterName()
 
 	caTypes := req.Types()
 	for _, caType := range caTypes {
-		existing, err := a.Trust.GetCertAuthority(services.CertAuthID{
+		existing, err := a.GetCertAuthority(services.CertAuthID{
 			Type:       caType,
-			DomainName: clusterName.GetClusterName(),
+			DomainName: clusterName,
 		}, true)
 		if err != nil {
 			return trace.Wrap(err)
@@ -246,18 +243,13 @@ func (a *AuthServer) RotateExternalCertAuthority(ca services.CertAuthority) erro
 	if ca == nil {
 		return trace.BadParameter("missing certificate authority")
 	}
-	clusterName, err := a.GetClusterName()
-	if err != nil {
-		return trace.Wrap(err)
-	}
-
 	// this is just an extra precaution against local admins,
 	// because this is additionally enforced by RBAC as well
-	if ca.GetClusterName() == clusterName.GetClusterName() {
+	if ca.GetClusterName() == a.clusterName.GetClusterName() {
 		return trace.BadParameter("can not rotate local certificate authority")
 	}
 
-	existing, err := a.Trust.GetCertAuthority(services.CertAuthID{
+	existing, err := a.GetCertAuthority(services.CertAuthID{
 		Type:       ca.GetType(),
 		DomainName: ca.GetClusterName(),
 	}, false)
@@ -283,14 +275,11 @@ func (a *AuthServer) RotateExternalCertAuthority(ca services.CertAuthority) erro
 // does nothing if no rotation parameters were set up
 // or it is too early to rotate per schedule
 func (a *AuthServer) autoRotateCertAuthorities() error {
-	clusterName, err := a.GetClusterName()
-	if err != nil {
-		return trace.Wrap(err)
-	}
+	clusterName := a.clusterName.GetClusterName()
 	for _, caType := range []services.CertAuthType{services.HostCA, services.UserCA} {
-		ca, err := a.Trust.GetCertAuthority(services.CertAuthID{
+		ca, err := a.GetCertAuthority(services.CertAuthID{
 			Type:       caType,
-			DomainName: clusterName.GetClusterName(),
+			DomainName: clusterName,
 		}, true)
 		if err != nil {
 			return trace.Wrap(err)
@@ -324,7 +313,7 @@ func (a *AuthServer) autoRotate(ca services.CertAuthority) error {
 			ca:          ca,
 			targetPhase: services.RotationPhaseUpdateClients,
 			mode:        services.RotationModeAuto,
-			gracePeriod: rotation.GracePeriod.Duration(),
+			gracePeriod: rotation.GracePeriod.Duration,
 			schedule:    rotation.Schedule,
 		}
 	case services.RotationPhaseUpdateClients:
@@ -336,7 +325,7 @@ func (a *AuthServer) autoRotate(ca services.CertAuthority) error {
 			ca:          ca,
 			targetPhase: services.RotationPhaseUpdateServers,
 			mode:        services.RotationModeAuto,
-			gracePeriod: rotation.GracePeriod.Duration(),
+			gracePeriod: rotation.GracePeriod.Duration,
 			schedule:    rotation.Schedule,
 		}
 	case services.RotationPhaseUpdateServers:
@@ -348,7 +337,7 @@ func (a *AuthServer) autoRotate(ca services.CertAuthority) error {
 			ca:          ca,
 			targetPhase: services.RotationPhaseStandby,
 			mode:        services.RotationModeAuto,
-			gracePeriod: rotation.GracePeriod.Duration(),
+			gracePeriod: rotation.GracePeriod.Duration,
 			schedule:    rotation.Schedule,
 		}
 	default:
