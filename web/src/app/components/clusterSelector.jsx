@@ -15,55 +15,61 @@ limitations under the License.
 */
 
 import React from 'react';
-import reactor from 'app/reactor';
 import siteGetters from 'app/flux/sites/getters';
 import appGetters from 'app/flux/app/getters';
 import DropDown from './dropdown.jsx';
-import { setSiteId, refresh } from 'app/flux/app/actions';
+import { fetchNodes } from 'app/flux/nodes/actions';
+import { setSiteId } from 'app/flux/app/actions';
+import { fetchActiveSessions } from 'app/flux/sessions/actions';
 import { isUUID } from 'app/lib/objectUtils';
+import { connect } from 'nuclear-js-react-addons';
 
-const ClusterSelector = React.createClass({
 
-  mixins: [reactor.ReactMixin],
+class ClusterSelector extends React.Component {
 
-  getDataBindings() {
-    return {                  
-      sites: siteGetters.sites,
-      siteId: appGetters.siteId
-    }
-  },
-  
-  onChangeSite(value) {
-    setSiteId(value);      
-    refresh();
-  },
+  onChangeSite = value => {
+    setSiteId(value);
+    fetchNodes();
+    fetchActiveSessions();
+  }
 
   render() {
-    let { sites, siteId } = this.state;
-    
-    let siteOptions = sites.map(s => ({
-      label: s.name,
+    const { sites, siteId } = this.props;
+    console.log("---------- data us",this.props,sites)
+    const siteOptions = sites.map(s => {
+      console.log("sssss",s.name,s.alias);
+      return ({
+      label: s.alias,
       value: s.name
-    }));
-    
+    })});
+
     if (siteOptions.length === 1 && isUUID(siteOptions[0].value)){
       siteOptions[0].label = location.hostname;
     }
-        
-    return (                  
-      <div className="grv-clusters-selector">   
+
+    return (
+      <div className="grv-clusters-selector">
         <div className="m-r-sm">Cluster:</div>
         <DropDown
           className="m-r-sm"
-          size="sm"      
+          size="sm"
           align="right"
           onChange={this.onChangeSite}
           value={siteId}
           options={siteOptions}
-          />                      
-      </div>                                                                              
+          />
+      </div>
     );
   }
-});
+}
 
-export default ClusterSelector;
+function mapStateToProps() {
+  return {
+    sites: siteGetters.sites,
+    siteId: appGetters.siteId
+  }
+}
+
+export default connect(mapStateToProps)(ClusterSelector);
+
+

@@ -19,37 +19,41 @@ import classnames from 'classnames';
 import { connect } from 'nuclear-js-react-addons';
 import appGetters from 'app/flux/app/getters';
 import { platform } from 'app/services/browser';
-import { refresh } from 'app/flux/app/actions';
 import NavLeftBar from './navLeftBar';
 import AjaxPoller from './dataProvider.jsx';
 import { Failed } from './msgPage.jsx';
 import Indicator from './indicator.jsx';
+import { fetchActiveSessions } from 'app/flux/sessions/actions';
 
 class App extends Component {
-      
-  render() {    
+
+  onRefresh = () => {
+    return fetchActiveSessions();
+  }
+
+  render() {
     const { router, initAttempt } = this.props;
     const { isProcessing, isSuccess, isFailed, message } = initAttempt;
-        
-    if (isProcessing) {      
+
+    if (isProcessing) {
       return <Indicator type={'bounce'} />
     }
 
-    
+
     if (isFailed) {
       return <Failed message={message}/>
     }
-    
+
     const className = classnames('grv-tlpt grv-flex grv-flex-row', {
       '--isLinux': platform.isLinux,
       '--isWin': platform.isWin,
-      '--isMac': platform.isMac      
+      '--isMac': platform.isMac
     })
 
     if (isSuccess) {
       return (
         <div className={className}>
-          <AjaxPoller onFetch={refresh} time={4000}/>          
+          <AjaxPoller onFetch={this.onRefresh} time={3000}/>
           {this.props.CurrentSessionHost}
           <NavLeftBar router={router}/>
           {this.props.children}
@@ -62,8 +66,8 @@ class App extends Component {
 }
 
 function mapStateToProps() {
-  return {    
-    initAttempt: appGetters.initAttempt      
+  return {
+    initAttempt: appGetters.initAttempt
   }
 }
 

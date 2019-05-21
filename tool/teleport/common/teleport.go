@@ -18,6 +18,7 @@ package common
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/user"
@@ -31,9 +32,8 @@ import (
 	"github.com/gravitational/teleport/lib/service"
 	"github.com/gravitational/teleport/lib/sshutils/scp"
 	"github.com/gravitational/teleport/lib/utils"
-
 	"github.com/gravitational/trace"
-
+	_ "github.com/mattn/go-sqlite3"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -46,10 +46,17 @@ type Options struct {
 	InitOnly bool
 }
 
+func initDB() {
+	db, err := sql.Open("sqlite3", "/var/lib/teleport/alias.db")
+	fmt.Println("error occered while cerate sqllite", err)
+	db.Exec(" CREATE TABLE  IF NOT EXISTS `clusters`(`hostname` VARCHAR(64) PRIMARY KEY NOT NULL,`alias` VARCHAR(64) NULL)")
+	db.Close()
+}
+
 // Run inits/starts the process according to the provided options
 func Run(options Options) (executedCommand string, conf *service.Config) {
 	var err error
-
+	initDB()
 	// configure trace's errors to produce full stack traces
 	isDebug, _ := strconv.ParseBool(os.Getenv(teleport.VerboseLogsEnvVar))
 	if isDebug {

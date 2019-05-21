@@ -25,36 +25,30 @@ import cfg from 'app/config';
 import { initAppStatus } from 'app/flux/status/actions';
 import { fetchNodes } from './../nodes/actions';
 import { fetchActiveSessions } from 'app/flux/sessions/actions';
+import Logger from 'app/lib/logger';
 
-const logger = require('app/lib/logger').create('flux/app');
+const logger = Logger.create('flux/app');
 
 export function addNavItem(item) {
   reactor.dispatch(ADD_NAV_ITEM, item);
 }
 
 export function setSiteId(siteId) {
-  reactor.dispatch(SET_SITE_ID, siteId);    
+  reactor.dispatch(SET_SITE_ID, siteId);
 }
 
-export function initApp(siteId, featureActivator) {         
-  initAppStatus.start();  
-  // get the list of available clusters        
-  return fetchInitData(siteId)  
+export function initApp(siteId, featureActivator) {
+  initAppStatus.start();
+  // get the list of available clusters
+  return fetchInitData(siteId)
     .done(() => {
       featureActivator.onload();
-      initAppStatus.success();      
+      initAppStatus.success();
     })
-    .fail(err => {      
+    .fail(err => {
       let msg = api.getErrorText(err);
       initAppStatus.fail(msg);
-    })      
-}
-
-export function refresh() {
-  return $.when(      
-    fetchActiveSessions(),
-    fetchNodes()
-  )    
+    })
 }
 
 export function fetchInitData(siteId) {
@@ -63,30 +57,27 @@ export function fetchInitData(siteId) {
       const selectedCluster = siteId || masterSiteId;
       setSiteId(selectedCluster);
       return $.when(fetchNodes(), fetchActiveSessions());
-    });  
+    });
 }
 
 export function fetchSites(){
   return api.get(cfg.api.sitesBasePath)
     .then(json => {
-      let masterSiteId = null;
-      let sites = json.sites;     
-      if (sites) {
-        masterSiteId = sites[0].name;
-      }
-              
-      reactor.dispatch(RECEIVE_CLUSTERS, sites);
-      
-      return masterSiteId;
+      console.log("this.get('siteId');",json);
+      const trusted = json.trusted || [];
+      const allClusters = [json.current, ...trusted];
+      reactor.dispatch(RECEIVE_CLUSTERS, allClusters);
+      return json.current.name;
   })
-  .fail(err => {      
+  .fail(err => {
     logger.error('fetchSites', err);
-  })    
+  })
 }
 
-export function  fetchUserContext(){
-  return api.get(cfg.api.userContextPath).done(json=>{      
+export function fetchUserContext(){
+  return api.get(cfg.api.userContextPath).done(json=>{
     reactor.dispatch(RECEIVE_USER, { name: json.userName, authType: json.authType });
     reactor.dispatch(RECEIVE_USERACL, json.userAcl);
-  })    
-}      
+    logger.info("Teleport ver:", json.version);
+  })
+}

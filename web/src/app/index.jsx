@@ -15,48 +15,67 @@ limitations under the License.
 */
 
 import React from 'react';
-import { render } from 'react-dom';
 import { Router } from 'react-router';
 import { Provider } from 'nuclear-js-react-addons';
-import history from './services/history';
 import cfg from './config';
+import history from './services/history';
 import reactor from './reactor';
 import { addRoutes } from './routes';
 import * as Features from './features';
 import { createSettings } from './features/settings';
+import  NodeList  from './components/editCluster/index.jsx';
+
 import FeatureActivator from './featureActivator';
 import { initApp } from './flux/app/actions';
 import App from './components/app.jsx';
-import { ensureUser } from './flux/user/actions';
+import userActions from './flux/user/actions';
+import './../styles/grv.scss';
 import './flux';
+import './vendor';
+
 
 cfg.init(window.GRV_CONFIG);
 history.init();
 
 const featureRoutes = [];
 const featureActivator = new FeatureActivator();
+// console.log("routes 1",featureRoutes)
 
 featureActivator.register(new Features.Ssh(featureRoutes));
-featureActivator.register(new Features.Audit(featureRoutes));
-featureActivator.register(createSettings(featureRoutes))
+// console.log("routes 2",featureRoutes)
 
-const onEnterApp = nextState => {  
-  const { siteId } = nextState.params; 
+featureActivator.register(new Features.Audit(featureRoutes));
+// console.log("routes 3",featureRoutes)
+
+featureActivator.register(createSettings(featureRoutes))
+var editCluster = {
+  path : "/web/editcluster",
+  title: "Edit Cluster",
+  component:function(){
+    return <NodeList/>
+  }
+}
+console.log("routes 4",featureRoutes)
+featureRoutes.push(editCluster)
+
+const onEnterApp = nextState => {
+  const { siteId } = nextState.params;
   initApp(siteId, featureActivator)
 }
 
 const routes = [{
   path: cfg.routes.app,
-  onEnter: ensureUser,
+  onEnter: userActions.ensureUser,
   component: App,
   childRoutes: [{
     onEnter: onEnterApp,
     childRoutes: featureRoutes
   }]
 }];
+const Root = () => (
+  <Provider reactor={reactor}>
+    <Router history={history.original()} routes={addRoutes(routes)} />
+  </Provider>
+)
 
-render((  
-  <Provider reactor={reactor}>        
-    <Router history={history.original()} routes={addRoutes(routes)}/>            
-  </Provider>  
-), document.getElementById("app"));
+export default Root;

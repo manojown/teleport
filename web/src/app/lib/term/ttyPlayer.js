@@ -18,7 +18,7 @@ import $ from 'jQuery';
 import BufferModule from 'buffer/';
 import api from 'app/services/api';
 import Tty from './tty';
-import { EventTypeEnum } from './enums';
+import { EventTypeEnum, TermEventEnum } from './enums';
 import Logger from 'app/lib/logger';
 
 const logger = Logger.create('TtyPlayer');
@@ -31,45 +31,55 @@ export const MAX_SIZE = 5242880; // 5mg
 
 export class EventProvider{
   constructor({url}){
-    this.url = url;    
+    this.url = url;
     this.events = [];
   }
-    
-  getLengthInTime(){
-    const length = this.events.length;
-    if(length === 0) {
+
+  getDuration() {
+    const eventCount = this.events.length;
+    if(eventCount === 0) {
       return 0;
     }
 
-    return this.events[length-1].msNormalized;
+    return this.events[eventCount-1].msNormalized;
   }
 
   init() {
-    const url = this.url + URL_PREFIX_EVENTS;
-    return api.get(url).then(json => {
-      if (!json.events) {
+    return this._fetchEvents().then(events => {
+      this.events = events;
+      const printEvents = this.events.filter(onlyPrintEvents);
+      if (printEvents.length === 0) {
         return;
       }
 
-      const events = this._createPrintEvents(json.events);
-      if (events.length === 0) {
-        return;
-      }
-      
-      this.events = this._normalizeEventsByTime(events);
-      return this._fetchBytes();
+      return this._fetchContent(printEvents).then(buffer => {
+        this._populatePrintEvents(buffer, printEvents);
+      });
     });
   }
-    
-  _fetchBytes() {    
-    // need to calclulate the size of the session in bytes to know how many 
+
+  _fetchEvents() {
+    const url = this.url + URL_PREFIX_EVENTS;
+    return api.get(url).then(json => {
+      if (!json.events) {
+        return [];
+      }
+
+      return this._createEvents(json.events);
+    })
+  }
+
+  _fetchContent(events) {
+    // calclulate the size of the session in bytes to know how many
     // chunks to load due to maximum chunk size.
-    let offset = this.events[0].offset;
-    const end = this.events.length - 1;    
-    const totalSize = this.events[end].offset - offset + this.events[end].bytes;    
+    let offset = events[0].offset;
+    const end = events.length - 1;
+    const totalSize = events[end].offset - offset + events[end].bytes;
     const chunkCount = Math.ceil(totalSize / MAX_SIZE);
+
+    // create a fetch request for each chunk
     const promises = [];
-    for (let i = 0; i < chunkCount; i++){      
+    for (let i = 0; i < chunkCount; i++){
       const url = `${this.url}/stream?offset=${offset}&bytes=${MAX_SIZE}`;
       promises.push(api.ajax({
         url,
@@ -79,95 +89,98 @@ export class EventProvider{
 
       offset = offset + MAX_SIZE;
     }
-    
-    // wait for all chunks to load and then merge all in one
+
+    // fetch all session chunks and then merge them in one
     return $.when(...promises)
       .then((...responses) => {
         responses = promises.length === 1 ? [[responses]] : responses;
         const allBytes = responses.reduce((byteStr, r) => byteStr + r[0], '');
         return new Buffer(allBytes);
-      })
-      .then(buffer => this._processByteStream(buffer));          
+      });
   }
 
-  _processByteStream(buffer){
-    let byteStrOffset = this.events[0].bytes;    
-    this.events[0].data = buffer.slice(0, byteStrOffset).toString('utf8');
-    for(var i = 1; i < this.events.length; i++){
-      let {bytes} = this.events[i];
-      this.events[i].data = buffer.slice(byteStrOffset, byteStrOffset + bytes).toString('utf8');
+  _populatePrintEvents(buffer, events){
+    let byteStrOffset = events[0].bytes;
+    events[0].data = buffer.slice(0, byteStrOffset).toString('utf8');
+    for(var i = 1; i < events.length; i++){
+      let {bytes} = events[i];
+      events[i].data = buffer.slice(byteStrOffset, byteStrOffset + bytes).toString('utf8');
       byteStrOffset += bytes;
-    }    
+    }
   }
-    
-  _createPrintEvents(json) {          
+
+  _createEvents(json) {
     let w, h;
     let events = [];
 
     // filter print events and ensure that each has the right screen size and valid values
     for(let i = 0; i < json.length; i++){
-
-      let { ms, event, offset, time, bytes } = json[i];
+      const { ms, event, offset, time, bytes } = json[i];
 
       // grab new screen size for the next events
       if(event === EventTypeEnum.RESIZE || event === EventTypeEnum.START){
         [w, h] = json[i].size.split(':');
       }
-      
+
       // session has ended, stop here
       if (event === EventTypeEnum.END) {
+        const start = new Date(events[0].time);
+        const end = new Date(time);
+        const duration = end.getTime() - start.getTime();
+        events.push({
+          eventType: event,
+          ms: duration,
+          time: new Date(time)
+        });
+
         break;
       }
 
-      // process only PRINT events      
+      // process only PRINT events
       if(event !== EventTypeEnum.PRINT){
         continue;
       }
 
-      let displayTime = this._formatDisplayTime(ms);
-
-      // use smaller numbers
-      ms =  ms > 0 ? Math.floor(ms / 10) : 0;
-
       events.push({
-        displayTime,
+        eventType: EventTypeEnum.PRINT,
         ms,
-        msNormalized: ms,
         bytes,
         offset,
         data: null,
         w: Number(w),
         h: Number(h),
         time: new Date(time)
-      });      
+      });
     }
 
-    return events;
+    return this._normalizeEventsByTime(events);
   }
 
-  _normalizeEventsByTime(events){    
+  _normalizeEventsByTime(events) {
+    if (!events || events.length === 0) {
+      return [];
+    }
+
+    events.forEach(e => {
+      e.displayTime = formatDisplayTime(e.ms);
+      e.ms = e.ms > 0 ? Math.floor(e.ms / 10) : 0;
+      e.msNormalized = e.ms;
+    })
+
     let cur = events[0];
     let tmp = [];
-    for (let i = 1; i < events.length; i++){        
-      let sameSize = cur.w === events[i].w && cur.h === events[i].h;
-      let delay = events[i].ms - cur.ms;
+    for (let i = 1; i < events.length; i++){
+      const sameSize = cur.w === events[i].w && cur.h === events[i].h;
+      const delay = events[i].ms - cur.ms;
 
       // merge events with tiny delay
       if(delay < 2 && sameSize ){
         cur.bytes += events[i].bytes;
         continue;
       }
-          
+
       // avoid long delays between chunks
-      if(delay >= 25 && delay < 50){
-        events[i].msNormalized = cur.msNormalized + 25;
-      }else if(delay >= 50 && delay < 100){
-        events[i].msNormalized = cur.msNormalized + 50;
-      }else if(delay >= 100){
-        events[i].msNormalized = cur.msNormalized + 100;
-      }else{
-        events[i].msNormalized = cur.msNormalized + delay;
-      }
+      events[i].msNormalized = cur.msNormalized + shortenTime(delay);
 
       tmp.push(cur);
       cur = events[i];
@@ -179,25 +192,40 @@ export class EventProvider{
 
     return tmp;
   }
+}
 
-  _formatDisplayTime(ms){
-    if(ms < 0){
-      return '00:00';
-    }
-
-    let totalSec = Math.floor(ms / 1000);
-    let totalDays = (totalSec % 31536000) % 86400;
-    let h = Math.floor(totalDays / 3600);
-    let m = Math.floor((totalDays % 3600) / 60);
-    let s = (totalDays % 3600) % 60;
-
-    m = m > 9 ? m : '0' + m;
-    s = s > 9 ? s : '0' + s;
-    h = h > 0 ? h + ':' : '';
-
-    return `${h}${m}:${s}`;
+function formatDisplayTime(ms){
+  if(ms <= 0){
+    return '00:00';
   }
 
+  let totalSec = Math.floor(ms / 1000);
+  let totalDays = (totalSec % 31536000) % 86400;
+  let h = Math.floor(totalDays / 3600);
+  let m = Math.floor((totalDays % 3600) / 60);
+  let s = (totalDays % 3600) % 60;
+
+  m = m > 9 ? m : '0' + m;
+  s = s > 9 ? s : '0' + s;
+  h = h > 0 ? h + ':' : '';
+
+  return `${h}${m}:${s}`;
+}
+
+function shortenTime(value) {
+  if (value >= 25 && value < 50) {
+    return 25;
+  } else if (value >= 50 && value < 100) {
+    return  50;
+  } else if (value >= 100) {
+    return 100;
+  } else {
+    return value;
+  }
+}
+
+function onlyPrintEvents(e) {
+  return e.eventType === EventTypeEnum.PRINT;
 }
 
 export class TtyPlayer extends Tty {
@@ -205,7 +233,7 @@ export class TtyPlayer extends Tty {
     super({});
     this.currentEventIndex = 0;
     this.current = 0;
-    this.length = -1;
+    this.duration = 0;
     this.isPlaying = false;
     this.isError = false;
     this.isReady = false;
@@ -221,10 +249,6 @@ export class TtyPlayer extends Tty {
   }
 
   // override
-  resize(){
-  }
-
-  // override
   connect(){
     this._setStatusFlag({isLoading: true});
     this._eventProvider.init()
@@ -233,25 +257,25 @@ export class TtyPlayer extends Tty {
         this._setStatusFlag({isReady: true});
       })
       .fail(err => {
-        logger.error('unable to init event provider', err);                
-        this.handleError(err);                          
+        logger.error('unable to init event provider', err);
+        this.handleError(err);
       })
       .always(this._change.bind(this));
 
     this._change();
   }
 
-  handleError(err) {    
+  handleError(err) {
     this._setStatusFlag({
       isError: true,
       errText: api.getErrorText(err)
-    })    
+    })
   }
 
   _init(){
-    this.length = this._eventProvider.getLengthInTime();
+    this.duration = this._eventProvider.getDuration();
     this._eventProvider.events.forEach(item =>
-      this._posToEventIndexMap.push(item.msNormalized));    
+      this._posToEventIndexMap.push(item.msNormalized));
   }
 
   move(newPos){
@@ -262,12 +286,12 @@ export class TtyPlayer extends Tty {
     if(newPos === undefined){
       newPos = this.current + 1;
     }
-    
+
     if(newPos < 0){
       newPos = 0;
     }
 
-    if(newPos > this.length){      
+    if(newPos > this.duration){
       this.stop();
     }
 
@@ -280,28 +304,29 @@ export class TtyPlayer extends Tty {
     }
 
     const isRewind = this.currentEventIndex > newEventIndex;
-    
-    try {            
+
+    try {
       // we cannot playback the content within terminal so instead:
       // 1. tell terminal to reset.
       // 2. tell terminal to render 1 huge chunk that has everything up to current
       // location.
-      if (isRewind) {        
-        this.emit('reset');
+      if (isRewind) {
+        this.emit(TermEventEnum.RESET);
       }
 
       const from = isRewind ? 0 : this.currentEventIndex;
       const to = newEventIndex;
-      const events = this._eventProvider.events.slice(from, to);      
+      const events = this._eventProvider.events.slice(from, to);
+      const printEvents = events.filter(onlyPrintEvents);
 
-      this._display(events);
+      this._display(printEvents);
       this.currentEventIndex = newEventIndex;
       this.current = newPos;
       this._change();
     }
     catch(err){
       logger.error('move', err);
-      this.handleError(err);        
+      this.handleError(err);
     }
   }
 
@@ -319,9 +344,9 @@ export class TtyPlayer extends Tty {
     this.isPlaying = true;
 
     // start from the beginning if at the end
-    if(this.current === this.length){
+    if(this.current >= this.duration){
       this.current = STREAM_START_INDEX;
-      this.emit('reset');
+      this.emit(TermEventEnum.RESET);
     }
 
     this.timer = setInterval(this.move.bind(this), PLAY_SPEED);
@@ -340,8 +365,12 @@ export class TtyPlayer extends Tty {
   getEventCount() {
     return this._eventProvider.events.length;
   }
-  
-  _display(events) {        
+
+  _display(events) {
+    if (!events || events.length === 0) {
+      return;
+    }
+
     const groups = [{
       data: [events[0].data],
       w: events[0].w,
@@ -349,7 +378,7 @@ export class TtyPlayer extends Tty {
     }];
 
     let cur = groups[0];
-    
+
     // group events by screen size and construct 1 chunk of data per group
     for(let i = 1; i < events.length; i++){
       if(cur.w === events[i].w && cur.h === events[i].h){
@@ -369,15 +398,20 @@ export class TtyPlayer extends Tty {
     for(let i = 0; i < groups.length; i ++){
       const str = groups[i].data.join('');
       const {h, w} = groups[i];
-      if (str.length > 0) {                        
-        this.emit('resize', { h, w });                
-        this.emit('data', str);        
+      if (str.length > 0) {
+        this.emit(TermEventEnum.RESIZE, { h, w });
+        this.emit(TermEventEnum.DATA, str);
       }
     }
   }
 
   _setStatusFlag(newStatus){
-    const { isReady=false, isError=false, isLoading=false, errText='' } = newStatus;
+    const {
+      isReady = false,
+      isError = false,
+      isLoading = false,
+      errText = '' } = newStatus;
+
     this.isReady = isReady;
     this.isError = isError;
     this.isLoading = isLoading;
@@ -385,10 +419,10 @@ export class TtyPlayer extends Tty {
   }
 
   _getEventIndex(num){
-    const arr = this._posToEventIndexMap;    
+    const arr = this._posToEventIndexMap;
     var low = 0;
     var hi = arr.length - 1;
-    
+
     while (hi - low > 1) {
       const mid = Math.floor ((low + hi) / 2);
       if (arr[mid] < num) {
@@ -411,4 +445,4 @@ export class TtyPlayer extends Tty {
 }
 
 export default TtyPlayer;
-export { Buffer } 
+export { Buffer }

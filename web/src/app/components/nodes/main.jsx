@@ -20,30 +20,42 @@ import userAclGetters from 'app/flux/userAcl/getters';
 import nodeGetters from 'app/flux/nodes/getters';
 import appGetters from 'app/flux/app/getters';
 import NodeList from './nodeList.jsx';
+import { DocumentTitle } from './../documentTitle';
+import { getters as sshHistoryGetters } from 'app/flux/sshHistory/store';
 import withStorage from './../withStorage.jsx';
 
-const Nodes = props => {  
-  const { siteNodes, aclStore, sites, siteId, storage } = props;
-  const logins = aclStore.getSshLogins().toJS();  
+const Nodes = props => {
+  console.log("============--------------============");
+  
+  console.log("props",props);
+  console.log("============--------------============");
+  
+  const { siteNodes, sshHistory, aclStore, sites, siteId, storage } = props;
+  const logins = aclStore.getSshLogins().toJS();
   const nodeRecords = siteNodes.toJS();
-  return (   
+  const title = `${siteId} · Nodes`;
+  return (
     <div className="grv-page">
-      <NodeList
-        storage={storage}
-        siteId={siteId}
-        sites={sites} 
-        nodeRecords={nodeRecords} 
-        logins={logins}
-      />
+      <DocumentTitle title={title}>
+        <NodeList
+          sshHistory={sshHistory}
+          storage={storage}
+          siteId={siteId}
+          sites={sites}
+          nodeRecords={nodeRecords}
+          logins={logins}
+        />
+      </DocumentTitle>
     </div>
   );
-}  
+}
 
 function mapStateToProps() {
-  return {    
+  return {
     siteId: appGetters.siteId,
     siteNodes: nodeGetters.siteNodes,
-    aclStore: userAclGetters.userAcl     
+    aclStore: userAclGetters.userAcl,
+    sshHistory: sshHistoryGetters.store
   }
 }
 

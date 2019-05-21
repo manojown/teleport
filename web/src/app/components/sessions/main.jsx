@@ -17,39 +17,45 @@ limitations under the License.
 import React from 'react';
 import connect from './../connect';
 import { fetchSiteEventsWithinTimeRange } from 'app/flux/storedSessionsFilter/actions';
-import { storedSessionList, activeSessionList } from 'app/flux/sessions/getters';
-import { filter } from 'app/flux/storedSessionsFilter/getters';
+import settingGetters from 'app/flux/sessions/getters';
+import filterGetters from 'app/flux/storedSessionsFilter/getters';
+import appGetters from 'app/flux/app/getters';
 import AjaxPoller from './../dataProvider.jsx';
 import SessionList from './sessionList.jsx';
+import { DocumentTitle } from './../documentTitle';
 import withStorage from './../withStorage.jsx';
 
 class Sessions extends React.Component {
-    
+
   refresh = () => {
-    return fetchSiteEventsWithinTimeRange();    
+    return fetchSiteEventsWithinTimeRange();
   }
 
-  render() {            
-    const { storedSessions, activeSessions, storedSessionsFilter } = this.props;
-    return (      
-      <div className="grv-page grv-sessions">                                      
-        <SessionList
-          storage={this.props.storage}  
-          activeSessions={activeSessions}
-          storedSessions={storedSessions}
-          filter={storedSessionsFilter}
-        />
-        <AjaxPoller onFetch={this.refresh} />        
-      </div>        
+  render() {
+    const { siteId, storedSessions, activeSessions, storedSessionsFilter } = this.props;
+    const title = `${siteId} · Sessions`;
+    return (
+      <DocumentTitle title={title}>
+        <div className="grv-page grv-sessions">
+          <SessionList
+            storage={this.props.storage}
+            activeSessions={activeSessions}
+            storedSessions={storedSessions}
+            filter={storedSessionsFilter}
+          />
+          <AjaxPoller onFetch={this.refresh} />
+        </div>
+      </DocumentTitle>
     );
   }
 }
 
 function mapFluxToProps() {
-  return {    
-    activeSessions: activeSessionList,
-    storedSessions: storedSessionList,
-    storedSessionsFilter: filter
+  return {
+    siteId: appGetters.siteId,
+    activeSessions: settingGetters.activeSessionList,
+    storedSessions: settingGetters.storedSessionList,
+    storedSessionsFilter: filterGetters.filter
   }
 }
 

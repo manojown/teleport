@@ -15,14 +15,14 @@ limitations under the License.
 */
 
 @import "grv-vars";
-@import "~assets/css/animate.css";
-@import "~assets/css/datepicker3-1.6.0.css";
-@import "~assets/css/toastr-2.1.2.css";
-@import "~perfect-scrollbar/dist/css/perfect-scrollbar.css";
-@import "~xterm/dist/xterm.css";
+@import "~assets/css/animate";
+@import "~assets/css/datepicker3-1.6.0";
+@import "~perfect-scrollbar/dist/css/perfect-scrollbar";
+@import "~xterm/dist/xterm";
 @import "bootstrap/bootstrap";
 @import "bootstrap/bootstrap-social";
 @import 'inspinia/style';
+@import "grv-mixins";
 
 @import "grv-invite";
 @import "grv-login";
@@ -42,6 +42,7 @@ limitations under the License.
 @import "grv-datepicker";
 @import "grv-fonts";
 @import "grv-settings";
+@import "grv-file-transfer";
 
 .grv {
   background-color: white;
@@ -54,7 +55,7 @@ limitations under the License.
   }
 
   .grv-page {
-    padding: 0 5%;    
+    padding: 0 5%;
     display: flex;
     overflow: auto;
     flex: 1;
@@ -97,10 +98,16 @@ limitations under the License.
   float: right;
 }
 
+@include withMonoFont(".grv-sshserver-input input");
 .grv-sshserver-input{
   position: relative;
-  max-width: 200px;
+  width: 300px;
   float: right;
+
+
+  input {
+    padding-top: 7px !important;
+  }
 
   .grv-sshserver-input-errors{
     display: none;
@@ -141,7 +148,7 @@ limitations under the License.
   background: #dfe2e5;
   border: 0;
   border-radius: 1px;
-  span {    
+  span {
     vertical-align: super;
   }
 }
@@ -184,6 +191,6 @@ limitations under the License.
 
   > li > a {
     margin: 0;
-    padding: 5px 10px;    
+    padding: 5px 10px;
   }
 }

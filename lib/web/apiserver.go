@@ -20,6 +20,7 @@ package web
 
 import (
 	"compress/gzip"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -34,6 +35,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gravitational/roundtrip"
 	"github.com/gravitational/teleport"
 	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/client"
@@ -46,13 +48,12 @@ import (
 	"github.com/gravitational/teleport/lib/session"
 	"github.com/gravitational/teleport/lib/utils"
 	"github.com/gravitational/teleport/lib/web/ui"
-
-	"github.com/gravitational/roundtrip"
 	"github.com/gravitational/trace"
 	"github.com/jonboulle/clockwork"
 	"github.com/julienschmidt/httprouter"
 	"github.com/mailgun/lemma/secret"
 	"github.com/mailgun/ttlmap"
+	_ "github.com/mattn/go-sqlite3"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tstranex/u2f"
@@ -165,6 +166,9 @@ func NewHandler(cfg Config, opts ...HandlerOption) (*RewritingHandler, error) {
 
 	// list available sites
 	h.GET("/webapi/sites", h.WithAuth(h.getSites))
+
+	h.GET("/webapi/editcluster", h.WithAuth(h.getCluster))
+	h.PUT("/webapi/editcluster", h.WithAuth(h.saveCluster))
 
 	// Site specific API
 
@@ -1297,13 +1301,89 @@ func convertSites(rs []reversetunnel.RemoteSite) []site {
 // {"sites": {"name": "localhost", "last_connected": "RFC3339 time", "status": "active"}}
 //
 func (m *Handler) getSites(w http.ResponseWriter, r *http.Request, p httprouter.Params, c *SessionContext) (interface{}, error) {
+
+	// fmt.Println("========================")
+	// fmt.Println("sadasdasd", convertSites(m.cfg.Proxy.GetSites()))
+	// fmt.Println("========================")
+
 	return getSitesResponse{
 		Sites: convertSites(m.cfg.Proxy.GetSites()),
 	}, nil
 }
 
+type clusrterEdit struct {
+	HostName string `json:"hostname"`
+	Alias    string `json:"alias"`
+}
+
+type ClusterResponse struct {
+	Clusters []clusrterEdit `json:"sites"`
+}
+
+//get Cluster /Manoj
+func (m *Handler) getCluster(w http.ResponseWriter, r *http.Request, p httprouter.Params, c *SessionContext) (interface{}, error) {
+	var clusterResponse []clusrterEdit
+	// var clusrteredit clusrterEdit
+	db, err := sql.Open("sqlite3", "/var/lib/teleport/alias.db")
+	checkErr(err)
+	rows, err := db.Query("SELECT * FROM clusters")
+	checkErr(err)
+
+	var hostname string
+	var alias string
+	fmt.Println("rows is", rows)
+	for rows.Next() {
+		err = rows.Scan(&hostname, &alias)
+		checkErr(err)
+		eachOne := clusrterEdit{hostname, alias}
+		// fmt.Println("clusrteredit clusrteredit", eachOne)
+		clusterResponse = append(clusterResponse, eachOne)
+
+	}
+	rows.Close()
+	db.Close()
+
+	return ClusterResponse{
+		Clusters: clusterResponse,
+	}, nil
+}
+
+type successMessage struct {
+	Message string `json:"message"`
+}
+
+// save Cluster aliases /Manoj
+func (m *Handler) saveCluster(w http.ResponseWriter, r *http.Request, p httprouter.Params, c *SessionContext) (interface{}, error) {
+	db, err := sql.Open("sqlite3", "/var/lib/teleport/alias.db")
+	checkErr(err)
+
+	stmt, err := db.Prepare("INSERT  OR REPLACE INTO clusters(hostname, alias) values(?,?)")
+	checkErr(err)
+
+	decoder := json.NewDecoder(r.Body)
+	var cluster clusrterEdit
+	decoder.Decode(&cluster)
+
+	checkErr(err)
+
+	res, err := stmt.Exec(cluster.HostName, cluster.Alias)
+	fmt.Println(res)
+	checkErr(err)
+	db.Close()
+	return successMessage{
+		Message: "Cluster alias save successfully",
+	}, nil
+}
+
 type getSiteNamespacesResponse struct {
 	Namespaces []services.Namespace `json:"namespaces"`
+}
+
+func checkErr(err error) {
+	if err != nil {
+
+		panic(err)
+	}
 }
 
 /* getSiteNamespaces returns a list of namespaces for a given site
